@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - Bioinfo Platform{% endblock %}
+{% block content %}
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card system-card p-3 text-center">
+            <div class="text-muted">Disk Free</div>
+            <div class="value">{{ disk_free_gb }} GB</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card system-card p-3 text-center">
+            <div class="text-muted">RAM Available</div>
+            <div class="value">{{ ram_avail_gb }} GB</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card system-card p-3 text-center">
+            <div class="text-muted">RAM Usage</div>
+            <div class="value">{{ ram_percent }}%</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card system-card p-3 text-center">
+            <div class="text-muted">Projects</div>
+            <div class="value">{{ projects|length }}</div>
+        </div>
+    </div>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h4 class="mb-0">Projects</h4>
+    <a href="/projects/new" class="btn btn-primary">+ New Project</a>
+</div>
+
+{% if projects %}
+<div class="row">
+    {% for p in projects %}
+    <div class="col-md-4 mb-3">
+        <div class="card p-3">
+            <div class="d-flex justify-content-between align-items-start">
+                <h5 class="mb-1">{{ p.name }}</h5>
+                <span class="status-badge status-{{ p.status }}">{{ p.status }}</span>
+            </div>
+            <p class="text-muted small mb-2">{{ p.description[:80] }}{% if p.description|length > 80 %}...{% endif %}</p>
+            <div class="small text-muted mb-2">Created: {{ p.created_at[:10] }}</div>
+            <div>
+                <a href="/projects/{{ p.id }}" class="btn btn-outline-primary btn-sm">View</a>
+                <form method="post" action="/projects/{{ p.id }}/delete" class="d-inline"
+                      onsubmit="return confirm('Delete this project and all its data?')">
+                    <button class="btn btn-outline-danger btn-sm">Delete</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="card p-5 text-center text-muted">
+    <h5>No projects yet</h5>
+    <p>Create your first project to start analyzing single-cell data.</p>
+    <a href="/projects/new" class="btn btn-primary">Create Project</a>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,107 @@
+import os
+import json
+import numpy as np
+import pandas as pd
+from modules.base import BaseAnalysis
+
+class BulkQCAnalysis(BaseAnalysis):
+    MODULE_NAME = "bulk_qc"
+    DISPLAY_NAME = "Bulk RNA-seq QC"
+    DESCRIPTION = "Quality control for count matrices: library size, gene detection, outlier filtering"
+    INPUT_REQUIRES = []
+
+    def validate_input(self, adata):
+        return None
+
+    def run(self, input_path):
+        import scanpy as sc
+        from modules.visualization import scatter_plot, bar_plot
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        self.progress(5, "Loading count matrix...")
+        if input_path.endswith('.csv') or input_path.endswith('.txt'):
+            df = pd.read_csv(input_path, sep=None if input_path.endswith('.csv') else '\t', index_col=0)
+            adata = sc.AnnData(X=df.values.T, obs=pd.DataFrame(index=df.columns), var=pd.DataFrame(index=df.index))
+        else:
+            adata = sc.read_h5ad(input_path)
+
+        min_counts = int(self.params.get('min_counts', 100000))
+        min_genes = int(self.params.get('min_genes', 5000))
+        max_mt_pct = float(self.params.get('max_mt_pct', 20.0))
+
+        self.progress(20, "Computing QC metrics...")
+        adata.var['mt'] = adata.var_names.str.startswith('MT-')
+        sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], percent_top=None, log1p=False, inplace=True)
+
+        n_before = adata.n_obs
+        lib_sizes = adata.obs['total_counts'].values
+        n_genes_detected = adata.obs['n_genes_by_counts'].values
+        mt_pct = adata.obs['pct_counts_mt'].values if 'pct_counts_mt' in adata.obs.columns else np.zeros(n_before)
+
+        self.progress(40, "Filtering samples...")
+        mask = (lib_sizes >= min_counts) & (n_genes_detected >= min_genes) & (mt_pct <= max_mt_pct)
+        adata_filtered = adata[mask].copy()
+        n_after = adata_filtered.n_obs
+
+        self.progress(60, "Generating QC plots...")
+        plots_dir = os.path.join(self.project_dir, 'plots')
+        os.makedirs(plots_dir, exist_ok=True)
+        result_files = []
+
+        fig = make_subplots(rows=2, cols=2,
+            subplot_titles=['Library Size Distribution', 'Genes Detected',
+                           'MT Percentage', 'Library Size vs Genes Detected'])
+        fig.add_trace(go.Bar(x=list(range(n_before)), y=lib_sizes, marker_color='#1a237e', name='Library Size'), row=1, col=1)
+        fig.add_trace(go.Bar(x=list(range(n_before)), y=n_genes_detected, marker_color='#283593', name='Genes'), row=1, col=2)
+        fig.add_trace(go.Bar(x=list(range(n_before)), y=mt_pct, marker_color='#e53935', name='MT%'), row=2, col=1)
+        colors = ['#4caf50' if m else '#e53935' for m in mask]
+        fig.add_trace(go.Scattergl(x=lib_sizes, y=n_genes_detected, mode='markers',
+            marker=dict(color=colors, size=6), name='Samples'), row=2, col=2)
+        fig.update_layout(height=600, width=800, showlegend=False, title='Bulk RNA-seq QC Overview')
+        fpath = os.path.join(plots_dir, 'bulk_qc_overview.json')
+        with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
+        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': 'QC Overview'})
+
+        if n_before > n_after:
+            fig_r = go.Figure()
+            fig_r.add_trace(go.Bar(x=['Before', 'After'], y=[n_before, n_after], marker_color=['#e53935', '#4caf50']))
+            fig_r.update_layout(title='Sample Filtering', yaxis_title='Samples', width=400, height=300)
+            fpath = os.path.join(plots_dir, 'bulk_qc_filter.json')
+            with open(fpath, 'w') as f: json.dump(json.loads(fig_r.to_json()), f)
+            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': 'Sample Filtering'})
+
+        self.progress(80, "Running PCA for outlier detection...")
+        sc.pp.normalize_total(adata_filtered, target_sum=1e6)
+        sc.pp.log1p(adata_filtered)
+        sc.pp.pca(adata_filtered, n_comps=min(10, n_after - 1))
+        fig_pca = go.Figure()
+        pc = adata_filtered.obsm['X_pca']
+        fig_pca.add_trace(go.Scattergl(x=pc[:, 0], y=pc[:, 1], mode='markers+text',
+            text=adata_filtered.obs.index.tolist(), textposition='top center',
+            marker=dict(size=8, color='#1a237e')))
+        fig_pca.update_layout(title='PCA of Samples (after QC)', xaxis_title='PC1', yaxis_title='PC2',
+                             plot_bgcolor='white', width=600, height=500)
+        fpath = os.path.join(plots_dir, 'bulk_qc_pca.json')
+        with open(fpath, 'w') as f: json.dump(json.loads(fig_pca.to_json()), f)
+        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': 'Sample PCA'})
+
+        self.progress(90, "Saving output...")
+        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
+        os.makedirs(intermediate_dir, exist_ok=True)
+        output_path = os.path.join(intermediate_dir, 'bulk_qc_output.h5ad')
+        adata_filtered.write_h5ad(output_path)
+
+        self.progress(100, "Done")
+        return {
+            'output_adata': output_path,
+            'result_files': result_files,
+            'summary': {
+                'samples_before': n_before,
+                'samples_after': n_after,
+                'samples_removed': n_before - n_after,
+                'genes_total': adata_filtered.n_vars,
+                'median_lib_size': int(np.median(adata_filtered.obs['total_counts'])),
+                'median_genes': int(np.median(adata_filtered.obs['n_genes_by_counts'])),
+            }
+        }

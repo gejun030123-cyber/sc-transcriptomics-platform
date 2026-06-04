@@ -1,0 +1,83 @@
+import os
+import json
+from modules.base import BaseAnalysis
+
+class ProportionAnalysis(BaseAnalysis):
+    MODULE_NAME = "proportion"
+    DISPLAY_NAME = "Cell Proportions"
+    DESCRIPTION = "Cell proportion analysis across groups"
+    INPUT_REQUIRES = ['leiden']
+
+    def validate_input(self, adata):
+        return None
+
+    def run(self, input_path):
+        import scanpy as sc
+        import pandas as pd
+        from scipy.stats import chi2_contingency
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        self.progress(5, "Loading data...")
+        adata = sc.read_h5ad(input_path)
+        groupby = self.params.get('groupby', 'celltype')
+        batch_key = self.params.get('batch_key', 'batch')
+
+        if groupby not in adata.obs.columns:
+            groupby = 'leiden'
+
+        self.progress(30, "Computing cell proportions...")
+        ct = pd.crosstab(adata.obs[batch_key], adata.obs[groupby], normalize='index')
+        ct_abs = pd.crosstab(adata.obs[batch_key], adata.obs[groupby])
+
+        self.progress(50, "Running chi-squared test...")
+        chi2, pval, dof, expected = chi2_contingency(ct_abs)
+
+        self.progress(65, "Generating proportion plots...")
+        plots_dir = os.path.join(self.project_dir, 'plots')
+        results_dir = os.path.join(self.project_dir, 'results')
+        os.makedirs(plots_dir, exist_ok=True)
+        os.makedirs(results_dir, exist_ok=True)
+        result_files = []
+
+        fig = go.Figure()
+        for col in ct.columns:
+            fig.add_trace(go.Bar(name=str(col), x=ct.index.tolist(), y=ct[col].values))
+        fig.update_layout(barmode='stack', title='Cell Proportions by Group',
+                         xaxis_title=batch_key, yaxis_title='Proportion',
+                         plot_bgcolor='white', width=800, height=500)
+        fpath = os.path.join(plots_dir, 'proportion_stacked.json')
+        with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
+        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': 'Cell Proportions (Stacked)'})
+
+        fig2 = make_subplots(rows=1, cols=len(ct.index), subplot_titles=[str(x) for x in ct.index])
+        for i, idx in enumerate(ct.index, 1):
+            fig2.add_trace(go.Pie(labels=[str(x) for x in ct.columns], values=ct.loc[idx].values, hole=0.3),
+                          row=1, col=i)
+        fig2.update_layout(title='Cell Type Distribution per Batch', width=300 * len(ct.index), height=400)
+        fpath = os.path.join(plots_dir, 'proportion_pie.json')
+        with open(fpath, 'w') as f: json.dump(json.loads(fig2.to_json()), f)
+        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pie', 'label': 'Cell Type Distribution'})
+
+        ct_abs.to_csv(os.path.join(results_dir, 'cell_counts.csv'))
+        ct.to_csv(os.path.join(results_dir, 'cell_proportions.csv'))
+        result_files.append({'file_path': os.path.join(results_dir, 'cell_counts.csv'), 'file_type': 'csv', 'category': 'table', 'label': 'Cell Counts'})
+        result_files.append({'file_path': os.path.join(results_dir, 'cell_proportions.csv'), 'file_type': 'csv', 'category': 'table', 'label': 'Cell Proportions'})
+
+        self.progress(90, "Saving output...")
+        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
+        os.makedirs(intermediate_dir, exist_ok=True)
+        output_path = os.path.join(intermediate_dir, 'proportion_output.h5ad')
+        adata.write_h5ad(output_path)
+
+        self.progress(100, "Done")
+        return {
+            'output_adata': output_path,
+            'result_files': result_files,
+            'summary': {
+                'chi2': round(float(chi2), 2),
+                'p_value': float(pval),
+                'n_batches': len(ct.index),
+                'n_groups': len(ct.columns),
+            }
+        }

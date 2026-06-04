@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Upload Data - {{ project.name }}{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-8">
+        <h4 class="mb-3">Upload Data — {{ project.name }}</h4>
+        <div class="card p-4">
+            <div class="upload-zone" id="upload-zone">
+                <div class="mb-3">
+                    <svg width="48" height="48" fill="#1a237e" viewBox="0 0 16 16">
+                        <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                        <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
+                    </svg>
+                </div>
+                <h5>Drag & drop files here</h5>
+                <p class="text-muted">Supported: .h5ad, .h5 (10x), .mtx.gz, .csv, .txt</p>
+                <input type="file" id="file-input" class="d-none" accept=".h5ad,.h5,.csv,.txt,.gz" multiple>
+                <button class="btn btn-primary btn-sm" onclick="document.getElementById('file-input').click()">
+                    Choose Files
+                </button>
+            </div>
+            <div id="upload-progress" class="mt-3 d-none">
+                <div class="d-flex justify-content-between mb-1">
+                    <span id="upload-filename"></span>
+                    <span id="upload-percent">0%</span>
+                </div>
+                <div class="progress-container">
+                    <div class="progress-bar-inner" id="upload-bar" style="width:0%"></div>
+                </div>
+            </div>
+            <div id="upload-result" class="mt-3 d-none">
+                <div class="alert alert-success" id="upload-msg"></div>
+            </div>
+        </div>
+
+        <form method="post" enctype="multipart/form-data" class="mt-3">
+            <div class="card p-3">
+                <h6>Or use traditional upload:</h6>
+                <input type="file" name="file" class="form-control mb-2" required>
+                <button type="submit" class="btn btn-outline-primary btn-sm">Upload</button>
+            </div>
+        </form>
+
+        <a href="/projects/{{ project.id }}" class="btn btn-outline-secondary btn-sm mt-3">Back to Project</a>
+    </div>
+</div>
+
+<script>
+const zone = document.getElementById('upload-zone');
+const fileInput = document.getElementById('file-input');
+const progressDiv = document.getElementById('upload-progress');
+const resultDiv = document.getElementById('upload-result');
+
+zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+zone.addEventListener('drop', e => {
+    e.preventDefault();
+    zone.classList.remove('dragover');
+    if (e.dataTransfer.files.length) uploadFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => {
+    if (fileInput.files.length) uploadFile(fileInput.files[0]);
+});
+
+function uploadFile(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    progressDiv.classList.remove('d-none');
+    document.getElementById('upload-filename').textContent = file.name;
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/projects/{{ project.id }}/upload');
+    xhr.upload.onprogress = e => {
+        if (e.lengthComputable) {
+            const pct = Math.round(e.loaded / e.total * 100);
+            document.getElementById('upload-bar').style.width = pct + '%';
+            document.getElementById('upload-percent').textContent = pct + '%';
+        }
+    };
+    xhr.onload = () => {
+        progressDiv.classList.add('d-none');
+        resultDiv.classList.remove('d-none');
+        if (xhr.status === 200 || xhr.status === 302) {
+            document.getElementById('upload-msg').textContent = 'Upload successful! Redirecting...';
+            setTimeout(() => window.location.href = '/projects/{{ project.id }}', 1000);
+        } else {
+            document.getElementById('upload-msg').className = 'alert alert-danger';
+            document.getElementById('upload-msg').textContent = 'Upload failed: ' + xhr.statusText;
+        }
+    };
+    xhr.send(formData);
+}
+</script>
+{% endblock %}

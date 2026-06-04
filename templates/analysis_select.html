@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}{{ module.display }} - {{ project.name }}{% endblock %}
+{% block content %}
+<div class="row">
+    <div class="col-md-3">
+        <div class="card p-3">
+            <h6 class="mb-2">Pipeline Steps</h6>
+            {% for m in all_modules %}
+            <a href="/projects/{{ project.id }}/analyze/{{ m.name }}"
+               class="sidebar-module d-block text-decoration-none small {% if m.name == module.name %}active{% endif %}">
+                {{ m.display }}
+                {% set completed = completed_tasks|selectattr('module_name', 'equalto', m.name)|list %}
+                {% if completed %}<span class="float-end text-success">&#10003;</span>{% endif %}
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="col-md-9">
+        <div class="card p-4">
+            <h4>{{ module.display }}</h4>
+            <p class="text-muted">{{ module.desc }}</p>
+
+            <form method="post" class="param-form">
+                <div class="mb-3">
+                    <label class="form-label">Input Data</label>
+                    <select name="input_path" class="form-select" required>
+                        <option value="">-- Select input file --</option>
+                        {% for h in uploaded_h5ad %}
+                        <option value="{{ h.path }}">{{ h.name }} (uploaded)</option>
+                        {% endfor %}
+                        {% for t in completed_tasks %}
+                        {% if t.output_adata_path %}
+                        <option value="{{ t.output_adata_path }}" {% if loop.first %}selected{% endif %}>
+                            Output from: {{ t.module_name }} ({{ t.id }})
+                        </option>
+                        {% endif %}
+                        {% endfor %}
+                    </select>
+                </div>
+
+                {% for param in schema %}
+                <div class="mb-3">
+                    <label class="form-label">{{ param.label }}</label>
+                    {% if param.type == 'select' %}
+                    <select name="{{ param.key }}" class="form-select">
+                        {% for opt in param.options %}
+                        <option value="{{ opt }}" {% if opt == param.default %}selected{% endif %}>{{ opt }}</option>
+                        {% endfor %}
+                    </select>
+                    {% elif param.type == 'checkbox' %}
+                    <input type="checkbox" name="{{ param.key }}" class="form-check-input"
+                           {% if param.default %}checked{% endif %}>
+                    {% elif param.type == 'number' %}
+                    <input type="number" name="{{ param.key }}" class="form-control"
+                           value="{{ param.default }}" step="{{ param.step|default(1) }}">
+                    {% else %}
+                    <input type="text" name="{{ param.key }}" class="form-control"
+                           value="{{ param.default }}">
+                    {% endif %}
+                </div>
+                {% endfor %}
+
+                <button type="submit" class="btn btn-primary">Run Analysis</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
