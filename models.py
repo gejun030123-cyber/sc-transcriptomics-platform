@@ -29,26 +29,30 @@ class Project:
 
     def save(self):
         conn = _get_conn()
-        existing = conn.execute("SELECT id FROM projects WHERE id=?", (self.id,)).fetchone()
-        if existing:
-            conn.execute(
-                "UPDATE projects SET name=?, description=?, created_at=?, updated_at=?, status=?, metadata_json=? WHERE id=?",
-                (self.name, self.description, self.created_at, self.updated_at, self.status, self.metadata_json, self.id)
-            )
-        else:
-            conn.execute(
-                "INSERT INTO projects (id, name, description, created_at, updated_at, status, metadata_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (self.id, self.name, self.description, self.created_at, self.updated_at, self.status, self.metadata_json)
-            )
-        conn.commit()
-        conn.close()
+        try:
+            existing = conn.execute("SELECT id FROM projects WHERE id=?", (self.id,)).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE projects SET name=?, description=?, created_at=?, updated_at=?, status=?, metadata_json=? WHERE id=?",
+                    (self.name, self.description, self.created_at, self.updated_at, self.status, self.metadata_json, self.id)
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO projects (id, name, description, created_at, updated_at, status, metadata_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (self.id, self.name, self.description, self.created_at, self.updated_at, self.status, self.metadata_json)
+                )
+            conn.commit()
+        finally:
+            conn.close()
 
     def delete(self):
         conn = _get_conn()
-        conn.execute("DELETE FROM projects WHERE id=?", (self.id,))
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute("DELETE FROM projects WHERE id=?", (self.id,))
+            conn.commit()
+        finally:
+            conn.close()
 
     def to_dict(self):
         return {
@@ -60,8 +64,10 @@ class Project:
     @classmethod
     def get_by_id(cls, pid):
         conn = _get_conn()
-        row = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
-        conn.close()
+        try:
+            row = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        finally:
+            conn.close()
         if row:
             return cls(**dict(row))
         return None
@@ -69,8 +75,10 @@ class Project:
     @classmethod
     def get_all(cls):
         conn = _get_conn()
-        rows = conn.execute("SELECT * FROM projects ORDER BY created_at DESC").fetchall()
-        conn.close()
+        try:
+            rows = conn.execute("SELECT * FROM projects ORDER BY created_at DESC").fetchall()
+        finally:
+            conn.close()
         return [cls(**dict(r)) for r in rows]
 
     def get_tasks(self):
@@ -78,12 +86,14 @@ class Project:
 
     def get_latest_adata_path(self):
         conn = _get_conn()
-        row = conn.execute(
-            "SELECT output_adata_path FROM analysis_tasks WHERE project_id=? AND status='completed' "
-            "AND output_adata_path IS NOT NULL ORDER BY finished_at DESC LIMIT 1",
-            (self.id,)
-        ).fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT output_adata_path FROM analysis_tasks WHERE project_id=? AND status='completed' "
+                "AND output_adata_path IS NOT NULL ORDER BY finished_at DESC LIMIT 1",
+                (self.id,)
+            ).fetchone()
+        finally:
+            conn.close()
         return row['output_adata_path'] if row else None
 
 
@@ -108,18 +118,32 @@ class AnalysisTask:
 
     def save(self):
         conn = _get_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO analysis_tasks "
-            "(id, project_id, module_name, status, progress, progress_message, "
-            "params_json, result_json, error_traceback, started_at, finished_at, "
-            "output_adata_path, log_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (self.id, self.project_id, self.module_name, self.status, self.progress,
-             self.progress_message, self.params_json, self.result_json,
-             self.error_traceback, self.started_at, self.finished_at,
-             self.output_adata_path, self.log_text)
-        )
-        conn.commit()
-        conn.close()
+        try:
+            existing = conn.execute("SELECT id FROM analysis_tasks WHERE id=?", (self.id,)).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE analysis_tasks SET project_id=?, module_name=?, status=?, progress=?, "
+                    "progress_message=?, params_json=?, result_json=?, error_traceback=?, "
+                    "started_at=?, finished_at=?, output_adata_path=?, log_text=? WHERE id=?",
+                    (self.project_id, self.module_name, self.status, self.progress,
+                     self.progress_message, self.params_json, self.result_json,
+                     self.error_traceback, self.started_at, self.finished_at,
+                     self.output_adata_path, self.log_text, self.id)
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO analysis_tasks "
+                    "(id, project_id, module_name, status, progress, progress_message, "
+                    "params_json, result_json, error_traceback, started_at, finished_at, "
+                    "output_adata_path, log_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (self.id, self.project_id, self.module_name, self.status, self.progress,
+                     self.progress_message, self.params_json, self.result_json,
+                     self.error_traceback, self.started_at, self.finished_at,
+                     self.output_adata_path, self.log_text)
+                )
+            conn.commit()
+        finally:
+            conn.close()
 
     def to_dict(self):
         result = json.loads(self.result_json) if self.result_json else {}
@@ -136,8 +160,10 @@ class AnalysisTask:
     @classmethod
     def get_by_id(cls, tid):
         conn = _get_conn()
-        row = conn.execute("SELECT * FROM analysis_tasks WHERE id=?", (tid,)).fetchone()
-        conn.close()
+        try:
+            row = conn.execute("SELECT * FROM analysis_tasks WHERE id=?", (tid,)).fetchone()
+        finally:
+            conn.close()
         if row:
             return cls(**dict(row))
         return None
@@ -145,11 +171,13 @@ class AnalysisTask:
     @classmethod
     def get_by_project(cls, project_id):
         conn = _get_conn()
-        rows = conn.execute(
-            "SELECT * FROM analysis_tasks WHERE project_id=? ORDER BY started_at DESC",
-            (project_id,)
-        ).fetchall()
-        conn.close()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM analysis_tasks WHERE project_id=? ORDER BY started_at DESC",
+                (project_id,)
+            ).fetchall()
+        finally:
+            conn.close()
         return [cls(**dict(r)) for r in rows]
 
 
@@ -167,14 +195,16 @@ class ResultFile:
 
     def save(self):
         conn = _get_conn()
-        conn.execute(
-            "INSERT INTO result_files (id, task_id, project_id, file_type, category, label, file_path, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (self.id, self.task_id, self.project_id, self.file_type, self.category,
-             self.label, self.file_path, self.created_at)
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute(
+                "INSERT INTO result_files (id, task_id, project_id, file_type, category, label, file_path, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (self.id, self.task_id, self.project_id, self.file_type, self.category,
+                 self.label, self.file_path, self.created_at)
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def to_dict(self):
         return {
@@ -186,22 +216,28 @@ class ResultFile:
     @classmethod
     def get_by_task(cls, task_id):
         conn = _get_conn()
-        rows = conn.execute("SELECT * FROM result_files WHERE task_id=?", (task_id,)).fetchall()
-        conn.close()
+        try:
+            rows = conn.execute("SELECT * FROM result_files WHERE task_id=?", (task_id,)).fetchall()
+        finally:
+            conn.close()
         return [cls(**dict(r)) for r in rows]
 
     @classmethod
     def get_by_project(cls, project_id):
         conn = _get_conn()
-        rows = conn.execute("SELECT * FROM result_files WHERE project_id=?", (project_id,)).fetchall()
-        conn.close()
+        try:
+            rows = conn.execute("SELECT * FROM result_files WHERE project_id=?", (project_id,)).fetchall()
+        finally:
+            conn.close()
         return [cls(**dict(r)) for r in rows]
 
     @classmethod
     def get_by_id(cls, fid):
         conn = _get_conn()
-        row = conn.execute("SELECT * FROM result_files WHERE id=?", (fid,)).fetchone()
-        conn.close()
+        try:
+            row = conn.execute("SELECT * FROM result_files WHERE id=?", (fid,)).fetchone()
+        finally:
+            conn.close()
         if row:
             return cls(**dict(row))
         return None

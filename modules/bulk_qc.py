@@ -58,7 +58,7 @@ class BulkQCAnalysis(BaseAnalysis):
             marker=dict(color=colors, size=6), name='样本'), row=2, col=2)
         fig.update_layout(height=600, width=800, showlegend=False, title='Bulk RNA-seq 质控总览')
         fpath = os.path.join(plots_dir, 'bulk_qc_overview.json')
-        with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
+        with open(fpath, 'w') as f: f.write(fig.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': '质控总览'})
 
         if n_before > n_after:
@@ -66,7 +66,7 @@ class BulkQCAnalysis(BaseAnalysis):
             fig_r.add_trace(go.Bar(x=['过滤前', '过滤后'], y=[n_before, n_after], marker_color=['#e53935', '#4caf50']))
             fig_r.update_layout(title='样本过滤结果', yaxis_title='样本数', width=400, height=300)
             fpath = os.path.join(plots_dir, 'bulk_qc_filter.json')
-            with open(fpath, 'w') as f: json.dump(json.loads(fig_r.to_json()), f)
+            with open(fpath, 'w') as f: f.write(fig_r.to_json(engine="json"))
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': '样本过滤结果'})
 
         self.progress(80, "运行 PCA 离群检测...")
@@ -81,7 +81,7 @@ class BulkQCAnalysis(BaseAnalysis):
         fig_pca.update_layout(title='质控后样本 PCA', xaxis_title='PC1', yaxis_title='PC2',
                              plot_bgcolor='white', width=600, height=500)
         fpath = os.path.join(plots_dir, 'bulk_qc_pca.json')
-        with open(fpath, 'w') as f: json.dump(json.loads(fig_pca.to_json()), f)
+        with open(fpath, 'w') as f: f.write(fig_pca.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': '样本 PCA'})
 
         self.progress(90, "保存输出...")

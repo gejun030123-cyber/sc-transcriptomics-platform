@@ -72,8 +72,8 @@ PARAM_SCHEMAS = {
         {'key': 'resolution', 'label': 'Leiden 分辨率', 'type': 'text', 'default': '0.8'},
     ],
     'deg': [
-        {'key': 'groupby', 'label': '分组依据', 'type': 'text', 'default': 'celltype'},
-        {'key': 'reference', 'label': '参考组', 'type': 'text', 'default': 'rest'},
+        {'key': 'groupby', 'label': '分组依据', 'type': 'text', 'default': ''},
+        {'key': 'reference', 'label': '参考组', 'type': 'dynamic_select', 'depends_on': 'groupby', 'default': 'rest'},
         {'key': 'method', 'label': '统计方法', 'type': 'select', 'options': ['wilcoxon', 't-test', 'logreg'], 'default': 'wilcoxon'},
         {'key': 'n_genes', 'label': '显示 Top N 基因数', 'type': 'number', 'default': 20},
     ],
@@ -94,9 +94,9 @@ PARAM_SCHEMAS = {
         {'key': 'method', 'label': '标准化方法', 'type': 'select', 'options': ['deseq2', 'cpm', 'log2_quantile'], 'default': 'deseq2'},
     ],
     'bulk_deg': [
-        {'key': 'groupby', 'label': '分组列名', 'type': 'text', 'default': 'condition'},
-        {'key': 'group1', 'label': '实验组名称', 'type': 'text', 'default': ''},
-        {'key': 'group2', 'label': '对照组名称', 'type': 'text', 'default': ''},
+        {'key': 'groupby', 'label': '分组列名', 'type': 'text', 'default': ''},
+        {'key': 'group1', 'label': '实验组', 'type': 'dynamic_select', 'depends_on': 'groupby', 'default': ''},
+        {'key': 'group2', 'label': '对照组', 'type': 'dynamic_select', 'depends_on': 'groupby', 'default': ''},
         {'key': 'method', 'label': '统计方法', 'type': 'select', 'options': ['t-test', 'mann-whitney'], 'default': 't-test'},
         {'key': 'fc_threshold', 'label': 'Fold Change 阈值', 'type': 'number', 'default': 2.0, 'step': 0.1},
         {'key': 'pval_threshold', 'label': 'padj 显著性阈值', 'type': 'number', 'default': 0.05, 'step': 0.01},
@@ -161,6 +161,13 @@ def analyze(pid, module_name):
                 params[param['key']] = request.form.get(param['key']) == 'on'
             else:
                 params[param['key']] = val or param['default']
+        # 处理自动检测的分组映射
+        auto_mapping = request.form.get('_auto_group_mapping')
+        if auto_mapping:
+            try:
+                params['_auto_group_mapping'] = json.loads(auto_mapping)
+            except Exception:
+                pass
         input_path = request.form.get('input_path', '')
         if not input_path:
             flash('请选择输入数据', 'danger')

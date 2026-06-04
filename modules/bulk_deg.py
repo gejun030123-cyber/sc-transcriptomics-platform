@@ -19,7 +19,6 @@ class BulkDEGAnalysis(BaseAnalysis):
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
         from scipy import stats
-        from modules.visualization import scatter_plot
 
         self.progress(5, "加载数据...")
         from modules.io_utils import read_expression_matrix
@@ -37,25 +36,57 @@ class BulkDEGAnalysis(BaseAnalysis):
 
         counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
         counts = counts.astype(float)
-        gene_names = adata.var_names.tolist()
+        gene_ids = adata.var_names.tolist()
+        # 优先使用基因名（symbol），如果没有则使用 gene ID
+        if 'gene_name' in adata.var.columns:
+            gene_names = adata.var['gene_name'].tolist()
+        else:
+            gene_names = gene_ids
+
+        # 处理自动检测的分组（从样本名中提取）
+        if groupby == '_auto_group_':
+            auto_mapping = self.params.get('_auto_group_mapping', {})
+            if auto_mapping:
+                groupby = 'auto_group'
+                adata.obs[groupby] = adata.obs.index.map(
+                    lambda x: auto_mapping.get(str(x), 'unknown')
+                )
+            else:
+                raise ValueError("自动分组映射数据缺失，请重新选择输入文件。")
 
         if groupby in adata.obs.columns:
             groups = adata.obs[groupby].unique().tolist()
             if not group1 or group1 not in groups:
                 group1 = groups[0]
-            if not group2 or group2 not in groups:
-                group2 = groups[1] if len(groups) > 1 else groups[0]
             mask1 = adata.obs[groupby] == group1
-            mask2 = adata.obs[groupby] == group2
             data1 = counts[mask1.values]
+
+            if group2 == 'rest' or (not group2 or group2 not in groups):
+                if group2 == 'rest':
+                    # rest 模式：对照组 = 除实验组外的所有样本
+                    mask2 = ~mask1
+                    group2 = f'rest (n={mask2.sum()})'
+                elif len(groups) < 2:
+                    raise ValueError(f"分组列 '{groupby}' 中只有 {len(groups)} 个分组，无法进行差异分析。至少需要 2 个分组。")
+                else:
+                    group2 = groups[1]
+                    mask2 = adata.obs[groupby] == group2
+            else:
+                mask2 = adata.obs[groupby] == group2
+
             data2 = counts[mask2.values]
         else:
             n = counts.shape[0]
             half = n // 2
+            if half == 0 or half == n:
+                raise ValueError(f"未找到分组列 '{groupby}'，且样本数 ({n}) 不足以自动分为两组。请确保数据包含分组信息或至少有 2 个样本。")
             group1, group2 = "Group1", "Group2"
             data1, data2 = counts[:half], counts[half:]
-            mask1 = pd.Series([True]*half + [False]*(n-half))
-            mask2 = pd.Series([False]*half + [True]*(n-half))
+            mask1 = pd.Series([True]*half + [False]*(n-half), index=adata.obs.index)
+            mask2 = pd.Series([False]*half + [True]*(n-half), index=adata.obs.index)
+            adata.obs[groupby] = pd.Series(
+                ['Group1']*half + ['Group2']*(n-half), index=adata.obs.index
+            )
 
         self.progress(30, f"差异分析：{method}...")
         n_genes = counts.shape[1]
@@ -83,14 +114,15 @@ class BulkDEGAnalysis(BaseAnalysis):
 
         self.progress(60, "生成结果表...")
 
-        def classify(lfc, padj_val):
-            if padj_val < pval_threshold and lfc >= np.log2(fc_threshold):
-                return 'Up'
-            elif padj_val < pval_threshold and lfc <= -np.log2(fc_threshold):
-                return 'Down'
-            return 'NS'
-
-        regulation = [classify(log2fc[i], padj[i]) for i in range(n_genes)]
+        log2fc_threshold = np.log2(fc_threshold)
+        regulation = np.where(
+            (padj < pval_threshold) & (log2fc >= log2fc_threshold), 'Up',
+            np.where(
+                (padj < pval_threshold) & (log2fc <= -log2fc_threshold), 'Down',
+                'NS'
+            )
+        )
+        regulation = regulation.tolist()
         deg_df = pd.DataFrame({
             'gene': gene_names,
             'log2FC': np.round(log2fc, 4),
@@ -130,7 +162,7 @@ class BulkDEGAnalysis(BaseAnalysis):
             plot_bgcolor='white', width=700, height=500
         )
         fpath = os.path.join(plots_dir, 'bulk_deg_volcano.json')
-        with open(fpath, 'w') as f: json.dump(json.loads(fig_vol.to_json()), f)
+        with open(fpath, 'w') as f: f.write(fig_vol.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'volcano', 'label': '火山图'})
 
         self.progress(80, "生成 MA 图...")
@@ -150,7 +182,7 @@ class BulkDEGAnalysis(BaseAnalysis):
             plot_bgcolor='white', width=700, height=500
         )
         fpath = os.path.join(plots_dir, 'bulk_deg_ma.json')
-        with open(fpath, 'w') as f: json.dump(json.loads(fig_ma.to_json()), f)
+        with open(fpath, 'w') as f: f.write(fig_ma.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'ma', 'label': 'MA 图'})
 
         self.progress(88, "保存差异基因 CSV...")

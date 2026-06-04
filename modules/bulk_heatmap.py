@@ -43,20 +43,16 @@ class BulkHeatmapAnalysis(BaseAnalysis):
 
         self.progress(40, "选择基因...")
 
-        if hm_type == 'top_var':
+        if hm_type == 'top_var' or hm_type not in ('deg',):
             gene_var = np.var(norm_data, axis=0)
             top_idx = np.argsort(gene_var)[::-1][:top_n]
             title = f'Top {top_n} 高变异基因热图'
         elif hm_type == 'deg' and os.path.exists(os.path.join(self.project_dir, 'results', 'bulk_deg_results.csv')):
             deg_df = pd.read_csv(os.path.join(self.project_dir, 'results', 'bulk_deg_results.csv'))
             deg_sig = deg_df[deg_df['regulation'] != 'NS'].head(top_n)
-            gene_list = deg_sig['gene'].tolist()
+            gene_list = set(deg_sig['gene'].tolist())
             top_idx = [i for i, g in enumerate(adata.var_names) if g in gene_list][:top_n]
             title = f'Top {top_n} 差异基因热图'
-        else:
-            gene_var = np.var(norm_data, axis=0)
-            top_idx = np.argsort(gene_var)[::-1][:top_n]
-            title = f'Top {top_n} 高变异基因热图'
 
         heat_data = norm_data[:, top_idx]
         gene_labels = [adata.var_names[i] for i in top_idx]
@@ -129,7 +125,7 @@ class BulkHeatmapAnalysis(BaseAnalysis):
         )
 
         fpath = os.path.join(plots_dir, 'bulk_heatmap.json')
-        with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
+        with open(fpath, 'w') as f: f.write(fig.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': title})
 
         self.progress(85, "生成样本相关性热图...")
@@ -151,7 +147,7 @@ class BulkHeatmapAnalysis(BaseAnalysis):
             plot_bgcolor='white'
         )
         fpath = os.path.join(plots_dir, 'bulk_corr_heatmap.json')
-        with open(fpath, 'w') as f: json.dump(json.loads(fig_corr.to_json()), f)
+        with open(fpath, 'w') as f: f.write(fig_corr.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': '样本相关性热图'})
 
         self.progress(95, "保存结果...")

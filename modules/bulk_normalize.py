@@ -25,11 +25,13 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         method = self.params.get('method', 'deseq2')
         self.progress(20, f"标准化方法: {method}...")
 
+        raw_counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
+        raw_counts = raw_counts.astype(float)
+        raw_lib = raw_counts.sum(axis=1)
+
         if method == 'deseq2':
             from scipy.stats import gmean
-            counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
-            counts = counts.astype(float)
-            counts = counts[counts.sum(axis=1) > 0]
+            counts = raw_counts[raw_counts.sum(axis=1) > 0]
             geo_means = gmean(counts + 1, axis=0)
             ratios = counts / (geo_means + 1e-10)
             size_factors = np.median(ratios, axis=1)
@@ -39,16 +41,14 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             adata.X = np.log2(norm_counts + 1)
 
         elif method == 'cpm':
-            counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
-            lib_sizes = counts.sum(axis=1, keepdims=True)
-            cpm = counts / lib_sizes * 1e6
+            lib_sizes = raw_counts.sum(axis=1, keepdims=True)
+            cpm = raw_counts / lib_sizes * 1e6
             adata.layers['normalized'] = cpm
             adata.X = np.log2(cpm + 1)
 
         elif method == 'log2_quantile':
             from scipy.stats import gmean
-            counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
-            log_counts = np.log2(counts + 1)
+            log_counts = np.log2(raw_counts + 1)
             from scipy.stats import rankdata
             ranked = np.apply_along_axis(rankdata, 0, log_counts)
             ref_distribution = np.sort(np.mean(log_counts, axis=1))
@@ -64,7 +64,6 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         os.makedirs(plots_dir, exist_ok=True)
         result_files = []
 
-        raw_lib = counts.sum(axis=1) if 'counts' in dir() else np.ones(adata.n_obs)
         norm_layer = adata.layers.get('normalized', adata.X)
         norm_lib = norm_layer.sum(axis=1) if hasattr(norm_layer, 'sum') else np.ones(adata.n_obs)
 
@@ -74,7 +73,7 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         fig.add_trace(go.Bar(y=norm_lib, marker_color='#4caf50', name='Normalized'), row=1, col=2)
         fig.update_layout(height=350, width=700, showlegend=False, title='文库大小对比')
         fpath = os.path.join(plots_dir, 'bulk_norm_libsize.json')
-        with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
+        with open(fpath, 'w') as f: f.write(fig.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': '文库大小对比'})
 
         if method == 'deseq2':
@@ -84,7 +83,7 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             fig_sf.update_layout(title='DESeq2 Size Factors', yaxis_title='Size Factor',
                                 plot_bgcolor='white', width=600, height=300)
             fpath = os.path.join(plots_dir, 'bulk_norm_sizefactors.json')
-            with open(fpath, 'w') as f: json.dump(json.loads(fig_sf.to_json()), f)
+            with open(fpath, 'w') as f: f.write(fig_sf.to_json(engine="json"))
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': 'Size Factors'})
 
         self.progress(85, "保存结果...")

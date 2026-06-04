@@ -49,6 +49,20 @@
                     </select>
                 </div>
 
+                <!-- 数据信息面板 -->
+                <div id="data-info-panel" class="card p-3 mb-3" style="background:#f8f9ff; display:none;">
+                    <h6 class="mb-2"><i class="bi bi-info-circle"></i> 数据信息</h6>
+                    <div class="row small">
+                        <div class="col-md-3"><strong>样本数：</strong><span id="info-n-obs">-</span></div>
+                        <div class="col-md-3"><strong>基因数：</strong><span id="info-n-vars">-</span></div>
+                        <div class="col-md-6"><strong>注释列：</strong><span id="info-obs-cols">-</span></div>
+                    </div>
+                    <div class="mt-2 small">
+                        <strong>样本名：</strong>
+                        <div id="info-samples" class="text-muted" style="max-height:80px; overflow:auto; word-break:break-all;"></div>
+                    </div>
+                </div>
+
                 {% for param in schema %}
                 <div class="mb-3">
                     <label class="form-label">{{ param.label }}</label>
@@ -58,6 +72,13 @@
                         <option value="{{ opt }}" {% if opt == param.default %}selected{% endif %}>{{ opt }}</option>
                         {% endfor %}
                     </select>
+                    {% elif param.type == 'dynamic_select' %}
+                    <select name="{{ param.key }}" class="form-select dynamic-select" data-key="{{ param.key }}" data-depends-on="{{ param.depends_on }}" data-default="{{ param.default }}">
+                        <option value="">-- 请先选择输入文件和分组列 --</option>
+                        {% if param.default %}
+                        <option value="{{ param.default }}" selected>{{ param.default }}</option>
+                        {% endif %}
+                    </select>
                     {% elif param.type == 'checkbox' %}
                     <input type="checkbox" name="{{ param.key }}" class="form-check-input"
                            {% if param.default %}checked{% endif %}>
@@ -65,8 +86,9 @@
                     <input type="number" name="{{ param.key }}" class="form-control"
                            value="{{ param.default }}" step="{{ param.step|default(1) }}">
                     {% else %}
-                    <input type="text" name="{{ param.key }}" class="form-control"
-                           value="{{ param.default }}">
+                    <input type="text" name="{{ param.key }}" class="form-control{% if param.key in ('groupby', 'batch_key', 'cluster_key') %} groupby-field{% endif %}"
+                           value="{{ param.default }}" data-key="{{ param.key }}"
+                           placeholder="{% if param.key == 'groupby' %}输入分组列名，选择文件后自动填充{% elif param.key == 'batch_key' %}输入批次列名{% else %}{{ param.default }}{% endif %}">
                     {% endif %}
                 </div>
                 {% endfor %}
@@ -76,4 +98,175 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const inputSelect = document.querySelector('select[name="input_path"]');
+const dynamicSelects = document.querySelectorAll('.dynamic-select');
+const groupbyFields = document.querySelectorAll('.groupby-field');
+
+let autoGroupMapping = null;  // 存储自动检测的分组映射
+
+async function fetchColumnValues(filePath, column) {
+    try {
+        const r = await fetch(`/api/column-values?file_path=${encodeURIComponent(filePath)}&column=${encodeURIComponent(column)}`);
+        const d = await r.json();
+        return d.values || [];
+    } catch(e) { return []; }
+}
+
+async function fetchObsColumns(filePath) {
+    try {
+        const r = await fetch(`/api/obs-columns?file_path=${encodeURIComponent(filePath)}`);
+        return await r.json();
+    } catch(e) { return {columns: [], sample_groups: {}}; }
+}
+
+function updateDynamicSelects() {
+    const filePath = inputSelect ? inputSelect.value : '';
+    if (!filePath) return;
+
+    const groupbyMap = {};
+    groupbyFields.forEach(f => {
+        groupbyMap[f.dataset.key] = f.value;
+    });
+
+    dynamicSelects.forEach(async (sel) => {
+        const dependsOn = sel.dataset.dependsOn;
+        const column = groupbyMap[dependsOn] || '';
+        const currentVal = sel.value;
+
+        if (!column) {
+            sel.innerHTML = '<option value="">-- 请先输入分组列名 --</option>';
+            return;
+        }
+
+        let values = [];
+
+        // 如果是自动检测的分组，使用 autoGroupMapping 中的值
+        if (column === '_auto_group_' && autoGroupMapping) {
+            values = autoGroupMapping.values || [];
+        } else {
+            values = await fetchColumnValues(filePath, column);
+        }
+
+        const defaultVal = sel.dataset.default;
+
+        sel.innerHTML = '<option value="">-- 请选择 --</option>';
+
+        // Add "rest" option for reference/group2 fields
+        if (defaultVal === 'rest' || sel.dataset.key === 'reference' || sel.dataset.key === 'group2') {
+            sel.innerHTML += '<option value="rest"' + (currentVal === 'rest' || (!currentVal && defaultVal === 'rest') ? ' selected' : '') + '>rest（所有其他组）</option>';
+        }
+
+        values.forEach(v => {
+            if (sel.dataset.key === 'group2') {
+                const group1Sel = document.querySelector('select[name="group1"]');
+                if (group1Sel && group1Sel.value === v) return;
+            }
+            if (sel.dataset.key === 'group1') {
+                const group2Sel = document.querySelector('select[name="group2"]');
+                if (group2Sel && group2Sel.value === v) return;
+            }
+            const selected = (v === currentVal) ? ' selected' : '';
+            sel.innerHTML += `<option value="${v}"${selected}>${v}</option>`;
+        });
+
+        if (currentVal && sel.querySelector(`option[value="${currentVal}"]`)) {
+            sel.value = currentVal;
+        }
+    });
+}
+
+async function loadFileInfo(filePath) {
+    const panel = document.getElementById('data-info-panel');
+    if (!panel) return;
+    try {
+        const r = await fetch(`/api/data-info?file_path=${encodeURIComponent(filePath)}`);
+        const d = await r.json();
+        if (d.error) { panel.style.display = 'none'; return; }
+        panel.style.display = 'block';
+        document.getElementById('info-n-obs').textContent = d.n_obs;
+        document.getElementById('info-n-vars').textContent = d.n_vars;
+        document.getElementById('info-obs-cols').textContent = d.obs_columns.length > 0 ? d.obs_columns.join(', ') : '无（将从样本名自动检测分组）';
+        document.getElementById('info-samples').textContent = d.sample_names.join(', ');
+    } catch(e) { panel.style.display = 'none'; }
+}
+
+async function suggestGroupbyColumns() {
+    const filePath = inputSelect ? inputSelect.value : '';
+    if (!filePath) return;
+
+    // 加载数据信息面板
+    loadFileInfo(filePath);
+
+    const result = await fetchObsColumns(filePath);
+    const columns = result.columns || [];
+    const sampleGroups = result.sample_groups || {};
+
+    autoGroupMapping = sampleGroups.auto_group || null;
+
+    groupbyFields.forEach(f => {
+        if (columns.length > 0) {
+            // 有 obs 列：如果当前值是默认值或为空，建议第一个非 QC 列
+            const defaultVal = f.getAttribute('value') || '';
+            if (!f.value || f.value === defaultVal) {
+                const suggestion = columns.find(c => !['total_counts', 'n_genes_by_counts', 'pct_counts_mt'].includes(c));
+                if (suggestion) f.value = suggestion;
+            }
+        } else if (autoGroupMapping) {
+            // 从样本名自动检测到分组，强制覆盖默认值
+            f.value = '_auto_group_';
+            let hint = f.parentNode.querySelector('.auto-group-hint');
+            if (!hint) {
+                hint = document.createElement('div');
+                hint.className = 'auto-group-hint text-info small mt-1';
+                f.parentNode.appendChild(hint);
+            }
+            hint.innerHTML = '&#9888; 已从样本名自动检测到分组：<strong>' + autoGroupMapping.values.join(', ') + '</strong>（如需手动输入请修改此字段）';
+        }
+    });
+    updateDynamicSelects();
+}
+
+if (inputSelect) {
+    inputSelect.addEventListener('change', suggestGroupbyColumns);
+}
+
+groupbyFields.forEach(f => {
+    f.addEventListener('change', updateDynamicSelects);
+    f.addEventListener('input', () => {
+        clearTimeout(f._debounce);
+        f._debounce = setTimeout(updateDynamicSelects, 500);
+    });
+});
+
+document.querySelectorAll('.dynamic-select[data-key="group1"]').forEach(sel => {
+    sel.addEventListener('change', updateDynamicSelects);
+});
+
+// 在表单提交时，如果是自动检测分组，注入隐藏字段保存映射
+const form = document.querySelector('form.param-form');
+if (form) {
+    form.addEventListener('submit', (e) => {
+        const groupbyVal = document.querySelector('.groupby-field');
+        if (groupbyVal && groupbyVal.value === '_auto_group_' && autoGroupMapping) {
+            // 注入隐藏字段传递自动分组映射
+            let hidden = form.querySelector('input[name="_auto_group_mapping"]');
+            if (!hidden) {
+                hidden = document.createElement('input');
+                hidden.type = 'hidden';
+                hidden.name = '_auto_group_mapping';
+                form.appendChild(hidden);
+            }
+            hidden.value = JSON.stringify(autoGroupMapping.mapping);
+        }
+    });
+}
+
+if (inputSelect && inputSelect.value) {
+    suggestGroupbyColumns();
+}
+</script>
 {% endblock %}

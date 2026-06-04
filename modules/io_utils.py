@@ -8,7 +8,26 @@ def read_expression_matrix(file_path):
     import scanpy as sc
 
     if file_path.endswith('.h5ad'):
-        return sc.read_h5ad(file_path)
+        import scanpy as _sc
+        adata = _sc.read_h5ad(file_path)
+        import re as _re
+        # 过滤掉非样本行（如 Exonic.gene.sizes, Start, End 等）
+        non_sample_mask = adata.obs.index.to_series().apply(
+            lambda x: bool(_re.match(r'^(Exonic|Start|End|Chr|Strand)', str(x), _re.I))
+        )
+        if non_sample_mask.any() and not non_sample_mask.all():
+            adata = adata[~non_sample_mask].copy()
+        # 如果同时有 _count 和 _FPKM 列，只保留 _count
+        obs_names = [str(n) for n in adata.obs.index]
+        count_idx = [i for i, n in enumerate(obs_names) if '_count' in n]
+        fpkm_idx = [i for i, n in enumerate(obs_names) if '_FPKM' in n or '_fpkm' in n]
+        if count_idx and fpkm_idx:
+            adata = adata[count_idx].copy()
+        # 清理样本名：去掉 _count/_FPKM/_TPM 后缀
+        clean_names = [_re.sub(r'_(count|FPKM|TPM|fpkm|tpm)$', '', str(n)) for n in adata.obs.index]
+        if len(set(clean_names)) == len(clean_names):
+            adata.obs.index = pd.Index(clean_names)
+        return adata
 
     df = None
 
@@ -49,10 +68,84 @@ def read_expression_matrix(file_path):
         df = df.dropna(axis=1, how='all')
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
+    if len(numeric_cols) == 0:
+        raise ValueError("无法从输入文件中读取数值列。请确认文件格式正确且包含数值型表达数据。")
+
+    # 智能识别样本列：排除非样本的数值列（如 Exonic.gene.sizes, Start, End 等）
+    non_sample_keywords = {'exonic', 'start', 'end', 'size', 'length', 'gc', 'position', 'coord'}
+    real_sample_cols = []
+    for col in numeric_cols:
+        col_lower = col.lower().replace('_', '').replace('.', '').replace('-', '')
+        if any(kw in col_lower for kw in non_sample_keywords):
+            continue
+        # 只保留看起来像样本名的列（包含 _count 或 _FPKM 或 _TPM，或者以数字结尾）
+        if any(suffix in col for suffix in ('_count', '_FPKM', '_TPM', '_fpkm', '_tpm')):
+            real_sample_cols.append(col)
+        elif col[-1].isdigit():
+            real_sample_cols.append(col)
+        else:
+            real_sample_cols.append(col)  # 保留无法判断的列
+
+    if len(real_sample_cols) > 0 and len(real_sample_cols) < len(numeric_cols):
+        numeric_cols = real_sample_cols
+
+    # 如果样本列同时包含 count 和 FPKM，优先使用 count
+    count_cols = [c for c in numeric_cols if '_count' in c.lower()]
+    fpkm_cols = [c for c in numeric_cols if '_fpkm' in c.lower() or '_FPKM' in c]
+    if count_cols and fpkm_cols:
+        # 优先使用 count 数据
+        numeric_cols = count_cols
+        print(f"[io_utils] 检测到 count 和 FPKM 数据，使用 count 数据 ({len(count_cols)} 列)")
+
+    # 保留基因名注释列（用于 DEG 结果中显示基因名而非 ID）
+    gene_name_col = None
+    # 优先级：symbol 类 > name 类 > 其他
+    symbol_candidates = ['GeneSymbol', 'gene_symbol', 'gene_name', 'symbol', 'Symbol',
+                         'Gene Symbol', 'gene', 'Gene', 'GENE_NAME', 'gene_name_x']
+    name_candidates = ['Description', 'description', 'gene_description']
+    non_numeric_cols = [c for c in df.columns if c not in numeric_cols]
+    for candidate in symbol_candidates:
+        if candidate in non_numeric_cols:
+            gene_name_col = candidate
+            break
+    if gene_name_col is None:
+        for col in non_numeric_cols:
+            col_lower = col.lower()
+            if 'symbol' in col_lower:
+                gene_name_col = col
+                break
+    if gene_name_col is None:
+        for candidate in name_candidates:
+            if candidate in non_numeric_cols:
+                gene_name_col = candidate
+                break
+    if gene_name_col is None:
+        for col in non_numeric_cols:
+            col_lower = col.lower()
+            if 'name' in col_lower:
+                gene_name_col = col
+                break
+    gene_names = df[gene_name_col].tolist() if gene_name_col else None
+
     if len(numeric_cols) < df.shape[1]:
         df = df[numeric_cols]
 
     # 替换 NaN 为 0
+    nan_count = int(df.isna().sum().sum())
+    if nan_count > 0:
+        print(f"[io_utils] WARNING: 替换 {nan_count} 个 NaN 值为 0")
     df = df.fillna(0)
 
-    return sc.AnnData(X=df.values.T, obs=pd.DataFrame(index=df.columns), var=pd.DataFrame(index=df.index))
+    adata = sc.AnnData(X=df.values.T, obs=pd.DataFrame(index=df.columns), var=pd.DataFrame(index=df.index))
+
+    # 清理样本名：去掉 _count/_FPKM/_TPM 后缀
+    import re as _re
+    clean_names = [_re.sub(r'_(count|FPKM|TPM|fpkm|tpm)$', '', str(n)) for n in adata.obs.index]
+    if len(set(clean_names)) == len(clean_names):
+        adata.obs.index = pd.Index(clean_names)
+
+    # 如果找到基因名列，保存到 var 中
+    if gene_names is not None:
+        adata.var['gene_name'] = gene_names
+
+    return adata
