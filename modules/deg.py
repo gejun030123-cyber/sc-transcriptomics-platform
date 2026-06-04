@@ -4,8 +4,8 @@ from modules.base import BaseAnalysis
 
 class DEGAnalysis(BaseAnalysis):
     MODULE_NAME = "deg"
-    DISPLAY_NAME = "Differential Expression"
-    DESCRIPTION = "Differential expression gene analysis (Wilcoxon)"
+    DISPLAY_NAME = "差异表达"
+    DESCRIPTION = "差异表达基因分析（Wilcoxon 检验）"
     INPUT_REQUIRES = ['leiden']
 
     def validate_input(self, adata):

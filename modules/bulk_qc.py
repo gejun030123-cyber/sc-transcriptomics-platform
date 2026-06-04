@@ -4,10 +4,11 @@ import numpy as np
 import pandas as pd
 from modules.base import BaseAnalysis
 
+
 class BulkQCAnalysis(BaseAnalysis):
     MODULE_NAME = "bulk_qc"
-    DISPLAY_NAME = "Bulk RNA-seq QC"
-    DESCRIPTION = "Quality control for count matrices: library size, gene detection, outlier filtering"
+    DISPLAY_NAME = "Bulk RNA-seq 质控"
+    DESCRIPTION = "计数矩阵质控：文库大小、基因检测、离群值过滤"
     INPUT_REQUIRES = []
 
     def validate_input(self, adata):
@@ -19,7 +20,7 @@ class BulkQCAnalysis(BaseAnalysis):
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
 
-        self.progress(5, "Loading count matrix...")
+        self.progress(5, "加载计数矩阵...")
         if input_path.endswith('.csv') or input_path.endswith('.txt'):
             df = pd.read_csv(input_path, sep=None if input_path.endswith('.csv') else '\t', index_col=0)
             adata = sc.AnnData(X=df.values.T, obs=pd.DataFrame(index=df.columns), var=pd.DataFrame(index=df.index))
@@ -30,7 +31,7 @@ class BulkQCAnalysis(BaseAnalysis):
         min_genes = int(self.params.get('min_genes', 5000))
         max_mt_pct = float(self.params.get('max_mt_pct', 20.0))
 
-        self.progress(20, "Computing QC metrics...")
+        self.progress(20, "计算质控指标...")
         adata.var['mt'] = adata.var_names.str.startswith('MT-')
         sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], percent_top=None, log1p=False, inplace=True)
 
@@ -39,39 +40,39 @@ class BulkQCAnalysis(BaseAnalysis):
         n_genes_detected = adata.obs['n_genes_by_counts'].values
         mt_pct = adata.obs['pct_counts_mt'].values if 'pct_counts_mt' in adata.obs.columns else np.zeros(n_before)
 
-        self.progress(40, "Filtering samples...")
+        self.progress(40, "过滤样本...")
         mask = (lib_sizes >= min_counts) & (n_genes_detected >= min_genes) & (mt_pct <= max_mt_pct)
         adata_filtered = adata[mask].copy()
         n_after = adata_filtered.n_obs
 
-        self.progress(60, "Generating QC plots...")
+        self.progress(60, "生成质控图表...")
         plots_dir = os.path.join(self.project_dir, 'plots')
         os.makedirs(plots_dir, exist_ok=True)
         result_files = []
 
         fig = make_subplots(rows=2, cols=2,
-            subplot_titles=['Library Size Distribution', 'Genes Detected',
-                           'MT Percentage', 'Library Size vs Genes Detected'])
-        fig.add_trace(go.Bar(x=list(range(n_before)), y=lib_sizes, marker_color='#1a237e', name='Library Size'), row=1, col=1)
-        fig.add_trace(go.Bar(x=list(range(n_before)), y=n_genes_detected, marker_color='#283593', name='Genes'), row=1, col=2)
+            subplot_titles=['文库大小分布', '检测基因数',
+                           '线粒体基因比例', '文库大小 vs 检测基因数'])
+        fig.add_trace(go.Bar(x=list(range(n_before)), y=lib_sizes, marker_color='#1a237e', name='文库大小'), row=1, col=1)
+        fig.add_trace(go.Bar(x=list(range(n_before)), y=n_genes_detected, marker_color='#283593', name='基因数'), row=1, col=2)
         fig.add_trace(go.Bar(x=list(range(n_before)), y=mt_pct, marker_color='#e53935', name='MT%'), row=2, col=1)
         colors = ['#4caf50' if m else '#e53935' for m in mask]
         fig.add_trace(go.Scattergl(x=lib_sizes, y=n_genes_detected, mode='markers',
-            marker=dict(color=colors, size=6), name='Samples'), row=2, col=2)
-        fig.update_layout(height=600, width=800, showlegend=False, title='Bulk RNA-seq QC Overview')
+            marker=dict(color=colors, size=6), name='样本'), row=2, col=2)
+        fig.update_layout(height=600, width=800, showlegend=False, title='Bulk RNA-seq 质控总览')
         fpath = os.path.join(plots_dir, 'bulk_qc_overview.json')
         with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
-        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': 'QC Overview'})
+        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': '质控总览'})
 
         if n_before > n_after:
             fig_r = go.Figure()
-            fig_r.add_trace(go.Bar(x=['Before', 'After'], y=[n_before, n_after], marker_color=['#e53935', '#4caf50']))
-            fig_r.update_layout(title='Sample Filtering', yaxis_title='Samples', width=400, height=300)
+            fig_r.add_trace(go.Bar(x=['过滤前', '过滤后'], y=[n_before, n_after], marker_color=['#e53935', '#4caf50']))
+            fig_r.update_layout(title='样本过滤结果', yaxis_title='样本数', width=400, height=300)
             fpath = os.path.join(plots_dir, 'bulk_qc_filter.json')
             with open(fpath, 'w') as f: json.dump(json.loads(fig_r.to_json()), f)
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': 'Sample Filtering'})
+            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': '样本过滤结果'})
 
-        self.progress(80, "Running PCA for outlier detection...")
+        self.progress(80, "运行 PCA 离群检测...")
         sc.pp.normalize_total(adata_filtered, target_sum=1e6)
         sc.pp.log1p(adata_filtered)
         sc.pp.pca(adata_filtered, n_comps=min(10, n_after - 1))
@@ -80,19 +81,19 @@ class BulkQCAnalysis(BaseAnalysis):
         fig_pca.add_trace(go.Scattergl(x=pc[:, 0], y=pc[:, 1], mode='markers+text',
             text=adata_filtered.obs.index.tolist(), textposition='top center',
             marker=dict(size=8, color='#1a237e')))
-        fig_pca.update_layout(title='PCA of Samples (after QC)', xaxis_title='PC1', yaxis_title='PC2',
+        fig_pca.update_layout(title='质控后样本 PCA', xaxis_title='PC1', yaxis_title='PC2',
                              plot_bgcolor='white', width=600, height=500)
         fpath = os.path.join(plots_dir, 'bulk_qc_pca.json')
         with open(fpath, 'w') as f: json.dump(json.loads(fig_pca.to_json()), f)
-        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': 'Sample PCA'})
+        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': '样本 PCA'})
 
-        self.progress(90, "Saving output...")
+        self.progress(90, "保存输出...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')
         os.makedirs(intermediate_dir, exist_ok=True)
         output_path = os.path.join(intermediate_dir, 'bulk_qc_output.h5ad')
         adata_filtered.write_h5ad(output_path)
 
-        self.progress(100, "Done")
+        self.progress(100, "完成")
         return {
             'output_adata': output_path,
             'result_files': result_files,

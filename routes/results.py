@@ -9,7 +9,7 @@ def task_detail(pid, task_id):
     p = Project.get_by_id(pid)
     t = AnalysisTask.get_by_id(task_id)
     if not p or not t:
-        flash('Not found', 'danger')
+        flash('未找到', 'danger')
         return redirect(url_for('main.index'))
     files = ResultFile.get_by_task(task_id)
     plotly_files = [f for f in files if f.file_type == 'plotly_json']
@@ -27,7 +27,7 @@ def task_detail(pid, task_id):
 def results_gallery(pid):
     p = Project.get_by_id(pid)
     if not p:
-        flash('Not found', 'danger')
+        flash('未找到', 'danger')
         return redirect(url_for('main.index'))
     tasks = AnalysisTask.get_by_project(pid)
     return render_template('results_gallery.html', project=p, tasks=tasks)
@@ -36,7 +36,7 @@ def results_gallery(pid):
 def view_file(pid, file_id):
     f = ResultFile.get_by_id(file_id)
     if not f:
-        flash('File not found', 'danger')
+        flash('文件未找到', 'danger')
         return redirect(url_for('projects.detail', pid=pid))
     if f.file_type == 'csv':
         return send_file(f.file_path, as_attachment=True)
@@ -46,6 +46,6 @@ def view_file(pid, file_id):
 def download_adata(pid, task_id):
     t = AnalysisTask.get_by_id(task_id)
     if not t or not t.output_adata_path:
-        flash('File not found', 'danger')
+        flash('文件未找到', 'danger')
         return redirect(url_for('projects.detail', pid=pid))
     return send_file(t.output_adata_path, as_attachment=True)

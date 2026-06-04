@@ -1,36 +1,36 @@
 {% extends "base.html" %}
-{% block title %}Dashboard - Bioinfo Platform{% endblock %}
+{% block title %}控制台 - 生信分析平台{% endblock %}
 {% block content %}
 <div class="row mb-4">
     <div class="col-md-3">
         <div class="card system-card p-3 text-center">
-            <div class="text-muted">Disk Free</div>
+            <div class="text-muted">磁盘可用</div>
             <div class="value">{{ disk_free_gb }} GB</div>
         </div>
     </div>
     <div class="col-md-3">
         <div class="card system-card p-3 text-center">
-            <div class="text-muted">RAM Available</div>
+            <div class="text-muted">内存可用</div>
             <div class="value">{{ ram_avail_gb }} GB</div>
         </div>
     </div>
     <div class="col-md-3">
         <div class="card system-card p-3 text-center">
-            <div class="text-muted">RAM Usage</div>
+            <div class="text-muted">内存使用率</div>
             <div class="value">{{ ram_percent }}%</div>
         </div>
     </div>
     <div class="col-md-3">
         <div class="card system-card p-3 text-center">
-            <div class="text-muted">Projects</div>
+            <div class="text-muted">项目数</div>
             <div class="value">{{ projects|length }}</div>
         </div>
     </div>
 </div>
 
 <div class="d-flex justify-content-between align-items-center mb-3">
-    <h4 class="mb-0">Projects</h4>
-    <a href="/projects/new" class="btn btn-primary">+ New Project</a>
+    <h4 class="mb-0">项目列表</h4>
+    <a href="/projects/new" class="btn btn-primary">+ 新建项目</a>
 </div>
 
 {% if projects %}
@@ -43,12 +43,12 @@
                 <span class="status-badge status-{{ p.status }}">{{ p.status }}</span>
             </div>
             <p class="text-muted small mb-2">{{ p.description[:80] }}{% if p.description|length > 80 %}...{% endif %}</p>
-            <div class="small text-muted mb-2">Created: {{ p.created_at[:10] }}</div>
+            <div class="small text-muted mb-2">创建于: {{ p.created_at[:10] }}</div>
             <div>
-                <a href="/projects/{{ p.id }}" class="btn btn-outline-primary btn-sm">View</a>
+                <a href="/projects/{{ p.id }}" class="btn btn-outline-primary btn-sm">查看</a>
                 <form method="post" action="/projects/{{ p.id }}/delete" class="d-inline"
-                      onsubmit="return confirm('Delete this project and all its data?')">
-                    <button class="btn btn-outline-danger btn-sm">Delete</button>
+                      onsubmit="return confirm('确定删除此项目及其所有数据？')">
+                    <button class="btn btn-outline-danger btn-sm">删除</button>
                 </form>
             </div>
         </div>
@@ -57,9 +57,9 @@
 </div>
 {% else %}
 <div class="card p-5 text-center text-muted">
-    <h5>No projects yet</h5>
-    <p>Create your first project to start analyzing single-cell data.</p>
-    <a href="/projects/new" class="btn btn-primary">Create Project</a>
+    <h5>暂无项目</h5>
+    <p>创建您的第一个项目，开始分析数据。</p>
+    <a href="/projects/new" class="btn btn-primary">创建项目</a>
 </div>
 {% endif %}
 {% endblock %}

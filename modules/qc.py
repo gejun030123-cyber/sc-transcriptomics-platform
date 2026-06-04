@@ -2,8 +2,8 @@ from modules.base import BaseAnalysis
 
 class QCAnalysis(BaseAnalysis):
     MODULE_NAME = "qc"
-    DISPLAY_NAME = "Quality Control"
-    DESCRIPTION = "Filter cells by MT%, gene counts, UMI counts + Scrublet doublet removal"
+    DISPLAY_NAME = "质控"
+    DESCRIPTION = "按线粒体比例、基因数、UMI数过滤细胞 + Scrublet 去除双细胞"
     INPUT_REQUIRES = []
 
     def validate_input(self, adata):

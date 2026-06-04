@@ -3,8 +3,8 @@ from modules.base import BaseAnalysis
 
 class ClusteringAnalysis(BaseAnalysis):
     MODULE_NAME = "clustering"
-    DISPLAY_NAME = "Clustering"
-    DESCRIPTION = "KNN graph + Leiden clustering at multiple resolutions"
+    DISPLAY_NAME = "聚类分析"
+    DESCRIPTION = "KNN 图 + 多分辨率 Leiden 聚类"
     INPUT_REQUIRES = ['X_umap']
 
     def validate_input(self, adata):

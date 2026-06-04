@@ -12,20 +12,20 @@ ALLOWED_EXT = {'.h5ad', '.h5', '.csv', '.txt', '.mtx', '.gz'}
 def upload(pid):
     p = Project.get_by_id(pid)
     if not p:
-        flash('Project not found', 'danger')
+        flash('项目未找到', 'danger')
         return redirect(url_for('main.index'))
     if request.method == 'POST':
         if 'file' not in request.files:
-            flash('No file selected', 'danger')
+            flash('请选择文件', 'danger')
             return redirect(url_for('upload.upload', pid=pid))
         file = request.files['file']
         if file.filename == '':
-            flash('No file selected', 'danger')
+            flash('请选择文件', 'danger')
             return redirect(url_for('upload.upload', pid=pid))
         fname = secure_filename(file.filename)
         ext = os.path.splitext(fname)[1].lower()
         if ext not in ALLOWED_EXT and not fname.endswith('.mtx.gz') and not fname.endswith('.tsv.gz'):
-            flash(f'File type {ext} not allowed', 'danger')
+            flash(f'不支持的文件格式: {ext}', 'danger')
             return redirect(url_for('upload.upload', pid=pid))
         uploads_dir = os.path.join(Config.DATA_DIR, 'projects', pid, 'uploads')
         os.makedirs(uploads_dir, exist_ok=True)
@@ -33,6 +33,6 @@ def upload(pid):
         file.save(fpath)
         p.status = 'data_ready'
         p.save()
-        flash(f'File "{fname}" uploaded successfully', 'success')
+        flash(f'文件 "{fname}" 上传成功', 'success')
         return redirect(url_for('projects.detail', pid=pid))
     return render_template('upload.html', project=p)

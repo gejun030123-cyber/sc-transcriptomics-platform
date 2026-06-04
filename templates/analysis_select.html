@@ -4,14 +4,32 @@
 <div class="row">
     <div class="col-md-3">
         <div class="card p-3">
-            <h6 class="mb-2">Pipeline Steps</h6>
+            <h6 class="mb-2">分析流程</h6>
+
+            <div class="pipeline-section-title">单细胞分析</div>
+            {% set sc_names = ['qc','preprocess','dimred','batch_correct','clustering','annotation','deg','trajectory','proportion'] %}
             {% for m in all_modules %}
+            {% if m.name in sc_names %}
             <a href="/projects/{{ project.id }}/analyze/{{ m.name }}"
                class="sidebar-module d-block text-decoration-none small {% if m.name == module.name %}active{% endif %}">
                 {{ m.display }}
                 {% set completed = completed_tasks|selectattr('module_name', 'equalto', m.name)|list %}
                 {% if completed %}<span class="float-end text-success">&#10003;</span>{% endif %}
             </a>
+            {% endif %}
+            {% endfor %}
+
+            <div class="pipeline-section-title">Bulk RNA-seq 分析</div>
+            {% set bulk_names = ['bulk_qc','bulk_normalize','bulk_deg','bulk_pca','bulk_heatmap'] %}
+            {% for m in all_modules %}
+            {% if m.name in bulk_names %}
+            <a href="/projects/{{ project.id }}/analyze/{{ m.name }}"
+               class="sidebar-module d-block text-decoration-none small {% if m.name == module.name %}active{% endif %}">
+                {{ m.display }}
+                {% set completed = completed_tasks|selectattr('module_name', 'equalto', m.name)|list %}
+                {% if completed %}<span class="float-end text-success">&#10003;</span>{% endif %}
+            </a>
+            {% endif %}
             {% endfor %}
         </div>
     </div>
@@ -23,16 +41,16 @@
 
             <form method="post" class="param-form">
                 <div class="mb-3">
-                    <label class="form-label">Input Data</label>
+                    <label class="form-label">输入数据</label>
                     <select name="input_path" class="form-select" required>
-                        <option value="">-- Select input file --</option>
+                        <option value="">-- 请选择输入文件 --</option>
                         {% for h in uploaded_h5ad %}
-                        <option value="{{ h.path }}">{{ h.name }} (uploaded)</option>
+                        <option value="{{ h.path }}">{{ h.name }} (已上传)</option>
                         {% endfor %}
                         {% for t in completed_tasks %}
                         {% if t.output_adata_path %}
                         <option value="{{ t.output_adata_path }}" {% if loop.first %}selected{% endif %}>
-                            Output from: {{ t.module_name }} ({{ t.id }})
+                            来自：{{ t.module_name }} ({{ t.id }})
                         </option>
                         {% endif %}
                         {% endfor %}
@@ -61,7 +79,7 @@
                 </div>
                 {% endfor %}
 
-                <button type="submit" class="btn btn-primary">Run Analysis</button>
+                <button type="submit" class="btn btn-primary">开始分析</button>
             </form>
         </div>
     </div>

@@ -11,14 +11,14 @@ def new():
     if request.method == 'POST':
         name = request.form.get('name', '').strip()
         if not name:
-            flash('Project name is required', 'danger')
+            flash('请输入项目名称', 'danger')
             return redirect(url_for('projects.new'))
         p = Project(name=name, description=request.form.get('description', ''))
         proj_dir = os.path.join(Config.DATA_DIR, 'projects', p.id)
         for sub in ['uploads', 'intermediate', 'results', 'plots']:
             os.makedirs(os.path.join(proj_dir, sub), exist_ok=True)
         p.save()
-        flash(f'Project "{name}" created', 'success')
+        flash(f'项目 "{name}" 已创建', 'success')
         return redirect(url_for('projects.detail', pid=p.id))
     return render_template('project_new.html')
 
@@ -26,7 +26,7 @@ def new():
 def detail(pid):
     p = Project.get_by_id(pid)
     if not p:
-        flash('Project not found', 'danger')
+        flash('项目未找到', 'danger')
         return redirect(url_for('main.index'))
     tasks = p.get_tasks()
     files = ResultFile.get_by_project(pid)
@@ -47,5 +47,5 @@ def delete(pid):
         if os.path.isdir(proj_dir):
             shutil.rmtree(proj_dir)
         p.delete()
-        flash(f'Project deleted', 'success')
+        flash('项目已删除', 'success')
     return redirect(url_for('main.index'))

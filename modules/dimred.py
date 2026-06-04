@@ -3,8 +3,8 @@ from modules.base import BaseAnalysis
 
 class DimredAnalysis(BaseAnalysis):
     MODULE_NAME = "dimred"
-    DISPLAY_NAME = "Dimensionality Reduction"
-    DESCRIPTION = "Scale, PCA, UMAP"
+    DISPLAY_NAME = "降维分析"
+    DESCRIPTION = "标准化、PCA、UMAP 降维"
     INPUT_REQUIRES = []
 
     def validate_input(self, adata):

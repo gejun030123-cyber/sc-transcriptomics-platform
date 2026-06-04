@@ -19,8 +19,8 @@ DEFAULT_TME_MARKERS = {
 
 class AnnotationAnalysis(BaseAnalysis):
     MODULE_NAME = "annotation"
-    DISPLAY_NAME = "Cell Annotation"
-    DESCRIPTION = "Marker-based cell type annotation"
+    DISPLAY_NAME = "细胞注释"
+    DESCRIPTION = "基于 Marker 基因的细胞类型自动注释"
     INPUT_REQUIRES = ['leiden']
 
     def validate_input(self, adata):

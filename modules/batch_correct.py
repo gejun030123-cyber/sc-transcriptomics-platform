@@ -3,8 +3,8 @@ from modules.base import BaseAnalysis
 
 class BatchCorrectAnalysis(BaseAnalysis):
     MODULE_NAME = "batch_correct"
-    DISPLAY_NAME = "Batch Correction"
-    DESCRIPTION = "Harmony, ComBat, or SysVI batch correction"
+    DISPLAY_NAME = "批次校正"
+    DESCRIPTION = "Harmony、ComBat 或 SysVI 批次效应校正"
     INPUT_REQUIRES = ['X_pca']
 
     def validate_input(self, adata):

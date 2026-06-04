@@ -1,19 +1,19 @@
 {% extends "base.html" %}
-{% block title %}{{ task.module_name }} - Results{% endblock %}
+{% block title %}{{ task.module_name }} - 分析结果{% endblock %}
 {% block content %}
 <div class="mb-3">
-    <a href="/projects/{{ project.id }}" class="text-decoration-none small">&larr; Back to {{ project.name }}</a>
+    <a href="/projects/{{ project.id }}" class="text-decoration-none small">&larr; 返回 {{ project.name }}</a>
 </div>
 
 <div class="card p-4 mb-4" id="task-card">
     <div class="d-flex justify-content-between align-items-center">
         <div>
-            <h4 class="mb-1">{{ task.module_name | upper }} Analysis</h4>
+            <h4 class="mb-1">{{ task.module_name | upper }} 分析</h4>
             <span class="status-badge status-{{ task.status }}" id="status-badge">{{ task.status }}</span>
         </div>
         <div>
             {% if task.status == 'completed' and task.output_adata_path %}
-            <a href="/projects/{{ project.id }}/download/{{ task.id }}" class="btn btn-outline-primary btn-sm">Download h5ad</a>
+            <a href="/projects/{{ project.id }}/download/{{ task.id }}" class="btn btn-outline-primary btn-sm">下载 h5ad</a>
             {% endif %}
         </div>
     </div>
@@ -34,7 +34,7 @@
 
 {% if task.status == 'failed' and task.error_traceback %}
 <div class="card p-4 mb-4 border-danger">
-    <h6 class="text-danger">Error</h6>
+    <h6 class="text-danger">错误信息</h6>
     <pre class="small bg-light p-3 rounded" style="max-height:300px;overflow:auto">{{ task.error_traceback }}</pre>
 </div>
 {% endif %}
@@ -53,7 +53,7 @@
 {% endif %}
 
 {% if plotly_files %}
-<h5 class="mb-3">Visualizations</h5>
+<h5 class="mb-3">可视化图表</h5>
 <div class="row">
     {% for f in plotly_files %}
     <div class="col-md-6 mb-4">
@@ -67,12 +67,12 @@
 {% endif %}
 
 {% if csv_files %}
-<h5 class="mb-3">Data Tables</h5>
+<h5 class="mb-3">数据表格</h5>
 <div class="card p-3 mb-4">
     {% for f in csv_files %}
     <div class="d-flex justify-content-between align-items-center py-2 border-bottom">
         <span>{{ f.label }}</span>
-        <a href="/projects/{{ project.id }}/results/file/{{ f.id }}" class="btn btn-outline-primary btn-sm">Download</a>
+        <a href="/projects/{{ project.id }}/results/file/{{ f.id }}" class="btn btn-outline-primary btn-sm">下载</a>
     </div>
     {% endfor %}
 </div>
@@ -80,7 +80,7 @@
 
 {% if task.status == 'completed' %}
 <div class="mt-3">
-    <a href="/projects/{{ project.id }}/results" class="btn btn-primary btn-sm">View All Results</a>
+    <a href="/projects/{{ project.id }}/results" class="btn btn-primary btn-sm">查看全部结果</a>
 </div>
 {% endif %}
 {% endblock %}

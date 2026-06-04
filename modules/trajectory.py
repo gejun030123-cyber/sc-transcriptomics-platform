@@ -4,8 +4,8 @@ from modules.base import BaseAnalysis
 
 class TrajectoryAnalysis(BaseAnalysis):
     MODULE_NAME = "trajectory"
-    DISPLAY_NAME = "Trajectory Analysis"
-    DESCRIPTION = "Pseudotime analysis using diffusion map or Slingshot"
+    DISPLAY_NAME = "轨迹分析"
+    DESCRIPTION = "基于扩散图或 Slingshot 的拟时序分析"
     INPUT_REQUIRES = ['X_umap']
 
     def validate_input(self, adata):

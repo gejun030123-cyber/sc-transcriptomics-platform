@@ -4,8 +4,8 @@ from modules.base import BaseAnalysis
 
 class ProportionAnalysis(BaseAnalysis):
     MODULE_NAME = "proportion"
-    DISPLAY_NAME = "Cell Proportions"
-    DESCRIPTION = "Cell proportion analysis across groups"
+    DISPLAY_NAME = "细胞比例分析"
+    DESCRIPTION = "各分组间的细胞比例差异分析"
     INPUT_REQUIRES = ['leiden']
 
     def validate_input(self, adata):

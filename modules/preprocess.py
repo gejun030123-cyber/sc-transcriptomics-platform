@@ -3,8 +3,8 @@ from modules.base import BaseAnalysis
 
 class PreprocessAnalysis(BaseAnalysis):
     MODULE_NAME = "preprocess"
-    DISPLAY_NAME = "Preprocessing"
-    DESCRIPTION = "Normalize, select highly variable genes"
+    DISPLAY_NAME = "预处理"
+    DESCRIPTION = "标准化，选择高变异基因"
     INPUT_REQUIRES = []
 
     def validate_input(self, adata):

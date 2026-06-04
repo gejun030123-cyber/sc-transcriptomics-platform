@@ -1,9 +1,9 @@
 {% extends "base.html" %}
-{% block title %}Upload Data - {{ project.name }}{% endblock %}
+{% block title %}上传数据 - {{ project.name }}{% endblock %}
 {% block content %}
 <div class="row justify-content-center">
     <div class="col-md-8">
-        <h4 class="mb-3">Upload Data — {{ project.name }}</h4>
+        <h4 class="mb-3">上传数据 — {{ project.name }}</h4>
         <div class="card p-4">
             <div class="upload-zone" id="upload-zone">
                 <div class="mb-3">
@@ -12,11 +12,11 @@
                         <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
                     </svg>
                 </div>
-                <h5>Drag & drop files here</h5>
-                <p class="text-muted">Supported: .h5ad, .h5 (10x), .mtx.gz, .csv, .txt</p>
+                <h5>拖拽文件到此处</h5>
+                <p class="text-muted">支持格式：.h5ad, .h5 (10x), .mtx.gz, .csv, .txt</p>
                 <input type="file" id="file-input" class="d-none" accept=".h5ad,.h5,.csv,.txt,.gz" multiple>
                 <button class="btn btn-primary btn-sm" onclick="document.getElementById('file-input').click()">
-                    Choose Files
+                    选择文件
                 </button>
             </div>
             <div id="upload-progress" class="mt-3 d-none">
@@ -35,13 +35,13 @@
 
         <form method="post" enctype="multipart/form-data" class="mt-3">
             <div class="card p-3">
-                <h6>Or use traditional upload:</h6>
+                <h6>或使用传统方式上传：</h6>
                 <input type="file" name="file" class="form-control mb-2" required>
-                <button type="submit" class="btn btn-outline-primary btn-sm">Upload</button>
+                <button type="submit" class="btn btn-outline-primary btn-sm">上传</button>
             </div>
         </form>
 
-        <a href="/projects/{{ project.id }}" class="btn btn-outline-secondary btn-sm mt-3">Back to Project</a>
+        <a href="/projects/{{ project.id }}" class="btn btn-outline-secondary btn-sm mt-3">返回项目</a>
     </div>
 </div>
 
@@ -81,11 +81,11 @@ function uploadFile(file) {
         progressDiv.classList.add('d-none');
         resultDiv.classList.remove('d-none');
         if (xhr.status === 200 || xhr.status === 302) {
-            document.getElementById('upload-msg').textContent = 'Upload successful! Redirecting...';
+            document.getElementById('upload-msg').textContent = '上传成功！正在跳转...';
             setTimeout(() => window.location.href = '/projects/{{ project.id }}', 1000);
         } else {
             document.getElementById('upload-msg').className = 'alert alert-danger';
-            document.getElementById('upload-msg').textContent = 'Upload failed: ' + xhr.statusText;
+            document.getElementById('upload-msg').textContent = '上传失败：' + xhr.statusText;
         }
     };
     xhr.send(formData);

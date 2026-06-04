@@ -7,7 +7,7 @@ from modules.base import BaseAnalysis
 class BulkNormalizeAnalysis(BaseAnalysis):
     MODULE_NAME = "bulk_normalize"
     DISPLAY_NAME = "Bulk 数据标准化"
-    DESCRIPTION = "Count matrix normalization: DESeq2 size factors, CPM, TPM"
+    DESCRIPTION = "计数矩阵标准化：DESeq2 size factors、CPM、分位数标准化"
     INPUT_REQUIRES = []
 
     def validate_input(self, adata):
