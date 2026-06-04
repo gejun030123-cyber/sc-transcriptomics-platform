@@ -2,7 +2,8 @@ import threading
 import concurrent.futures
 import traceback
 import json
-from database import get_db
+import sqlite3
+from config import Config
 from models import gen_id
 
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
@@ -19,9 +20,11 @@ def submit_task(task_id, project_id, module_name, params, project_dir, input_pat
     _active_futures[task_id] = future
 
 def _run_task(task_id, project_id, module_name, params, project_dir, input_path):
-    import importlib
-    db = get_db()
-    lock = threading.Lock()
+    # Worker uses its own DB connection to avoid conflicts with Flask thread
+    db = sqlite3.connect(Config.DB_PATH, check_same_thread=False)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA foreign_keys=ON")
     try:
         db.execute(
             "UPDATE analysis_tasks SET status='running', started_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -30,12 +33,11 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
         db.commit()
 
         def progress_cb(pct, message):
-            with lock:
-                db.execute(
-                    "UPDATE analysis_tasks SET progress=?, progress_message=? WHERE id=?",
-                    (pct, message, task_id)
-                )
-                db.commit()
+            db.execute(
+                "UPDATE analysis_tasks SET progress=?, progress_message=? WHERE id=?",
+                (pct, message, task_id)
+            )
+            db.commit()
 
         from modules import MODULE_REGISTRY
         cls = MODULE_REGISTRY.get(module_name)
@@ -55,7 +57,7 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
 
         db.execute(
             "UPDATE analysis_tasks SET status='completed', progress=100, "
-            "progress_message='Completed', finished_at=CURRENT_TIMESTAMP, "
+            "progress_message='已完成', finished_at=CURRENT_TIMESTAMP, "
             "output_adata_path=?, result_json=? WHERE id=?",
             (result.get('output_adata'), json.dumps(result.get('summary', {})), task_id)
         )
@@ -64,9 +66,10 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
     except Exception as e:
         db.execute(
             "UPDATE analysis_tasks SET status='failed', error_traceback=?, "
-            "progress_message='Failed', finished_at=CURRENT_TIMESTAMP WHERE id=?",
+            "progress_message='失败', finished_at=CURRENT_TIMESTAMP WHERE id=?",
             (traceback.format_exc(), task_id)
         )
         db.commit()
     finally:
+        db.close()
         _active_futures.pop(task_id, None)
