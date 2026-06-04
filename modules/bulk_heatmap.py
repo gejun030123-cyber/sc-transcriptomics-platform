@@ -21,14 +21,8 @@ class BulkHeatmapAnalysis(BaseAnalysis):
         from scipy.spatial.distance import pdist
 
         self.progress(5, "加载数据...")
-        if input_path.endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(input_path, index_col=0)
-            adata = sc.AnnData(X=df.values.T, obs=pd.DataFrame(index=df.columns), var=pd.DataFrame(index=df.index))
-        elif input_path.endswith('.csv') or input_path.endswith('.txt'):
-            df = pd.read_csv(input_path, sep=None if input_path.endswith('.csv') else '\t', index_col=0)
-            adata = sc.AnnData(X=df.values.T, obs=pd.DataFrame(index=df.columns), var=pd.DataFrame(index=df.index))
-        else:
-            adata = sc.read_h5ad(input_path)
+        from modules.io_utils import read_expression_matrix
+        adata = read_expression_matrix(input_path)
 
         top_n = int(self.params.get('top_n', 50))
         groupby = self.params.get('groupby', '')
