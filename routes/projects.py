@@ -3,6 +3,7 @@ import shutil
 from flask import Blueprint, render_template, request, redirect, url_for, flash
 from models import Project, AnalysisTask, ResultFile
 from config import Config
+from routes.analysis import MODULE_DISPLAY_MAP, STATUS_MAP
 
 projects_bp = Blueprint('projects', __name__)
 
@@ -37,7 +38,8 @@ def detail(pid):
             fpath = os.path.join(uploads_dir, f)
             if os.path.isfile(fpath):
                 uploaded.append({'name': f, 'size_mb': round(os.path.getsize(fpath) / (1024**2), 1)})
-    return render_template('project_detail.html', project=p, tasks=tasks, result_files=files, uploaded=uploaded)
+    return render_template('project_detail.html', project=p, tasks=tasks, result_files=files, uploaded=uploaded,
+                          module_display_map=module_display_map, status_map=status_map)
 
 @projects_bp.route('/<pid>/delete', methods=['POST'])
 def delete(pid):

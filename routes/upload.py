@@ -6,7 +6,7 @@ from config import Config
 
 upload_bp = Blueprint('upload', __name__)
 
-ALLOWED_EXT = {'.h5ad', '.h5', '.csv', '.txt', '.mtx', '.gz'}
+ALLOWED_EXT = {'.h5ad', '.h5', '.csv', '.txt', '.mtx', '.gz', '.xlsx', '.xls'}
 
 @upload_bp.route('/<pid>/upload', methods=['GET', 'POST'])
 def upload(pid):

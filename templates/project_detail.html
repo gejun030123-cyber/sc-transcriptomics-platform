@@ -12,6 +12,25 @@
     </div>
 </div>
 
+<div class="row mb-4">
+    <div class="col-md-6">
+        <a href="/projects/{{ project.id }}/sc-analysis" class="text-decoration-none">
+            <div class="card p-4 h-100" style="border-left: 4px solid #1a237e;">
+                <h5 class="text-dark mb-2">单细胞转录组分析</h5>
+                <p class="text-muted small mb-0">质控 → 预处理 → 降维 → 聚类 → 注释 → 差异表达 → 轨迹分析</p>
+            </div>
+        </a>
+    </div>
+    <div class="col-md-6">
+        <a href="/projects/{{ project.id }}/bulk-analysis" class="text-decoration-none">
+            <div class="card p-4 h-100" style="border-left: 4px solid #e53935;">
+                <h5 class="text-dark mb-2">Bulk RNA-seq 分析</h5>
+                <p class="text-muted small mb-0">质控 → 标准化 → 差异表达 → PCA/UMAP → 热图（支持 Excel 导入）</p>
+            </div>
+        </a>
+    </div>
+</div>
+
 <div class="row">
     <div class="col-md-4">
         <div class="card p-3 mb-3">
@@ -27,53 +46,6 @@
                 <p class="text-muted small mb-0">暂无上传文件</p>
             {% endif %}
         </div>
-
-        <div class="card p-3 mb-3">
-            <h6 class="mb-2">分析流程</h6>
-            <div class="list-group list-group-flush">
-                <div class="pipeline-section-title">单细胞分析</div>
-                {% set sc_modules = [
-                    ('qc', '质控'),
-                    ('preprocess', '预处理'),
-                    ('dimred', '降维分析'),
-                    ('batch_correct', '批次校正'),
-                    ('clustering', '聚类分析'),
-                    ('annotation', '细胞注释'),
-                    ('deg', '差异表达'),
-                    ('trajectory', '轨迹分析'),
-                    ('proportion', '比例分析')
-                ] %}
-                {% for mod, label in sc_modules %}
-                <a href="/projects/{{ project.id }}/analyze/{{ mod }}"
-                   class="list-group-item list-group-item-action d-flex justify-content-between align-items-center py-2">
-                    {{ label }}
-                    {% set completed = tasks|selectattr('module_name', 'equalto', mod)|selectattr('status', 'equalto', 'completed')|list %}
-                    {% if completed %}
-                        <span class="badge bg-success">已完成</span>
-                    {% endif %}
-                </a>
-                {% endfor %}
-
-                <div class="pipeline-section-title">Bulk RNA-seq 分析</div>
-                {% set bulk_modules = [
-                    ('bulk_qc', 'Bulk 质控'),
-                    ('bulk_normalize', 'Bulk 标准化'),
-                    ('bulk_deg', 'Bulk 差异表达'),
-                    ('bulk_pca', 'Bulk PCA/UMAP'),
-                    ('bulk_heatmap', 'Bulk 热图')
-                ] %}
-                {% for mod, label in bulk_modules %}
-                <a href="/projects/{{ project.id }}/analyze/{{ mod }}"
-                   class="list-group-item list-group-item-action d-flex justify-content-between align-items-center py-2">
-                    {{ label }}
-                    {% set completed = tasks|selectattr('module_name', 'equalto', mod)|selectattr('status', 'equalto', 'completed')|list %}
-                    {% if completed %}
-                        <span class="badge bg-success">已完成</span>
-                    {% endif %}
-                </a>
-                {% endfor %}
-            </div>
-        </div>
     </div>
 
     <div class="col-md-8">
@@ -83,7 +55,7 @@
                 {% for t in tasks %}
                 <div class="d-flex justify-content-between align-items-center py-2 border-bottom">
                     <div>
-                        <a href="/projects/{{ project.id }}/task/{{ t.id }}" class="fw-bold text-decoration-none">{{ t.module_name }}</a>
+                        <a href="/projects/{{ project.id }}/task/{{ t.id }}" class="fw-bold text-decoration-none">{{ module_display_map.get(t.module_name, t.module_name) }}</a>
                         {% if t.status == 'running' %}
                         <div class="progress-container mt-1" style="width:200px">
                             <div class="progress-bar-inner" style="width:{{ t.progress }}%"></div>
@@ -91,7 +63,7 @@
                         {% endif %}
                     </div>
                     <div class="text-end">
-                        <span class="status-badge status-{{ t.status }}">{{ t.status }}</span>
+                        <span class="status-badge status-{{ t.status }}">{{ status_map.get(t.status, t.status) }}</span>
                         <div class="small text-muted">{{ t.progress_message }}</div>
                     </div>
                 </div>

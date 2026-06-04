@@ -1,6 +1,7 @@
 import json
 from flask import Blueprint, render_template, send_file, flash, redirect, url_for
 from models import Project, AnalysisTask, ResultFile
+from routes.analysis import MODULE_DISPLAY_MAP, STATUS_MAP
 
 results_bp = Blueprint('results', __name__)
 
@@ -21,7 +22,9 @@ def task_detail(pid, task_id):
         pass
     return render_template('analysis_result.html', project=p, task=t,
                           plotly_files=plotly_files, csv_files=csv_files,
-                          result_data=result_data)
+                          result_data=result_data,
+                          module_display=MODULE_DISPLAY_MAP.get(t.module_name, t.module_name),
+                          status_cn=STATUS_MAP.get(t.status, t.status))
 
 @results_bp.route('/<pid>/results')
 def results_gallery(pid):
@@ -30,7 +33,8 @@ def results_gallery(pid):
         flash('未找到', 'danger')
         return redirect(url_for('main.index'))
     tasks = AnalysisTask.get_by_project(pid)
-    return render_template('results_gallery.html', project=p, tasks=tasks)
+    return render_template('results_gallery.html', project=p, tasks=tasks,
+                          module_display_map=MODULE_DISPLAY_MAP, status_map=STATUS_MAP)
 
 @results_bp.route('/<pid>/results/file/<file_id>')
 def view_file(pid, file_id):

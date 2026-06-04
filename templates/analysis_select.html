@@ -1,35 +1,27 @@
 {% extends "base.html" %}
 {% block title %}{{ module.display }} - {{ project.name }}{% endblock %}
 {% block content %}
+<div class="mb-3">
+    {% if module.name.startswith('bulk_') %}
+    <a href="/projects/{{ project.id }}/bulk-analysis" class="text-decoration-none small">&larr; 返回 Bulk 分析列表</a>
+    {% else %}
+    <a href="/projects/{{ project.id }}/sc-analysis" class="text-decoration-none small">&larr; 返回单细胞分析列表</a>
+    {% endif %}
+</div>
+
 <div class="row">
     <div class="col-md-3">
         <div class="card p-3">
-            <h6 class="mb-2">分析流程</h6>
-
-            <div class="pipeline-section-title">单细胞分析</div>
-            {% set sc_names = ['qc','preprocess','dimred','batch_correct','clustering','annotation','deg','trajectory','proportion'] %}
+            <h6 class="mb-2">
+                {% if module.name.startswith('bulk_') %}Bulk RNA-seq 流程{% else %}单细胞分析流程{% endif %}
+            </h6>
             {% for m in all_modules %}
-            {% if m.name in sc_names %}
             <a href="/projects/{{ project.id }}/analyze/{{ m.name }}"
                class="sidebar-module d-block text-decoration-none small {% if m.name == module.name %}active{% endif %}">
                 {{ m.display }}
                 {% set completed = completed_tasks|selectattr('module_name', 'equalto', m.name)|list %}
                 {% if completed %}<span class="float-end text-success">&#10003;</span>{% endif %}
             </a>
-            {% endif %}
-            {% endfor %}
-
-            <div class="pipeline-section-title">Bulk RNA-seq 分析</div>
-            {% set bulk_names = ['bulk_qc','bulk_normalize','bulk_deg','bulk_pca','bulk_heatmap'] %}
-            {% for m in all_modules %}
-            {% if m.name in bulk_names %}
-            <a href="/projects/{{ project.id }}/analyze/{{ m.name }}"
-               class="sidebar-module d-block text-decoration-none small {% if m.name == module.name %}active{% endif %}">
-                {{ m.display }}
-                {% set completed = completed_tasks|selectattr('module_name', 'equalto', m.name)|list %}
-                {% if completed %}<span class="float-end text-success">&#10003;</span>{% endif %}
-            </a>
-            {% endif %}
             {% endfor %}
         </div>
     </div>

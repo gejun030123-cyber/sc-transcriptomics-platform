@@ -6,7 +6,7 @@ from config import Config
 
 analysis_bp = Blueprint('analysis', __name__)
 
-MODULE_LIST = [
+SC_MODULE_LIST = [
     {'name': 'qc', 'display': '质控', 'desc': '过滤细胞，去除双细胞'},
     {'name': 'preprocess', 'display': '预处理', 'desc': '标准化，选择高变异基因'},
     {'name': 'dimred', 'display': '降维分析', 'desc': 'PCA, UMAP'},
@@ -16,12 +16,30 @@ MODULE_LIST = [
     {'name': 'deg', 'display': '差异表达', 'desc': '差异表达基因分析'},
     {'name': 'trajectory', 'display': '轨迹分析', 'desc': '拟时序分析'},
     {'name': 'proportion', 'display': '比例分析', 'desc': '细胞比例分析'},
-    {'name': 'bulk_qc', 'display': 'Bulk 质控', 'desc': '文库大小、基因检测、离群值过滤'},
-    {'name': 'bulk_normalize', 'display': 'Bulk 标准化', 'desc': 'DESeq2 / CPM / 分位数标准化'},
-    {'name': 'bulk_deg', 'display': 'Bulk 差异表达', 'desc': '组间差异基因检测（火山图、MA图）'},
-    {'name': 'bulk_pca', 'display': 'Bulk PCA/UMAP', 'desc': 'PCA 和 UMAP 降维可视化'},
-    {'name': 'bulk_heatmap', 'display': 'Bulk 热图', 'desc': 'Top 差异基因热图、样本相关性热图'},
 ]
+
+BULK_MODULE_LIST = [
+    {'name': 'bulk_qc', 'display': '数据质控', 'desc': '文库大小、基因检测、离群值过滤'},
+    {'name': 'bulk_normalize', 'display': '数据标准化', 'desc': 'DESeq2 / CPM / 分位数标准化'},
+    {'name': 'bulk_deg', 'display': '差异表达分析', 'desc': '组间差异基因检测（火山图、MA图）'},
+    {'name': 'bulk_pca', 'display': 'PCA / UMAP', 'desc': 'PCA 和 UMAP 降维可视化'},
+    {'name': 'bulk_heatmap', 'display': '热图分析', 'desc': 'Top 差异基因热图、样本相关性热图'},
+]
+
+MODULE_LIST = SC_MODULE_LIST + BULK_MODULE_LIST
+
+MODULE_DISPLAY_MAP = {m['name']: m['display'] for m in MODULE_LIST}
+
+SC_MODULE_NAMES = {m['name'] for m in SC_MODULE_LIST}
+BULK_MODULE_NAMES = {m['name'] for m in BULK_MODULE_LIST}
+
+STATUS_MAP = {
+    'pending': '等待中',
+    'running': '运行中',
+    'completed': '已完成',
+    'failed': '失败',
+    'processing': '处理中',
+}
 
 PARAM_SCHEMAS = {
     'qc': [
@@ -96,6 +114,27 @@ PARAM_SCHEMAS = {
     ],
 }
 
+
+@analysis_bp.route('/<pid>/sc-analysis')
+def sc_analysis_list(pid):
+    p = Project.get_by_id(pid)
+    if not p:
+        flash('项目未找到', 'danger')
+        return redirect(url_for('main.index'))
+    tasks = AnalysisTask.get_by_project(pid)
+    return render_template('sc_analysis.html', project=p, modules=SC_MODULE_LIST, tasks=tasks)
+
+
+@analysis_bp.route('/<pid>/bulk-analysis')
+def bulk_analysis_list(pid):
+    p = Project.get_by_id(pid)
+    if not p:
+        flash('项目未找到', 'danger')
+        return redirect(url_for('main.index'))
+    tasks = AnalysisTask.get_by_project(pid)
+    return render_template('bulk_analysis.html', project=p, modules=BULK_MODULE_LIST, tasks=tasks)
+
+
 @analysis_bp.route('/<pid>/analyze/<module_name>', methods=['GET', 'POST'])
 def analyze(pid, module_name):
     p = Project.get_by_id(pid)
@@ -109,6 +148,9 @@ def analyze(pid, module_name):
     schema = PARAM_SCHEMAS.get(module_name, [])
     tasks = AnalysisTask.get_by_project(pid)
     completed_tasks = [t for t in tasks if t.status == 'completed' and t.output_adata_path]
+
+    is_bulk = module_name in BULK_MODULE_NAMES
+
     if request.method == 'POST':
         params = {}
         for param in schema:
@@ -132,12 +174,20 @@ def analyze(pid, module_name):
         submit_task(task.id, pid, module_name, params,
                    os.path.join(Config.DATA_DIR, 'projects', pid), input_path)
         return redirect(url_for('results.task_detail', pid=pid, task_id=task.id))
+
     uploads_dir = os.path.join(Config.DATA_DIR, 'projects', pid, 'uploads')
-    uploaded_h5ad = []
+    uploaded_files = []
     if os.path.isdir(uploads_dir):
         for f in os.listdir(uploads_dir):
-            if f.endswith('.h5ad'):
-                uploaded_h5ad.append({'name': f, 'path': os.path.join(uploads_dir, f)})
+            fpath = os.path.join(uploads_dir, f)
+            if is_bulk:
+                if f.endswith(('.h5ad', '.csv', '.txt', '.xlsx', '.xls')):
+                    uploaded_files.append({'name': f, 'path': fpath})
+            else:
+                if f.endswith('.h5ad'):
+                    uploaded_files.append({'name': f, 'path': fpath})
+
+    sidebar_modules = BULK_MODULE_LIST if is_bulk else SC_MODULE_LIST
     return render_template('analysis_select.html', project=p, module=mod_info,
                           schema=schema, completed_tasks=completed_tasks,
-                          uploaded_h5ad=uploaded_h5ad, all_modules=MODULE_LIST)
+                          uploaded_h5ad=uploaded_files, all_modules=sidebar_modules)

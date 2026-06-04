@@ -8,8 +8,8 @@
 <div class="card p-4 mb-4" id="task-card">
     <div class="d-flex justify-content-between align-items-center">
         <div>
-            <h4 class="mb-1">{{ task.module_name | upper }} 分析</h4>
-            <span class="status-badge status-{{ task.status }}" id="status-badge">{{ task.status }}</span>
+            <h4 class="mb-1">{{ module_display }} 分析</h4>
+            <span class="status-badge status-{{ task.status }}" id="status-badge">{{ status_cn }}</span>
         </div>
         <div>
             {% if task.status == 'completed' and task.output_adata_path %}
@@ -90,6 +90,8 @@
 const TASK_ID = "{{ task.id }}";
 const STATUS = "{{ task.status }}";
 
+const STATUS_CN = {'running': '运行中', 'completed': '已完成', 'pending': '等待中', 'failed': '失败'};
+
 if (STATUS === 'running' || STATUS === 'pending') {
     const interval = setInterval(async () => {
         try {
@@ -98,6 +100,9 @@ if (STATUS === 'running' || STATUS === 'pending') {
             document.getElementById('progress-bar').style.width = d.progress + '%';
             document.getElementById('progress-pct').textContent = d.progress + '%';
             document.getElementById('progress-msg').textContent = d.progress_message;
+            const badge = document.getElementById('status-badge');
+            badge.textContent = STATUS_CN[d.status] || d.status;
+            badge.className = 'status-badge status-' + d.status;
             if (d.status === 'completed' || d.status === 'failed') {
                 clearInterval(interval);
                 setTimeout(() => location.reload(), 500);

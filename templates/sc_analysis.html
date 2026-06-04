@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}单细胞转录组分析 - {{ project.name }}{% endblock %}
+{% block content %}
+<div class="mb-3">
+    <a href="/projects/{{ project.id }}" class="text-decoration-none small">&larr; 返回 {{ project.name }}</a>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div>
+        <h4>单细胞转录组分析</h4>
+        <p class="text-muted mb-0">从质控到轨迹分析的完整单细胞分析流程</p>
+    </div>
+    <a href="/projects/{{ project.id }}/upload" class="btn btn-primary btn-sm">上传数据</a>
+</div>
+
+<div class="row">
+    {% for m in modules %}
+    <div class="col-md-4 mb-3">
+        <div class="card p-3 h-100">
+            <div class="d-flex justify-content-between align-items-start mb-2">
+                <h6 class="mb-0">{{ m.display }}</h6>
+                {% set completed = tasks|selectattr('module_name', 'equalto', m.name)|selectattr('status', 'equalto', 'completed')|list %}
+                {% if completed %}
+                    <span class="badge bg-success">已完成</span>
+                {% endif %}
+            </div>
+            <p class="text-muted small mb-3">{{ m.desc }}</p>
+            <a href="/projects/{{ project.id }}/analyze/{{ m.name }}" class="btn btn-outline-primary btn-sm">运行分析</a>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}

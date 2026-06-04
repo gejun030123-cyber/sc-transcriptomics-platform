@@ -21,7 +21,10 @@ class BulkQCAnalysis(BaseAnalysis):
         from plotly.subplots import make_subplots
 
         self.progress(5, "加载计数矩阵...")
-        if input_path.endswith('.csv') or input_path.endswith('.txt'):
+        if input_path.endswith(('.xlsx', '.xls')):
+            df = pd.read_excel(input_path, index_col=0)
+            adata = sc.AnnData(X=df.values.T, obs=pd.DataFrame(index=df.columns), var=pd.DataFrame(index=df.index))
+        elif input_path.endswith('.csv') or input_path.endswith('.txt'):
             df = pd.read_csv(input_path, sep=None if input_path.endswith('.csv') else '\t', index_col=0)
             adata = sc.AnnData(X=df.values.T, obs=pd.DataFrame(index=df.columns), var=pd.DataFrame(index=df.index))
         else:
