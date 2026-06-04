@@ -21,7 +21,7 @@ def submit_task(task_id, project_id, module_name, params, project_dir, input_pat
 
 def _run_task(task_id, project_id, module_name, params, project_dir, input_path):
     # Worker uses its own DB connection to avoid conflicts with Flask thread
-    db = sqlite3.connect(Config.DB_PATH, check_same_thread=False)
+    db = sqlite3.connect(Config.DB_PATH)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA foreign_keys=ON")

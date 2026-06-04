@@ -10,7 +10,7 @@ def gen_id():
 
 
 def _get_conn():
-    conn = sqlite3.connect(Config.DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(Config.DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
