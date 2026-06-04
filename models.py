@@ -29,11 +29,18 @@ class Project:
 
     def save(self):
         conn = _get_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO projects (id, name, description, created_at, updated_at, status, metadata_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (self.id, self.name, self.description, self.created_at, self.updated_at, self.status, self.metadata_json)
-        )
+        existing = conn.execute("SELECT id FROM projects WHERE id=?", (self.id,)).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE projects SET name=?, description=?, created_at=?, updated_at=?, status=?, metadata_json=? WHERE id=?",
+                (self.name, self.description, self.created_at, self.updated_at, self.status, self.metadata_json, self.id)
+            )
+        else:
+            conn.execute(
+                "INSERT INTO projects (id, name, description, created_at, updated_at, status, metadata_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (self.id, self.name, self.description, self.created_at, self.updated_at, self.status, self.metadata_json)
+            )
         conn.commit()
         conn.close()
 
