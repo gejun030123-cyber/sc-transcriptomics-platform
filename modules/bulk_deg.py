@@ -35,8 +35,18 @@ class BulkDEGAnalysis(BaseAnalysis):
 
         self.progress(15, "解析分组信息...")
 
-        counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
-        counts = counts.astype(float)
+        # 优先使用 normalized layer（未取 log 的标准化数据），否则用 X
+        is_log_transformed = False
+        if 'normalized' in adata.layers:
+            raw_layer = adata.layers['normalized']
+            counts = raw_layer if not hasattr(raw_layer, 'toarray') else raw_layer.toarray()
+            counts = counts.astype(float)
+        else:
+            counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
+            counts = counts.astype(float)
+            # 检测数据是否已经 log 变换（max < 50 通常是 log2 数据）
+            if counts.max() < 50 and counts.min() >= 0:
+                is_log_transformed = True
         # 清理 inf/NaN
         counts = np.nan_to_num(counts, nan=0.0, posinf=0.0, neginf=0.0)
         gene_ids = adata.var_names.tolist()
@@ -56,6 +66,12 @@ class BulkDEGAnalysis(BaseAnalysis):
         # 处理自动检测的分组（从样本名中提取）
         if groupby == '_auto_group_':
             auto_mapping = self.params.get('_auto_group_mapping', {})
+            # 处理 JSON 字符串情况
+            if isinstance(auto_mapping, str):
+                try:
+                    auto_mapping = json.loads(auto_mapping)
+                except Exception:
+                    auto_mapping = {}
             if auto_mapping:
                 groupby = 'auto_group'
                 adata.obs[groupby] = adata.obs.index.map(
@@ -132,9 +148,14 @@ class BulkDEGAnalysis(BaseAnalysis):
 
             mean1 = np.mean(data1, axis=0)
             mean2 = np.mean(data2, axis=0)
-            mean1_safe = np.where(mean1 > 0, mean1, 1e-10)
-            mean2_safe = np.where(mean2 > 0, mean2, 1e-10)
-            log2fc = np.log2(mean1_safe / mean2_safe)
+
+            if is_log_transformed:
+                # 数据已经是 log2 变换后的，log2FC = mean1 - mean2
+                log2fc = mean1 - mean2
+            else:
+                mean1_safe = np.where(mean1 > 0, mean1, 1e-10)
+                mean2_safe = np.where(mean2 > 0, mean2, 1e-10)
+                log2fc = np.log2(mean1_safe / mean2_safe)
 
             for i in range(n_genes):
                 if method == 't-test':
