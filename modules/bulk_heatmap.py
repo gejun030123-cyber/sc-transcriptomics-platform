@@ -31,6 +31,8 @@ class BulkHeatmapAnalysis(BaseAnalysis):
         self.progress(20, "计算数据矩阵...")
         counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
         counts = counts.astype(float)
+        # 清理 inf/NaN
+        counts = np.nan_to_num(counts, nan=0.0, posinf=0.0, neginf=0.0)
 
         sc.pp.normalize_total(adata, target_sum=1e6)
         sc.pp.log1p(adata)

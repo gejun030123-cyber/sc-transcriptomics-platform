@@ -2,6 +2,7 @@ import json
 from flask import Blueprint, render_template, send_file, flash, redirect, url_for
 from models import Project, AnalysisTask, ResultFile
 from routes.analysis import MODULE_DISPLAY_MAP, STATUS_MAP
+from modules import PIPELINE_ORDER
 
 results_bp = Blueprint('results', __name__)
 
@@ -20,11 +21,24 @@ def task_detail(pid, task_id):
         result_data = json.loads(t.result_json) if t.result_json else {}
     except Exception:
         pass
+
+    # 计算下一步模块
+    next_module = None
+    current_module = t.module_name
+    try:
+        idx = PIPELINE_ORDER.index(current_module)
+        if idx < len(PIPELINE_ORDER) - 1:
+            next_module = PIPELINE_ORDER[idx + 1]
+    except ValueError:
+        pass
+
     return render_template('analysis_result.html', project=p, task=t,
                           plotly_files=plotly_files, csv_files=csv_files,
                           result_data=result_data,
                           module_display=MODULE_DISPLAY_MAP.get(t.module_name, t.module_name),
-                          status_cn=STATUS_MAP.get(t.status, t.status))
+                          status_cn=STATUS_MAP.get(t.status, t.status),
+                          next_module=next_module,
+                          module_display_map=MODULE_DISPLAY_MAP)
 
 @results_bp.route('/<pid>/results')
 def results_gallery(pid):

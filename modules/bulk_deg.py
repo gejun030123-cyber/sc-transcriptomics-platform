@@ -37,6 +37,8 @@ class BulkDEGAnalysis(BaseAnalysis):
 
         counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
         counts = counts.astype(float)
+        # 清理 inf/NaN
+        counts = np.nan_to_num(counts, nan=0.0, posinf=0.0, neginf=0.0)
         gene_ids = adata.var_names.tolist()
         # 优先使用基因名（symbol），如果没有则使用 gene ID
         if 'gene_name' in adata.var.columns:

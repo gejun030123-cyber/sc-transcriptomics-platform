@@ -81,8 +81,20 @@
 {% if task.status == 'completed' %}
 <div class="mt-3">
     <a href="/projects/{{ project.id }}/results" class="btn btn-primary btn-sm">查看全部结果</a>
+    {% if next_module %}
+    <a href="/projects/{{ project.id }}/analyze/{{ next_module }}" class="btn btn-success btn-sm ms-2">
+        下一步：{{ module_display_map.get(next_module, next_module) }} &rarr;
+    </a>
+    {% endif %}
 </div>
 {% endif %}
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.plotly-chart { min-height: 400px; }
+.plotly-chart .js-plotly-plot { width: 100% !important; }
+</style>
 {% endblock %}
 
 {% block extra_js %}
@@ -114,7 +126,13 @@ if (STATUS === 'running' || STATUS === 'pending') {
 {% for f in plotly_files %}
 fetch('/api/result-file/{{ f.id }}')
     .then(r => r.json())
-    .then(data => Plotly.newPlot('plot-{{ f.id }}', data.data, data.layout, {responsive: true}));
+    .then(data => Plotly.newPlot('plot-{{ f.id }}', data.data, data.layout, {
+                responsive: true,
+                scrollZoom: true,
+                displayModeBar: true,
+                modeBarButtonsToRemove: ['lasso2d', 'select2d'],
+                displaylogo: false
+            }));
 {% endfor %}
 </script>
 {% endblock %}

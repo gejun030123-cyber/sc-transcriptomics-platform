@@ -40,11 +40,23 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             adata.layers['normalized'] = norm_counts
             adata.X = np.log2(norm_counts + 1)
 
+            # 清理 inf/NaN 值
+            import numpy as _np
+            adata.X = _np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
+            if 'normalized' in adata.layers:
+                adata.layers['normalized'] = _np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
+
         elif method == 'cpm':
             lib_sizes = raw_counts.sum(axis=1, keepdims=True)
             cpm = raw_counts / lib_sizes * 1e6
             adata.layers['normalized'] = cpm
             adata.X = np.log2(cpm + 1)
+
+            # 清理 inf/NaN 值
+            import numpy as _np
+            adata.X = _np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
+            if 'normalized' in adata.layers:
+                adata.layers['normalized'] = _np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
 
         elif method == 'log2_quantile':
             from scipy.stats import gmean
@@ -58,6 +70,12 @@ class BulkNormalizeAnalysis(BaseAnalysis):
                 norm[sorted_idx, i] = ref_distribution
             adata.layers['normalized'] = 2**norm - 1
             adata.X = norm
+
+            # 清理 inf/NaN 值
+            import numpy as _np
+            adata.X = _np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
+            if 'normalized' in adata.layers:
+                adata.layers['normalized'] = _np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
 
         self.progress(60, "生成标准化前后对比图...")
         plots_dir = os.path.join(self.project_dir, 'plots')

@@ -22,6 +22,10 @@ class BulkPCAAnalysis(BaseAnalysis):
         from modules.io_utils import read_expression_matrix
         adata = read_expression_matrix(input_path)
 
+        # 清理 inf/NaN
+        import numpy as _np
+        adata.X = _np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
+
         n_comps = int(self.params.get('n_comps', 10))
         color_by = self.params.get('color_by', '')
         dimred_method = self.params.get('dimred_method', 'pca')
