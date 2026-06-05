@@ -32,6 +32,13 @@ class BulkDEGAnalysis(BaseAnalysis):
 
         self.progress(15, "构建计数矩阵...")
 
+        # 构建基因ID→基因名映射
+        gene_id_to_name = {}
+        if 'gene_name' in adata.var.columns:
+            for gid, gname in zip(adata.var_names, adata.var['gene_name']):
+                if pd.notna(gname) and str(gname).strip():
+                    gene_id_to_name[str(gid)] = str(gname).strip()
+
         # 构建 OmicVerse pyDEG 所需的 counts DataFrame（基因×样本）
         counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
         counts = np.nan_to_num(counts.astype(float), nan=0.0, posinf=0.0, neginf=0.0)
@@ -90,7 +97,12 @@ class BulkDEGAnalysis(BaseAnalysis):
         self.progress(60, "解析结果...")
 
         # 提取结果
-        gene_names = result.index.tolist()
+        gene_ids_list = result.index.tolist()
+        # 将 Ensembl ID 映射为基因名（如果存在映射）
+        if gene_id_to_name:
+            gene_names = [gene_id_to_name.get(g, g) for g in gene_ids_list]
+        else:
+            gene_names = gene_ids_list
         log2fc = result['log2FC'].values
         pvalues = result['pvalue'].values
         padj = result['qvalue'].values
