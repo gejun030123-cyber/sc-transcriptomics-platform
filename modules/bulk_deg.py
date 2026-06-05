@@ -8,19 +8,17 @@ from modules.base import BaseAnalysis
 class BulkDEGAnalysis(BaseAnalysis):
     MODULE_NAME = "bulk_deg"
     DISPLAY_NAME = "Bulk 差异表达分析"
-    DESCRIPTION = "组间差异表达基因检测：t-test / Mann-Whitney / DESeq2 风格"
+    DESCRIPTION = "组间差异表达基因检测：t-test / Mann-Whitney / DESeq2（基于 OmicVerse）"
     INPUT_REQUIRES = []
 
     def validate_input(self, adata):
         return None
 
     def run(self, input_path):
-        import scanpy as sc
         import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
-        from scipy import stats
 
         self.progress(5, "加载数据...")
+        import omicverse as ov
         from modules.io_utils import read_expression_matrix
         adata = read_expression_matrix(input_path)
 
@@ -31,42 +29,17 @@ class BulkDEGAnalysis(BaseAnalysis):
         fc_threshold = float(self.params.get('fc_threshold', 2.0))
         pval_threshold = float(self.params.get('pval_threshold', 0.05))
         top_n = int(self.params.get('top_n', 20))
-        base_mean_filter = float(self.params.get('base_mean_filter', 1))
 
-        self.progress(15, "解析分组信息...")
+        self.progress(15, "构建计数矩阵...")
 
-        # 优先使用 normalized layer（未取 log 的标准化数据），否则用 X
-        is_log_transformed = False
-        if 'normalized' in adata.layers:
-            raw_layer = adata.layers['normalized']
-            counts = raw_layer if not hasattr(raw_layer, 'toarray') else raw_layer.toarray()
-            counts = counts.astype(float)
-        else:
-            counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
-            counts = counts.astype(float)
-            # 检测数据是否已经 log 变换（max < 50 通常是 log2 数据）
-            if counts.max() < 50 and counts.min() >= 0:
-                is_log_transformed = True
-        # 清理 inf/NaN
-        counts = np.nan_to_num(counts, nan=0.0, posinf=0.0, neginf=0.0)
-        gene_ids = adata.var_names.tolist()
-        # 优先使用基因名（symbol），如果没有则使用 gene ID
-        if 'gene_name' in adata.var.columns:
-            gene_names = adata.var['gene_name'].tolist()
-        else:
-            gene_names = gene_ids
+        # 构建 OmicVerse pyDEG 所需的 counts DataFrame（基因×样本）
+        counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
+        counts = np.nan_to_num(counts.astype(float), nan=0.0, posinf=0.0, neginf=0.0)
+        count_df = pd.DataFrame(counts.T, index=adata.var_names.tolist(), columns=adata.obs.index.tolist())
 
-        # BaseMean 过滤：去除低表达基因
-        raw_mean = counts.mean(axis=0)
-        expr_mask = raw_mean > base_mean_filter
-        counts = counts[:, expr_mask]
-        gene_ids = [gene_ids[i] for i in range(len(gene_ids)) if expr_mask[i]]
-        gene_names = [gene_names[i] for i in range(len(gene_names)) if expr_mask[i]]
-
-        # 处理自动检测的分组（从样本名中提取）
+        # 处理自动检测的分组
         if groupby == '_auto_group_':
             auto_mapping = self.params.get('_auto_group_mapping', {})
-            # 处理 JSON 字符串情况
             if isinstance(auto_mapping, str):
                 try:
                     auto_mapping = json.loads(auto_mapping)
@@ -74,120 +47,79 @@ class BulkDEGAnalysis(BaseAnalysis):
                     auto_mapping = {}
             if auto_mapping:
                 groupby = 'auto_group'
-                adata.obs[groupby] = adata.obs.index.map(
-                    lambda x: auto_mapping.get(str(x), 'unknown')
-                )
+                adata.obs[groupby] = adata.obs.index.map(lambda x: auto_mapping.get(str(x), 'unknown'))
             else:
                 raise ValueError("自动分组映射数据缺失，请重新选择输入文件。")
 
+        # 确定两组样本名
         if groupby in adata.obs.columns:
             groups = adata.obs[groupby].unique().tolist()
             if not group1 or group1 not in groups:
                 group1 = groups[0]
-            mask1 = adata.obs[groupby] == group1
-            data1 = counts[mask1.values]
-
             if group2 == 'rest' or (not group2 or group2 not in groups):
-                if group2 == 'rest':
-                    # rest 模式：对照组 = 除实验组外的所有样本
-                    mask2 = ~mask1
-                    group2 = f'rest (n={mask2.sum()})'
-                elif len(groups) < 2:
-                    raise ValueError(f"分组列 '{groupby}' 中只有 {len(groups)} 个分组，无法进行差异分析。至少需要 2 个分组。")
-                else:
-                    group2 = groups[1]
-                    mask2 = adata.obs[groupby] == group2
+                group2_samples = [s for s in adata.obs.index if adata.obs.loc[s, groupby] != group1]
+                group2 = f'rest (n={len(group2_samples)})'
             else:
-                mask2 = adata.obs[groupby] == group2
-
-            data2 = counts[mask2.values]
+                group2_samples = list(adata.obs.index[adata.obs[groupby] == group2])
+            group1_samples = list(adata.obs.index[adata.obs[groupby] == group1])
         else:
             n = counts.shape[0]
             half = n // 2
             if half == 0 or half == n:
-                raise ValueError(f"未找到分组列 '{groupby}'，且样本数 ({n}) 不足以自动分为两组。请确保数据包含分组信息或至少有 2 个样本。")
+                raise ValueError(f"未找到分组列 '{groupby}'，样本数不足。")
+            group1_samples = list(adata.obs.index[:half])
+            group2_samples = list(adata.obs.index[half:])
             group1, group2 = "Group1", "Group2"
-            data1, data2 = counts[:half], counts[half:]
-            mask1 = pd.Series([True]*half + [False]*(n-half), index=adata.obs.index)
-            mask2 = pd.Series([False]*half + [True]*(n-half), index=adata.obs.index)
             adata.obs[groupby] = pd.Series(
                 ['Group1']*half + ['Group2']*(n-half), index=adata.obs.index
             )
 
-        self.progress(30, f"差异分析：{method}...")
-        n_genes = counts.shape[1]
+        self.progress(25, "OmicVerse 归一化 + 差异分析...")
 
-        if method == 'deseq2':
-            import omicverse as ov
-            # Build count matrix for pyDEG
-            count_df = pd.DataFrame(counts.T, index=gene_ids, columns=adata.obs.index)
-            dds_obj = ov.bulk.pyDEG(count_df)
-            dds_obj.drop_duplicates_index()
-            dds_obj.normalize()
-            result_df = dds_obj.deg_analysis(
-                list(adata.obs.index[mask1]), list(adata.obs.index[mask2]),
-                method='DEseq2', alpha=pval_threshold
-            )
-            # Extract results
-            log2fc = result_df['log2FC'].values if 'log2FC' in result_df.columns else result_df.iloc[:, 1].values
-            pvalues = result_df['pvalue'].values if 'pvalue' in result_df.columns else result_df.iloc[:, 3].values
-            gene_names = result_df.index.tolist()
-            gene_ids = gene_names
-            mean1 = np.mean(data1, axis=0)
-            mean2 = np.mean(data2, axis=0)
-            # Compute padj from pvalues
-            from statsmodels.stats.multitest import multipletests
-            try:
-                _, padj, _, _ = multipletests(pvalues, method='fdr_bh')
-            except Exception:
-                padj = pvalues
-            n_genes = len(gene_ids)
-        else:
-            log2fc = np.zeros(n_genes)
-            pvalues = np.zeros(n_genes)
+        # 使用 OmicVerse pyDEG 进行分析
+        dds = ov.bulk.pyDEG(count_df)
+        dds.drop_duplicates_index()
 
-            mean1 = np.mean(data1, axis=0)
-            mean2 = np.mean(data2, axis=0)
+        # 映射方法名
+        method_map = {'t-test': 'ttest', 'mann-whitney': 'wilcox', 'deseq2': 'DEseq2'}
+        ov_method = method_map.get(method, 'ttest')
 
-            if is_log_transformed:
-                # 数据已经是 log2 变换后的，log2FC = mean1 - mean2
-                log2fc = mean1 - mean2
-            else:
-                mean1_safe = np.where(mean1 > 0, mean1, 1e-10)
-                mean2_safe = np.where(mean2 > 0, mean2, 1e-10)
-                log2fc = np.log2(mean1_safe / mean2_safe)
+        dds.normalize()
+        result = dds.deg_analysis(group1_samples, group2_samples, method=ov_method)
 
-            for i in range(n_genes):
-                if method == 't-test':
-                    _, p = stats.ttest_ind(data1[:, i], data2[:, i], equal_var=False)
-                else:
-                    _, p = stats.mannwhitneyu(data1[:, i], data2[:, i], alternative='two-sided')
-                pvalues[i] = p if not np.isnan(p) else 1.0
+        self.progress(60, "解析结果...")
 
-            from statsmodels.stats.multitest import multipletests
-            try:
-                _, padj, _, _ = multipletests(pvalues, method='fdr_bh')
-            except Exception:
-                padj = pvalues
+        # 提取结果
+        gene_names = result.index.tolist()
+        log2fc = result['log2FC'].values
+        pvalues = result['pvalue'].values
+        padj = result['qvalue'].values
+        n_genes = len(gene_names)
 
-        self.progress(60, "生成结果表...")
-
+        # 判断调控方向
         log2fc_threshold = np.log2(fc_threshold)
-        regulation = np.where(
-            (padj < pval_threshold) & (log2fc >= log2fc_threshold), 'Up',
-            np.where(
-                (padj < pval_threshold) & (log2fc <= -log2fc_threshold), 'Down',
-                'NS'
-            )
-        )
-        regulation = regulation.tolist()
+        regulation = []
+        for i in range(n_genes):
+            if padj[i] < pval_threshold and log2fc[i] >= log2fc_threshold:
+                regulation.append('Up')
+            elif padj[i] < pval_threshold and log2fc[i] <= -log2fc_threshold:
+                regulation.append('Down')
+            else:
+                regulation.append('NS')
+
+        # 计算分组均值（用于结果表）
+        mask1_arr = np.array([s in group1_samples for s in adata.obs.index])
+        mask2_arr = np.array([s in group2_samples for s in adata.obs.index])
+        mean1 = counts[mask1_arr].mean(axis=0)
+        mean2 = counts[mask2_arr].mean(axis=0)
+
         deg_df = pd.DataFrame({
             'gene': gene_names,
             'log2FC': np.round(log2fc, 4),
             'pvalue': pvalues,
             'padj': padj,
-            'mean_group1': np.round(mean1, 2),
-            'mean_group2': np.round(mean2, 2),
+            'mean_group1': np.round(mean1[:n_genes] if len(mean1) >= n_genes else mean1, 2),
+            'mean_group2': np.round(mean2[:n_genes] if len(mean2) >= n_genes else mean2, 2),
             'regulation': regulation
         })
         deg_df = deg_df.sort_values('padj')
@@ -195,11 +127,11 @@ class BulkDEGAnalysis(BaseAnalysis):
         n_up = sum(1 for r in regulation if r == 'Up')
         n_down = sum(1 for r in regulation if r == 'Down')
 
+        self.progress(70, "生成火山图...")
         plots_dir = os.path.join(self.project_dir, 'plots')
         os.makedirs(plots_dir, exist_ok=True)
         result_files = []
 
-        self.progress(70, "生成火山图...")
         neg_log_padj = -np.log10(padj + 1e-300)
         color_map = {'Up': '#e53935', 'Down': '#1a237e', 'NS': '#bdbdbd'}
         fig_vol = go.Figure()
@@ -209,12 +141,13 @@ class BulkDEGAnalysis(BaseAnalysis):
                 x=log2fc[idx], y=neg_log_padj[idx], mode='markers',
                 marker=dict(color=color_map[reg], size=5, opacity=0.7),
                 name=f'{reg} ({len(idx)})',
-                text=[gene_names[i] for i in idx], hovertemplate='%{text}<br>log2FC: %{x:.2f}<br>-log10(padj): %{y:.2f}'
+                text=[gene_names[i] for i in idx],
+                hovertemplate='%{text}<br>log2FC: %{x:.2f}<br>-log10(padj): %{y:.2f}'
             ))
         fig_vol.add_hline(y=-np.log10(pval_threshold), line_dash='dash', line_color='gray')
-        fig_vol.add_vline(x=np.log2(fc_threshold), line_dash='dash', line_color='gray')
-        fig_vol.add_vline(x=-np.log2(fc_threshold), line_dash='dash', line_color='gray')
-        # 火山图基因标注：在图上标注 Top N 差异基因
+        fig_vol.add_vline(x=log2fc_threshold, line_dash='dash', line_color='gray')
+        fig_vol.add_vline(x=-log2fc_threshold, line_dash='dash', line_color='gray')
+        # 火山图基因标注
         top_genes_vol = deg_df[deg_df['regulation'] != 'NS'].head(top_n)
         for _, row in top_genes_vol.iterrows():
             fig_vol.add_annotation(
@@ -232,7 +165,7 @@ class BulkDEGAnalysis(BaseAnalysis):
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'volcano', 'label': '火山图'})
 
         self.progress(80, "生成 MA 图...")
-        avg_expr = (mean1 + mean2) / 2
+        avg_expr = (mean1[:n_genes] + mean2[:n_genes]) / 2 if len(mean1) >= n_genes else (mean1 + mean2) / 2
         fig_ma = go.Figure()
         for reg in ['NS', 'Up', 'Down']:
             idx = [i for i in range(n_genes) if regulation[i] == reg]
@@ -251,15 +184,17 @@ class BulkDEGAnalysis(BaseAnalysis):
         with open(fpath, 'w') as f: f.write(fig_ma.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'ma', 'label': 'MA 图'})
 
-        # 基因箱线图：为指定基因绘制分组箱线图
+        # 基因箱线图
         plot_genes_str = self.params.get('plot_genes', '').strip()
         if plot_genes_str:
             plot_gene_list = [g.strip() for g in plot_genes_str.split(',') if g.strip()]
             for pg in plot_gene_list:
                 if pg in adata.var_names:
                     fig_box = go.Figure()
-                    for grp_name, grp_mask in [(group1, mask1), (group2, mask2)]:
-                        vals = counts[grp_mask.values, list(adata.var_names).index(pg)]
+                    for grp_name, samples in [(group1, group1_samples), (group2, group2_samples)]:
+                        sample_idx = [list(adata.obs.index).index(s) for s in samples if s in adata.obs.index]
+                        gene_idx = list(adata.var_names).index(pg)
+                        vals = counts[sample_idx, gene_idx]
                         fig_box.add_trace(go.Box(y=vals, name=str(grp_name), boxpoints='all', jitter=0.3))
                     fig_box.update_layout(title=f'{pg} 表达', yaxis_title='Expression',
                                          plot_bgcolor='white', width=400, height=350)

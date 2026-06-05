@@ -32,9 +32,18 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         if method == 'deseq2':
             from scipy.stats import gmean
             counts = raw_counts[raw_counts.sum(axis=1) > 0]
-            geo_means = gmean(counts + 1, axis=0)
+            # 只用所有样本都 >0 的基因计算 geometric mean（DESeq2 标准做法）
+            nonzero_mask = (counts > 0).all(axis=0)
+            if nonzero_mask.sum() == 0:
+                # Fallback: 没有全非零基因，用 log-based gmean
+                geo_means = np.exp(np.log(counts + 1).mean(axis=0))
+            else:
+                geo_means = np.ones(counts.shape[1])
+                geo_means[nonzero_mask] = gmean(counts[:, nonzero_mask], axis=0)
             ratios = counts / (geo_means + 1e-10)
             size_factors = np.median(ratios, axis=1)
+            # 防止 size_factor 为 0
+            size_factors = np.where(size_factors > 0, size_factors, 1.0)
             adata.obs['size_factor'] = size_factors
             norm_counts = counts / size_factors[:, None]
             adata.layers['normalized'] = norm_counts
