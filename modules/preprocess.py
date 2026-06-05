@@ -18,6 +18,7 @@ class PreprocessAnalysis(BaseAnalysis):
 
         self.progress(5, "Loading data...")
         adata = sc.read_h5ad(input_path)
+        adata.layers["counts"] = adata.X.copy()
 
         n_hvg = int(self.params.get('n_top_genes', 2000))
         target_sum = float(self.params.get('target_sum', 10000))
@@ -26,7 +27,11 @@ class PreprocessAnalysis(BaseAnalysis):
         adata = ov.pp.preprocess(adata, mode='shiftlog|pearson', target_sum=target_sum)
 
         self.progress(50, f"Selecting top {n_hvg} HVGs...")
-        sc.pp.highly_variable_genes(adata, n_top_genes=n_hvg, flavor='seurat_v3', layer='counts')
+        batch_key = self.params.get('batch_key', '').strip()
+        hvg_kwargs = dict(n_top_genes=n_hvg, flavor='seurat_v3', layer='counts')
+        if batch_key and batch_key in adata.obs.columns:
+            hvg_kwargs['batch_key'] = batch_key
+        sc.pp.highly_variable_genes(adata, **hvg_kwargs)
         adata_hvg = adata[:, adata.var['highly_variable']].copy()
 
         self.progress(70, "Generating HVG plot...")

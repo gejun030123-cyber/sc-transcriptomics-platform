@@ -13,10 +13,12 @@ class QCAnalysis(BaseAnalysis):
         import scanpy as sc
         import omicverse as ov
         from modules.visualization import umap_scatter, violin_plot
+        import plotly.graph_objects as go
         import os, json
 
         self.progress(5, "Loading data...")
         adata = sc.read_h5ad(input_path)
+        adata.layers["counts"] = adata.X.copy()
 
         self.progress(15, "Flagging MT/ribo/hb genes...")
         # 优先用 gene_name 检测（Ensembl ID 不以 MT-/RPS/RPL 开头）
@@ -58,6 +60,23 @@ class QCAnalysis(BaseAnalysis):
             fpath = os.path.join(plots_dir, 'qc_violin.json')
             with open(fpath, 'w') as f: f.write(fig_json)
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'violin', 'label': 'QC Violin Plots'})
+
+        # QC 散点图
+        if 'total_counts' in adata.obs.columns and 'n_genes_by_counts' in adata.obs.columns:
+            fig_scatter = go.Figure()
+            color_vals = adata.obs['pct_counts_mt'].values if 'pct_counts_mt' in adata.obs.columns else None
+            fig_scatter.add_trace(go.Scattergl(
+                x=adata.obs['total_counts'], y=adata.obs['n_genes_by_counts'],
+                mode='markers', marker=dict(size=3, color=color_vals, colorscale='Reds',
+                                            colorbar=dict(title='MT%'), opacity=0.6),
+                text=adata.obs.index.tolist(),
+                hovertemplate='%{text}<br>Counts: %{x:.0f}<br>Genes: %{y:.0f}<br>MT%: %{marker.color:.1f}'
+            ))
+            fig_scatter.update_layout(title='QC: Counts vs Genes', xaxis_title='Total Counts',
+                                     yaxis_title='Detected Genes', plot_bgcolor='white', width=600, height=400)
+            fpath = os.path.join(plots_dir, 'qc_scatter.json')
+            with open(fpath, 'w') as f: f.write(json.dumps(json.loads(fig_scatter.to_json())))
+            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'scatter', 'label': 'QC Scatter'})
 
         if 'X_umap' in adata.obsm:
             for color_key in ['batch', 'leiden']:

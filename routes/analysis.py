@@ -53,6 +53,7 @@ PARAM_SCHEMAS = {
     'preprocess': [
         {'key': 'n_top_genes', 'label': '高变异基因数量', 'type': 'number', 'default': 2000, 'help': '选择的高变异基因数量。2000 为标准值，适合大多数分析。基因数过少会丢失生物学信号，过多会引入噪声。'},
         {'key': 'target_sum', 'label': '标准化目标总数', 'type': 'number', 'default': 10000, 'help': '每个细胞标准化后的总计数目标。10000 为 scanpy 默认值，设为 None 则中位数标准化。'},
+        {'key': 'batch_key', 'label': '批次列名（可选）', 'type': 'text', 'default': '', 'help': '用于 HVG 选择的批次校正。留空则不进行批次校正。设置后会在选择高变异基因时考虑批次效应。'},
     ],
     'dimred': [
         {'key': 'n_comps', 'label': 'PCA 主成分数量', 'type': 'number', 'default': 50, 'help': 'PCA 主成分数量。通常 30-50 即可捕获大部分方差。过多会引入噪声维度。可通过肘部图选择。'},
