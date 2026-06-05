@@ -148,4 +148,64 @@ def read_expression_matrix(file_path):
     if gene_names is not None:
         adata.var['gene_name'] = gene_names
 
+    # 将 var_names 从 Ensembl ID 映射为基因名
+    adata = remap_var_names(adata)
+
+    return adata
+
+
+def remap_var_names(adata):
+    """将 adata.var_names 从 Ensembl ID 映射为基因名，处理重复名。
+    原始 ID 保存到 adata.var['gene_id']。
+    如果 var_names 已经是基因名（非 Ensembl ID），不做任何改动。"""
+    import re
+
+    def _is_ensembl_id(name):
+        """检查是否为 Ensembl 基因 ID（如 ENSG00000139618）"""
+        return bool(re.match(r'^ENS[A-Z]*G\d{5,}', str(name)))
+
+    # 如果 var_names 已经是基因名（非 Ensembl ID），直接返回，避免重复处理
+    if adata.n_vars > 0:
+        sample_ids = list(adata.var_names[:min(100, adata.n_vars)])
+        ensembl_count = sum(1 for g in sample_ids if _is_ensembl_id(g))
+        if ensembl_count < len(sample_ids) * 0.5:
+            return adata  # 已经是基因名，无需映射
+
+    gene_name_col = None
+    for col in ['gene_name', 'GeneSymbol', 'gene_symbol', 'gene_symbols', 'symbol',
+                'Symbol', 'Gene Symbol', 'gene', 'Gene', 'GENE_NAME',
+                'feature_name', 'gene_name_x']:
+        if col in adata.var.columns:
+            gene_name_col = col
+            break
+    if gene_name_col is None:
+        for col in adata.var.columns:
+            if 'symbol' in col.lower() or 'name' in col.lower():
+                gene_name_col = col
+                break
+
+    if gene_name_col is None:
+        return adata  # 没有映射信息，保持原样
+
+    gene_names = adata.var[gene_name_col].astype(str).tolist()
+    # 过滤无效值
+    gene_names = [g if g and g != 'nan' and g.strip() else str(adata.var_names[i])
+                  for i, g in enumerate(gene_names)]
+
+    # 保留原始 ID
+    if 'gene_id' not in adata.var.columns:
+        adata.var['gene_id'] = adata.var_names.tolist()
+
+    # 处理重复基因名：第一次出现保留原名，后续加后缀
+    seen = {}
+    unique_names = []
+    for g in gene_names:
+        if g in seen:
+            seen[g] += 1
+            unique_names.append(f"{g}_{seen[g]}")
+        else:
+            seen[g] = 0
+            unique_names.append(g)
+
+    adata.var_names = pd.Index(unique_names)
     return adata
