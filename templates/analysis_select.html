@@ -90,6 +90,9 @@
                            value="{{ param.default }}" data-key="{{ param.key }}"
                            placeholder="{% if param.key == 'groupby' %}输入分组列名，选择文件后自动填充{% elif param.key == 'batch_key' %}输入批次列名{% else %}{{ param.default }}{% endif %}">
                     {% endif %}
+                    {% if param.help %}
+                    <small class="text-muted d-block mt-1" style="font-size:0.82rem; line-height:1.4; border-left: 2px solid #dee2e6; padding-left: 8px;">{{ param.help }}</small>
+                    {% endif %}
                 </div>
                 {% endfor %}
 
