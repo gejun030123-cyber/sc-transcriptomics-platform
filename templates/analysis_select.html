@@ -42,7 +42,7 @@
                         {% for t in completed_tasks %}
                         {% if t.output_adata_path %}
                         <option value="{{ t.output_adata_path }}" {% if loop.first %}selected{% endif %}>
-                            来自：{{ t.module_name }} ({{ t.id }})
+                            {{ module_display_map.get(t.module_name, t.module_name) }}{% if t.finished_at %} ({{ t.finished_at[:16] }}){% endif %} [{{ t.id }}]
                         </option>
                         {% endif %}
                         {% endfor %}
