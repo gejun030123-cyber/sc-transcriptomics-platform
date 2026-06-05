@@ -30,6 +30,12 @@ def task_status(task_id):
     t = AnalysisTask.get_by_id(task_id)
     if not t:
         return jsonify({'error': 'Task not found'}), 404
+    log_entries = []
+    if t.log_text:
+        try:
+            log_entries = json.loads(t.log_text)
+        except Exception:
+            pass
     return jsonify({
         'status': t.status,
         'progress': t.progress,
@@ -37,6 +43,7 @@ def task_status(task_id):
         'error': t.error_traceback,
         'started_at': t.started_at,
         'finished_at': t.finished_at,
+        'log': log_entries,
     })
 
 @api_bp.route('/projects/<pid>/tasks')

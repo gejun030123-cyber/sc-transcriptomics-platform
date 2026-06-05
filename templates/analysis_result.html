@@ -18,7 +18,7 @@
         </div>
     </div>
 
-    {% if task.status == 'running' %}
+    {% if task.status == 'running' or task.status == 'pending' %}
     <div class="mt-3">
         <div class="d-flex justify-content-between mb-1">
             <span id="progress-msg" class="small text-muted">{{ task.progress_message }}</span>
@@ -28,6 +28,15 @@
             <div class="progress-bar progress-bar-striped progress-bar-animated" id="progress-bar"
                  style="width: {{ task.progress }}%"></div>
         </div>
+        {% if task.started_at %}
+        <div class="small text-muted mt-1">开始时间: {{ task.started_at }}</div>
+        {% endif %}
+    </div>
+
+    <!-- 运行日志（实时更新） -->
+    <div class="mt-3" id="log-container" style="display:none;">
+        <h6 class="small text-muted mb-2">运行日志</h6>
+        <div id="log-entries" style="max-height:200px; overflow-y:auto; font-size:0.82rem; background:#f8f9fa; padding:10px; border-radius:8px; font-family:monospace;"></div>
     </div>
     {% endif %}
 </div>
@@ -101,25 +110,62 @@
 <script>
 const TASK_ID = "{{ task.id }}";
 const STATUS = "{{ task.status }}";
+const PROJECT_ID = "{{ project.id }}";
 
 const STATUS_CN = {'running': '运行中', 'completed': '已完成', 'pending': '等待中', 'failed': '失败'};
+
+function renderLog(log) {
+    const container = document.getElementById('log-container');
+    const entries = document.getElementById('log-entries');
+    if (!container || !entries || !log || log.length === 0) return;
+    container.style.display = 'block';
+    entries.innerHTML = log.map(e =>
+        `<div style="margin-bottom:2px;"><span style="color:#888;">[${e.time}]</span> <span style="color:#1a237e;">${e.pct}%</span> ${e.msg}</div>`
+    ).join('');
+    entries.scrollTop = entries.scrollHeight;
+}
+
+// 加载已有日志
+if ((STATUS === 'running' || STATUS === 'pending') && {{ task.log_text|tojson }} ) {
+    try {
+        const existingLog = JSON.parse({{ task.log_text|tojson }});
+        renderLog(existingLog);
+    } catch(e) {}
+}
 
 if (STATUS === 'running' || STATUS === 'pending') {
     const interval = setInterval(async () => {
         try {
             const r = await fetch(`/api/tasks/${TASK_ID}/status`);
+            if (!r.ok) return;
             const d = await r.json();
-            document.getElementById('progress-bar').style.width = d.progress + '%';
-            document.getElementById('progress-pct').textContent = d.progress + '%';
-            document.getElementById('progress-msg').textContent = d.progress_message;
+
+            // 更新进度条
+            const bar = document.getElementById('progress-bar');
+            const pct = document.getElementById('progress-pct');
+            const msg = document.getElementById('progress-msg');
+            if (bar) bar.style.width = d.progress + '%';
+            if (pct) pct.textContent = d.progress + '%';
+            if (msg) msg.textContent = d.progress_message;
+
+            // 更新日志
+            renderLog(d.log);
+
+            // 更新状态标签
             const badge = document.getElementById('status-badge');
-            badge.textContent = STATUS_CN[d.status] || d.status;
-            badge.className = 'status-badge status-' + d.status;
+            if (badge) {
+                badge.textContent = STATUS_CN[d.status] || d.status;
+                badge.className = 'status-badge status-' + d.status;
+            }
+
+            // 完成或失败时刷新页面
             if (d.status === 'completed' || d.status === 'failed') {
                 clearInterval(interval);
-                setTimeout(() => location.reload(), 500);
+                setTimeout(() => location.reload(), 800);
             }
-        } catch(e) {}
+        } catch(e) {
+            console.error('Polling error:', e);
+        }
     }, 2000);
 }
 

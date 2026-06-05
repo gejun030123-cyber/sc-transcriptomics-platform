@@ -3,6 +3,7 @@ import concurrent.futures
 import traceback
 import json
 import sqlite3
+from datetime import datetime
 from config import Config
 from models import gen_id
 
@@ -32,10 +33,14 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
         )
         db.commit()
 
+        progress_log = []
+
         def progress_cb(pct, message):
+            now = datetime.now().strftime('%H:%M:%S')
+            progress_log.append({'time': now, 'pct': pct, 'msg': message})
             db.execute(
-                "UPDATE analysis_tasks SET progress=?, progress_message=? WHERE id=?",
-                (pct, message, task_id)
+                "UPDATE analysis_tasks SET progress=?, progress_message=?, log_text=? WHERE id=?",
+                (pct, message, json.dumps(progress_log, ensure_ascii=False), task_id)
             )
             db.commit()
 
