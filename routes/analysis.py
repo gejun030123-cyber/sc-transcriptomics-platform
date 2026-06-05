@@ -97,10 +97,12 @@ PARAM_SCHEMAS = {
         {'key': 'groupby', 'label': '分组列名', 'type': 'text', 'default': '', 'help': '分组列名。adata.obs 中用于区分实验组和对照组的列。如 condition、treatment、group。'},
         {'key': 'group1', 'label': '实验组', 'type': 'dynamic_select', 'depends_on': 'groupby', 'default': '', 'help': '实验组名称。将与对照组比较计算差异基因。'},
         {'key': 'group2', 'label': '对照组', 'type': 'dynamic_select', 'depends_on': 'groupby', 'default': '', 'help': '对照组名称。rest 表示以所有其他样本为对照。'},
-        {'key': 'method', 'label': '统计方法', 'type': 'select', 'options': ['t-test', 'mann-whitney'], 'default': 't-test', 'help': '统计方法。t-test：参数检验，适合正态分布数据，速度快。Mann-Whitney：非参数检验，不假设正态分布，更稳健。'},
+        {'key': 'method', 'label': '统计方法', 'type': 'select', 'options': ['t-test', 'mann-whitney', 'deseq2'], 'default': 't-test', 'help': '统计方法。t-test：参数检验，适合正态分布数据，速度快。Mann-Whitney：非参数检验，不假设正态分布，更稳健。DESeq2：基于负二项分布的差异分析，RNA-seq 金标准，需要原始计数。'},
         {'key': 'fc_threshold', 'label': 'Fold Change 阈值', 'type': 'number', 'default': 2.0, 'step': 0.1, 'help': 'Fold Change 阈值。log2FC > log2(fc) 为上调，< -log2(fc) 为下调。常用值：1.5（宽松）、2.0（标准）、4.0（严格）。'},
         {'key': 'pval_threshold', 'label': 'padj 显著性阈值', 'type': 'number', 'default': 0.05, 'step': 0.01, 'help': '调整后 p-value 显著性阈值。0.05 为标准，0.01 为严格，0.1 为宽松探索性分析。'},
         {'key': 'top_n', 'label': 'Top N 差异基因数', 'type': 'number', 'default': 20, 'help': '结果中展示的 Top N 差异基因数。用于火山图标注和 Top 基因 CSV 导出。'},
+        {'key': 'base_mean_filter', 'label': '最低平均表达量', 'type': 'number', 'default': 1, 'step': 0.5, 'help': '过滤低表达基因。BaseMean 低于此值的基因不参与分析和绘图。建议 1-10。'},
+        {'key': 'plot_genes', 'label': '展示基因（逗号分隔，可选）', 'type': 'text', 'default': '', 'help': '指定要绘制箱线图的基因名，多个用逗号分隔。留空则不生成箱线图。'},
     ],
     'bulk_pca': [
         {'key': 'n_comps', 'label': 'PCA 主成分数量', 'type': 'number', 'default': 10, 'help': 'PCA 主成分数量。通常 5-10 即可。样本数少时自动降至 n_samples-1。'},

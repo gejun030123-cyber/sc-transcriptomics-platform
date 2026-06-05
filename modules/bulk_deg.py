@@ -31,6 +31,7 @@ class BulkDEGAnalysis(BaseAnalysis):
         fc_threshold = float(self.params.get('fc_threshold', 2.0))
         pval_threshold = float(self.params.get('pval_threshold', 0.05))
         top_n = int(self.params.get('top_n', 20))
+        base_mean_filter = float(self.params.get('base_mean_filter', 1))
 
         self.progress(15, "解析分组信息...")
 
@@ -42,6 +43,13 @@ class BulkDEGAnalysis(BaseAnalysis):
             gene_names = adata.var['gene_name'].tolist()
         else:
             gene_names = gene_ids
+
+        # BaseMean 过滤：去除低表达基因
+        raw_mean = counts.mean(axis=0)
+        expr_mask = raw_mean > base_mean_filter
+        counts = counts[:, expr_mask]
+        gene_ids = [gene_ids[i] for i in range(len(gene_ids)) if expr_mask[i]]
+        gene_names = [gene_names[i] for i in range(len(gene_names)) if expr_mask[i]]
 
         # 处理自动检测的分组（从样本名中提取）
         if groupby == '_auto_group_':
@@ -90,27 +98,54 @@ class BulkDEGAnalysis(BaseAnalysis):
 
         self.progress(30, f"差异分析：{method}...")
         n_genes = counts.shape[1]
-        log2fc = np.zeros(n_genes)
-        pvalues = np.zeros(n_genes)
 
-        mean1 = np.mean(data1, axis=0)
-        mean2 = np.mean(data2, axis=0)
-        mean1_safe = np.where(mean1 > 0, mean1, 1e-10)
-        mean2_safe = np.where(mean2 > 0, mean2, 1e-10)
-        log2fc = np.log2(mean1_safe / mean2_safe)
+        if method == 'deseq2':
+            import omicverse as ov
+            # Build count matrix for pyDEG
+            count_df = pd.DataFrame(counts.T, index=gene_ids, columns=adata.obs.index)
+            dds_obj = ov.bulk.pyDEG(count_df)
+            dds_obj.drop_duplicates_index()
+            dds_obj.normalize()
+            result_df = dds_obj.deg_analysis(
+                list(adata.obs.index[mask1]), list(adata.obs.index[mask2]),
+                method='DEseq2', alpha=pval_threshold
+            )
+            # Extract results
+            log2fc = result_df['log2FC'].values if 'log2FC' in result_df.columns else result_df.iloc[:, 1].values
+            pvalues = result_df['pvalue'].values if 'pvalue' in result_df.columns else result_df.iloc[:, 3].values
+            gene_names = result_df.index.tolist()
+            gene_ids = gene_names
+            mean1 = np.mean(data1, axis=0)
+            mean2 = np.mean(data2, axis=0)
+            # Compute padj from pvalues
+            from statsmodels.stats.multitest import multipletests
+            try:
+                _, padj, _, _ = multipletests(pvalues, method='fdr_bh')
+            except Exception:
+                padj = pvalues
+            n_genes = len(gene_ids)
+        else:
+            log2fc = np.zeros(n_genes)
+            pvalues = np.zeros(n_genes)
 
-        for i in range(n_genes):
-            if method == 't-test':
-                _, p = stats.ttest_ind(data1[:, i], data2[:, i], equal_var=False)
-            else:
-                _, p = stats.mannwhitneyu(data1[:, i], data2[:, i], alternative='two-sided')
-            pvalues[i] = p if not np.isnan(p) else 1.0
+            mean1 = np.mean(data1, axis=0)
+            mean2 = np.mean(data2, axis=0)
+            mean1_safe = np.where(mean1 > 0, mean1, 1e-10)
+            mean2_safe = np.where(mean2 > 0, mean2, 1e-10)
+            log2fc = np.log2(mean1_safe / mean2_safe)
 
-        from statsmodels.stats.multitest import multipletests
-        try:
-            _, padj, _, _ = multipletests(pvalues, method='fdr_bh')
-        except Exception:
-            padj = pvalues
+            for i in range(n_genes):
+                if method == 't-test':
+                    _, p = stats.ttest_ind(data1[:, i], data2[:, i], equal_var=False)
+                else:
+                    _, p = stats.mannwhitneyu(data1[:, i], data2[:, i], alternative='two-sided')
+                pvalues[i] = p if not np.isnan(p) else 1.0
+
+            from statsmodels.stats.multitest import multipletests
+            try:
+                _, padj, _, _ = multipletests(pvalues, method='fdr_bh')
+            except Exception:
+                padj = pvalues
 
         self.progress(60, "生成结果表...")
 
@@ -156,6 +191,14 @@ class BulkDEGAnalysis(BaseAnalysis):
         fig_vol.add_hline(y=-np.log10(pval_threshold), line_dash='dash', line_color='gray')
         fig_vol.add_vline(x=np.log2(fc_threshold), line_dash='dash', line_color='gray')
         fig_vol.add_vline(x=-np.log2(fc_threshold), line_dash='dash', line_color='gray')
+        # 火山图基因标注：在图上标注 Top N 差异基因
+        top_genes_vol = deg_df[deg_df['regulation'] != 'NS'].head(top_n)
+        for _, row in top_genes_vol.iterrows():
+            fig_vol.add_annotation(
+                x=row['log2FC'], y=-np.log10(max(row['padj'], 1e-300)),
+                text=row['gene'], showarrow=True, arrowhead=2,
+                font=dict(size=9, color='#333'), ax=20, ay=-30
+            )
         fig_vol.update_layout(
             title=f'火山图 ({group1} vs {group2})',
             xaxis_title='log2(Fold Change)', yaxis_title='-log10(padj)',
@@ -184,6 +227,22 @@ class BulkDEGAnalysis(BaseAnalysis):
         fpath = os.path.join(plots_dir, 'bulk_deg_ma.json')
         with open(fpath, 'w') as f: f.write(fig_ma.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'ma', 'label': 'MA 图'})
+
+        # 基因箱线图：为指定基因绘制分组箱线图
+        plot_genes_str = self.params.get('plot_genes', '').strip()
+        if plot_genes_str:
+            plot_gene_list = [g.strip() for g in plot_genes_str.split(',') if g.strip()]
+            for pg in plot_gene_list:
+                if pg in adata.var_names:
+                    fig_box = go.Figure()
+                    for grp_name, grp_mask in [(group1, mask1), (group2, mask2)]:
+                        vals = counts[grp_mask.values, list(adata.var_names).index(pg)]
+                        fig_box.add_trace(go.Box(y=vals, name=str(grp_name), boxpoints='all', jitter=0.3))
+                    fig_box.update_layout(title=f'{pg} 表达', yaxis_title='Expression',
+                                         plot_bgcolor='white', width=400, height=350)
+                    fpath = os.path.join(plots_dir, f'bulk_deg_box_{pg}.json')
+                    with open(fpath, 'w') as f: f.write(fig_box.to_json(engine="json"))
+                    result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'boxplot', 'label': f'{pg} Boxplot'})
 
         self.progress(88, "保存差异基因 CSV...")
         results_dir = os.path.join(self.project_dir, 'results')
