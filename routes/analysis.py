@@ -225,6 +225,15 @@ def analyze(pid, module_name):
                 if f.endswith('.h5ad'):
                     uploaded_files.append({'name': f, 'path': fpath})
 
+    # For enrichment module, auto-populate input_source with DEG results
+    if module_name == 'bulk_enrichment':
+        results_dir = os.path.join(Config.DATA_DIR, 'projects', pid, 'results')
+        deg_csv = os.path.join(results_dir, 'bulk_deg_results.csv')
+        if os.path.exists(deg_csv):
+            for param in schema:
+                if param['key'] == 'input_source':
+                    param['default'] = deg_csv
+
     sidebar_modules = BULK_MODULE_LIST if is_bulk else SC_MODULE_LIST
     return render_template('analysis_select.html', project=p, module=mod_info,
                           schema=schema, completed_tasks=completed_tasks,

@@ -99,6 +99,20 @@ def get_result_file(file_id):
     return send_file(f.file_path)
 
 
+@api_bp.route('/enrichment-result/<task_id>')
+def enrichment_result(task_id):
+    """返回富集分析的 Plotly JSON 结果"""
+    from models import ResultFile
+    files = ResultFile.get_by_task(task_id)
+    enrichment_files = [f for f in files if f.category == 'enrichment']
+    result = []
+    for f in enrichment_files:
+        with open(f.file_path, 'r') as fh:
+            data = json.load(fh)
+        result.append({'id': f.id, 'label': f.label, 'data': data})
+    return jsonify(result)
+
+
 @api_bp.route('/column-values')
 def column_values():
     file_path = request.args.get('file_path', '')
