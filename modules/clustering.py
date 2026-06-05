@@ -27,7 +27,7 @@ class ClusteringAnalysis(BaseAnalysis):
 
         self.progress(40, f"Running Leiden clustering at resolutions: {resolutions}...")
         for i, res in enumerate(resolutions):
-            sc.tl.leiden(adata, resolution=res, key_added=f'leiden_{res}')
+            sc.tl.leiden(adata, resolution=res, key_added=f'leiden_{res}', flavor="igraph", n_iterations=2)
             pct = 40 + int((i + 1) / len(resolutions) * 30)
             self.progress(pct, f"Leiden resolution {res} done")
 
@@ -47,6 +47,59 @@ class ClusteringAnalysis(BaseAnalysis):
                 fpath = os.path.join(plots_dir, f'cluster_umap_{res}.json')
                 with open(fpath, 'w') as f: f.write(fig_json)
                 result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'Clusters (res={res})'})
+
+        # 多分辨率 UMAP 比较图
+        if 'X_umap' in adata.obsm:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+            n_res = len(resolutions)
+            fig_multi = make_subplots(rows=1, cols=n_res, subplot_titles=[f'res={r}' for r in resolutions])
+            for ci, res in enumerate(resolutions, 1):
+                key = f'leiden_{res}'
+                if key in adata.obs.columns:
+                    coords = adata.obsm['X_umap'][:, :2]
+                    cats = adata.obs[key].values
+                    for cat in sorted(set(cats)):
+                        mask = cats == cat
+                        fig_multi.add_trace(go.Scattergl(
+                            x=coords[mask, 0], y=coords[mask, 1], mode='markers',
+                            marker=dict(size=2, opacity=0.6), name=str(cat), showlegend=(ci==1)
+                        ), row=1, col=ci)
+            fig_multi.update_layout(height=400, width=350*n_res, title='多分辨率聚类比较')
+            for i in range(1, n_res+1):
+                fig_multi.update_xaxes(title_text='UMAP-1', row=1, col=i)
+                fig_multi.update_yaxes(title_text='UMAP-2', row=1, col=i)
+            fpath = os.path.join(plots_dir, 'cluster_multi_res_umap.json')
+            with open(fpath, 'w') as f: f.write(fig_multi.to_json())
+            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': '多分辨率聚类比较'})
+
+        # 聚类 marker dotplot
+        try:
+            from modules.annotation import DEFAULT_TME_MARKERS
+            import plotly.graph_objects as go
+            first_key = f'leiden_{resolutions[0]}'
+            if first_key in adata.obs.columns:
+                dotplot_genes = []
+                for genes in DEFAULT_TME_MARKERS.values():
+                    dotplot_genes.extend([g for g in genes[:2] if g in adata.var_names])
+                dotplot_genes = list(dict.fromkeys(dotplot_genes))[:20]
+                if dotplot_genes:
+                    import scanpy as sc2
+                    sc2.tl.dendrogram(adata, groupby=first_key)
+                    fig_dot = sc2.pl.dotplot(adata, var_names=dotplot_genes, groupby=first_key, return_fig=True)
+                    import io, base64
+                    buf = io.BytesIO()
+                    fig_dot.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+                    import matplotlib.pyplot as plt
+                    plt.close('all')
+                    buf.seek(0)
+                    img_b64 = base64.b64encode(buf.read()).decode()
+                    fpath = os.path.join(plots_dir, 'cluster_dotplot.json')
+                    with open(fpath, 'w') as f:
+                        json.dump({'data': [{'type': 'image', 'source': f'data:image/png;base64,{img_b64}', 'xref': 'paper', 'yref': 'paper', 'x': 0, 'y': 1, 'sizex': 1, 'sizey': 1, 'sizing': 'stretch'}], 'layout': {'width': 800, 'height': 500, 'title': f'Marker Dotplot ({first_key})'}}, f)
+                    result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'dotplot', 'label': f'Marker Dotplot'})
+        except Exception:
+            pass  # Skip if annotation module not available
 
         self.progress(90, "Saving output...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')

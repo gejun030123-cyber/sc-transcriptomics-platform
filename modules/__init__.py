@@ -3,6 +3,7 @@ from .preprocess import PreprocessAnalysis
 from .dimred import DimredAnalysis
 from .batch_correct import BatchCorrectAnalysis
 from .clustering import ClusteringAnalysis
+from .qc_reassess import QCReassessAnalysis
 from .annotation import AnnotationAnalysis
 from .deg import DEGAnalysis
 from .trajectory import TrajectoryAnalysis
@@ -22,6 +23,7 @@ MODULE_REGISTRY = {
     'dimred': DimredAnalysis,
     'batch_correct': BatchCorrectAnalysis,
     'clustering': ClusteringAnalysis,
+    'qc_reassess': QCReassessAnalysis,
     'annotation': AnnotationAnalysis,
     'deg': DEGAnalysis,
     'trajectory': TrajectoryAnalysis,
@@ -38,6 +40,6 @@ MODULE_REGISTRY = {
 
 PIPELINE_ORDER = [
     'qc', 'preprocess', 'dimred', 'batch_correct', 'clustering',
-    'annotation', 'deg', 'trajectory', 'proportion',
+    'qc_reassess', 'annotation', 'deg', 'trajectory', 'proportion',
     'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca', 'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
 ]

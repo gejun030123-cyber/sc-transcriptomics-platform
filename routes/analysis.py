@@ -12,6 +12,7 @@ SC_MODULE_LIST = [
     {'name': 'dimred', 'display': '降维分析', 'desc': 'PCA, UMAP'},
     {'name': 'batch_correct', 'display': '批次校正', 'desc': 'Harmony, ComBat, SysVI'},
     {'name': 'clustering', 'display': '聚类分析', 'desc': 'Leiden 聚类'},
+    {'name': 'qc_reassess', 'display': 'QC 重新评估', 'desc': '聚类后检查 doublet 和 QC 指标，标记低质量簇'},
     {'name': 'annotation', 'display': '细胞注释', 'desc': '基于 Marker 的细胞类型注释'},
     {'name': 'deg', 'display': '差异表达', 'desc': '差异表达基因分析'},
     {'name': 'trajectory', 'display': '轨迹分析', 'desc': '拟时序分析'},
@@ -68,6 +69,14 @@ PARAM_SCHEMAS = {
     'clustering': [
         {'key': 'resolutions', 'label': 'Leiden 分辨率（逗号分隔）', 'type': 'text', 'default': '0.6,0.8,1.0', 'help': 'Leiden 聚类分辨率，多个值用逗号分隔。值越大聚类越细（簇越多）。0.4-0.6 适合粗分，0.8-1.0 标准，>1.0 细分。建议测试多个值。'},
         {'key': 'n_neighbors', 'label': '邻居数量', 'type': 'number', 'default': 15, 'help': '构建 KNN 图时的邻居数量。值越大聚类越平滑，越小越敏感。15 为默认值，小数据集可降至 10。'},
+    ],
+    'qc_reassess': [
+        {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden',
+         'help': '用于分组的聚类列名。通常为 leiden 或 leiden_0.8 等。'},
+        {'key': 'doublet_threshold', 'label': 'Doublet 比例阈值', 'type': 'number', 'default': 0.3, 'step': 0.05,
+         'help': 'doublet 比例高于此值的簇被标记为低质量。0.3 表示 30%。'},
+        {'key': 'mt_threshold', 'label': 'MT 比例阈值', 'type': 'number', 'default': 15.0, 'step': 1.0,
+         'help': '平均线粒体基因比例高于此值的簇被标记为低质量。'},
     ],
     'annotation': [
         {'key': 'method', 'label': '注释方法', 'type': 'select', 'options': ['auto_marker', 'manual'], 'default': 'auto_marker', 'help': '注释方法。auto_marker：使用内置 TME marker 基因自动打分。manual：手动指定 marker 基因。'},
