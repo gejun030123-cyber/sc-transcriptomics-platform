@@ -12,6 +12,7 @@ from .bulk_normalize import BulkNormalizeAnalysis
 from .bulk_deg import BulkDEGAnalysis
 from .bulk_pca import BulkPCAAnalysis
 from .bulk_heatmap import BulkHeatmapAnalysis
+from .bulk_enrichment import BulkEnrichmentAnalysis
 
 MODULE_REGISTRY = {
     # 单细胞分析模块
@@ -30,10 +31,11 @@ MODULE_REGISTRY = {
     'bulk_deg': BulkDEGAnalysis,
     'bulk_pca': BulkPCAAnalysis,
     'bulk_heatmap': BulkHeatmapAnalysis,
+    'bulk_enrichment': BulkEnrichmentAnalysis,
 }
 
 PIPELINE_ORDER = [
     'qc', 'preprocess', 'dimred', 'batch_correct', 'clustering',
     'annotation', 'deg', 'trajectory', 'proportion',
-    'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca', 'bulk_heatmap',
+    'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca', 'bulk_heatmap', 'bulk_enrichment',
 ]

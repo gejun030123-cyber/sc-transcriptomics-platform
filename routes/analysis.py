@@ -24,6 +24,7 @@ BULK_MODULE_LIST = [
     {'name': 'bulk_deg', 'display': '差异表达分析', 'desc': '组间差异基因检测（火山图、MA图）'},
     {'name': 'bulk_pca', 'display': 'PCA / UMAP', 'desc': 'PCA 和 UMAP 降维可视化'},
     {'name': 'bulk_heatmap', 'display': '热图分析', 'desc': 'Top 差异基因热图、样本相关性热图'},
+    {'name': 'bulk_enrichment', 'display': '通路富集', 'desc': 'GO/KEGG/WikiPathways 通路富集分析（ORA / GSEA）'},
 ]
 
 MODULE_LIST = SC_MODULE_LIST + BULK_MODULE_LIST
@@ -113,6 +114,21 @@ PARAM_SCHEMAS = {
         {'key': 'heatmap_type', 'label': '热图类型', 'type': 'select', 'options': ['top_var', 'deg'], 'default': 'top_var', 'help': '热图类型。top_var：显示最高变异的基因。deg：显示差异表达基因（需先运行 DEG 分析）。'},
         {'key': 'top_n', 'label': '显示基因数', 'type': 'number', 'default': 50, 'help': '热图中显示的基因数量。通常 30-100。过多会导致热图难以阅读。'},
         {'key': 'groupby', 'label': '样本分组列名（可选）', 'type': 'text', 'default': '', 'help': '样本分组列名，用于在热图旁添加分组注释条。留空则不添加。'},
+    ],
+    'bulk_enrichment': [
+        {'key': 'method', 'label': '富集方法', 'type': 'select', 'options': ['ORA', 'GSEA'], 'default': 'ORA',
+         'help': 'ORA：超几何检验，输入 DE 基因列表，检验哪些通路过度代表。GSEA：秩检验，输入全基因按差异排序，检验通路在排序中的富集位置。'},
+        {'key': 'database', 'label': '基因集数据库', 'type': 'select',
+         'options': ['GO_BP', 'GO_MF', 'GO_CC', 'KEGG', 'WikiPathways', 'Reactome'], 'default': 'GO_BP',
+         'help': 'GO_BP：生物过程。GO_MF：分子功能。GO_CC：细胞组分。KEGG：代谢和信号通路。WikiPathways：社区维护通路。Reactome：反应组数据库。'},
+        {'key': 'organism', 'label': '物种', 'type': 'select', 'options': ['Human', 'Mouse'], 'default': 'Human',
+         'help': 'Human：人类基因。Mouse：小鼠基因。基因 ID 需与所选物种匹配。'},
+        {'key': 'pvalue_cutoff', 'label': '显著性阈值', 'type': 'number', 'default': 0.05, 'step': 0.01,
+         'help': '调整后 p-value 截断值。0.05 为标准，0.01 为严格。'},
+        {'key': 'top_n', 'label': '展示通路数', 'type': 'number', 'default': 20,
+         'help': '可视化中显示的 Top N 显著通路数。'},
+        {'key': 'input_source', 'label': 'DEG 结果文件路径', 'type': 'text', 'default': '',
+         'help': '来自已完成的 DEG 分析的 CSV 结果文件路径。包含 gene 和 regulation/log2FC 列。'},
     ],
 }
 
