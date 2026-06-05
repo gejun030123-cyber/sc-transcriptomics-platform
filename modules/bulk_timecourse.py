@@ -1,0 +1,406 @@
+import os
+import numpy as np
+import pandas as pd
+from modules.base import BaseAnalysis
+
+
+class BulkTimecourseAnalysis(BaseAnalysis):
+    MODULE_NAME = "bulk_timecourse"
+    DISPLAY_NAME = "时序分析"
+    DESCRIPTION = "多时间点差异基因检测（spline + F-test）+ 模糊 c-means 轨迹聚类"
+    INPUT_REQUIRES = []
+
+    def validate_input(self, adata):
+        return None
+
+    def _build_spline_basis(self, time_vals, df=3):
+        """Use patsy to create natural cubic spline basis matrix."""
+        from patsy import dmatrix
+        basis = dmatrix(f'bs(x, df={df}, degree=3) - 1', {'x': time_vals}, return_type='dataframe')
+        return basis.values
+
+    def _run_temporal_f_test(self, counts, time_basis, n_spline_cols):
+        """For each gene fit OLS full (intercept + spline) vs reduced (intercept),
+        compute F-statistic and p-value."""
+        from scipy import stats
+        import statsmodels.api as sm
+
+        n_genes = counts.shape[1]
+        n_obs = counts.shape[0]
+        F_stats = np.zeros(n_genes)
+        pvalues = np.ones(n_genes)
+
+        X_full = sm.add_constant(time_basis)
+        X_red = sm.add_constant(np.ones(n_obs))
+        df_diff = n_spline_cols
+        df_resid = n_obs - n_spline_cols - 1
+
+        if df_resid <= 0:
+            return F_stats, pvalues
+
+        for i in range(n_genes):
+            y = counts[:, i]
+            try:
+                model_full = sm.OLS(y, X_full).fit()
+                model_red = sm.OLS(y, X_red).fit()
+                RSS_full = model_full.ssr
+                RSS_red = model_red.ssr
+                if RSS_full > 0 and df_resid > 0:
+                    F = ((RSS_red - RSS_full) / df_diff) / (RSS_full / df_resid)
+                    F_stats[i] = max(F, 0)
+                    pvalues[i] = 1 - stats.f.cdf(F, df_diff, df_resid)
+            except Exception:
+                F_stats[i] = 0
+                pvalues[i] = 1.0
+
+        return F_stats, pvalues
+
+    def _run_interaction_f_test(self, counts, full_basis, n_interaction_cols, n_full_model_cols):
+        """F-test for interaction terms: full (time + group + interaction) vs
+        reduced (time + group only)."""
+        from scipy import stats
+        import statsmodels.api as sm
+
+        n_genes = counts.shape[1]
+        n_obs = counts.shape[0]
+        F_stats = np.zeros(n_genes)
+        pvalues = np.ones(n_genes)
+
+        n_reduced = n_full_model_cols - n_interaction_cols
+        df_diff = n_interaction_cols
+        df_resid = n_obs - n_full_model_cols
+
+        if df_resid <= 0 or n_reduced <= 0:
+            return F_stats, pvalues
+
+        X_full = sm.add_constant(full_basis)
+        X_red = X_full[:, :n_reduced + 1]  # const + first n_reduced columns
+
+        for i in range(n_genes):
+            y = counts[:, i]
+            try:
+                model_full = sm.OLS(y, X_full).fit()
+                model_red = sm.OLS(y, X_red).fit()
+                RSS_full = model_full.ssr
+                RSS_red = model_red.ssr
+                if RSS_full > 0:
+                    F = ((RSS_red - RSS_full) / df_diff) / (RSS_full / df_resid)
+                    F_stats[i] = max(F, 0)
+                    pvalues[i] = 1 - stats.f.cdf(F, df_diff, df_resid)
+            except Exception:
+                F_stats[i] = 0
+                pvalues[i] = 1.0
+
+        return F_stats, pvalues
+
+    def run(self, input_path):
+        import plotly.graph_objects as go
+        import plotly.express as px
+        from statsmodels.stats.multitest import multipletests
+
+        self.progress(5, "加载数据...")
+        from modules.io_utils import read_expression_matrix
+        adata = read_expression_matrix(input_path)
+
+        time_column = self.params.get('time_column', 'minute')
+        group_column = self.params.get('group_column', '')
+        spline_df = int(self.params.get('spline_df', 3))
+        n_clusters = int(self.params.get('n_clusters', 6))
+        fdr_threshold = float(self.params.get('fdr_threshold', 0.05))
+
+        self.progress(15, "解析时间信息...")
+        if time_column not in adata.obs.columns:
+            raise ValueError(
+                f"时间列 '{time_column}' 不存在于 obs 中。"
+                f"可用列: {', '.join(adata.obs.columns.tolist())}"
+            )
+        time_vals = pd.to_numeric(adata.obs[time_column], errors='coerce').values
+        if np.any(np.isnan(time_vals)):
+            raise ValueError(f"时间列 '{time_column}' 包含非数值，请检查数据。")
+
+        counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
+        counts = counts.astype(float)
+        gene_ids = adata.var_names.tolist()
+        if 'gene_name' in adata.var.columns:
+            gene_names = adata.var['gene_name'].tolist()
+        else:
+            gene_names = gene_ids
+
+        # Filter low-expression genes (mean > 1)
+        self.progress(20, "过滤低表达基因...")
+        raw_mean = counts.mean(axis=0)
+        expr_mask = raw_mean > 1
+        counts = counts[:, expr_mask]
+        gene_ids = [gene_ids[i] for i in range(len(gene_ids)) if expr_mask[i]]
+        gene_names = [gene_names[i] for i in range(len(gene_names)) if expr_mask[i]]
+        n_genes = counts.shape[1]
+
+        if n_genes == 0:
+            raise ValueError("过滤低表达基因后无剩余基因，请降低过滤阈值或检查数据。")
+
+        # Log2 CPM normalization
+        self.progress(25, "CPM 标准化...")
+        lib_sizes = counts.sum(axis=1, keepdims=True)
+        lib_sizes = np.where(lib_sizes > 0, lib_sizes, 1)
+        cpm = counts / lib_sizes * 1e6
+        lognorm = np.log2(cpm + 1)
+
+        n_obs = lognorm.shape[0]
+        unique_times = np.unique(time_vals)
+
+        if len(unique_times) < 3:
+            raise ValueError(
+                f"需要至少 3 个不同时间点进行时序分析，当前仅 {len(unique_times)} 个。"
+            )
+
+        # Build spline basis
+        self.progress(35, "构建 spline 基函数...")
+        try:
+            time_basis = self._build_spline_basis(time_vals, df=spline_df)
+            n_spline_cols = time_basis.shape[1]
+        except Exception:
+            # Fallback: use raw time as single column basis
+            time_basis = time_vals.reshape(-1, 1)
+            n_spline_cols = 1
+
+        # Temporal F-test
+        self.progress(45, "运行时序 F-test...")
+        F_stats, pvalues = self._run_temporal_f_test(lognorm, time_basis, n_spline_cols)
+
+        # BH FDR correction
+        self.progress(55, "BH FDR 校正...")
+        try:
+            _, qvalues, _, _ = multipletests(pvalues, method='fdr_bh')
+        except Exception:
+            qvalues = pvalues
+
+        sig = (qvalues < fdr_threshold).astype(int)
+        n_sig = int(sig.sum())
+
+        # Save timecourse_results.csv
+        results_dir = os.path.join(self.project_dir, 'results')
+        os.makedirs(results_dir, exist_ok=True)
+        result_files = []
+
+        tc_df = pd.DataFrame({
+            'gene': gene_names,
+            'F': np.round(F_stats, 4),
+            'pvalue': pvalues,
+            'qvalue': qvalues,
+            'sig': sig
+        })
+        tc_df = tc_df.sort_values('qvalue')
+        csv_path = os.path.join(results_dir, 'timecourse_results.csv')
+        tc_df.to_csv(csv_path, index=False)
+        result_files.append({'file_path': csv_path, 'file_type': 'csv', 'category': 'table', 'label': '时序差异基因列表'})
+
+        plots_dir = os.path.join(self.project_dir, 'plots')
+        os.makedirs(plots_dir, exist_ok=True)
+
+        # Q-Q plot: observed vs theoretical F quantiles
+        self.progress(60, "生成 Q-Q 图...")
+        df1 = n_spline_cols
+        df2 = max(n_obs - n_spline_cols - 1, 1)
+        sorted_obs = np.sort(F_stats)
+        n_pts = len(sorted_obs)
+        theoretical_q = np.array([
+            (i + 0.5) / n_pts for i in range(n_pts)
+        ])
+        theoretical_f = np.array([
+            __import__('scipy').stats.f.ppf(q, df1, df2) for q in theoretical_q
+        ])
+        fig_qq = go.Figure()
+        fig_qq.add_trace(go.Scatter(
+            x=theoretical_f, y=sorted_obs, mode='markers',
+            marker=dict(size=4, color='#1976d2', opacity=0.6),
+            name='Genes'
+        ))
+        max_val = max(float(theoretical_f.max()), float(sorted_obs.max())) * 1.1
+        fig_qq.add_trace(go.Scatter(
+            x=[0, max_val], y=[0, max_val], mode='lines',
+            line=dict(color='red', dash='dash'), name='y = x'
+        ))
+        fig_qq.update_layout(
+            title='Q-Q Plot (F-statistic)',
+            xaxis_title='Theoretical F quantiles',
+            yaxis_title='Observed F statistics',
+            plot_bgcolor='white', width=600, height=500
+        )
+        fpath = os.path.join(plots_dir, 'timecourse_qq.json')
+        with open(fpath, 'w') as f:
+            f.write(fig_qq.to_json(engine="json"))
+        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qq', 'label': 'Q-Q 图'})
+
+        # Fuzzy c-means trajectory clustering
+        cluster_df = None
+        do_cluster = n_sig >= n_clusters
+
+        if do_cluster:
+            self.progress(70, "模糊 c-means 轨迹聚类...")
+            # Per-timepoint mean trajectories
+            time_unique = np.sort(unique_times)
+            time_idx_map = {t: np.where(time_vals == t)[0] for t in time_unique}
+            n_times = len(time_unique)
+            sig_idx = np.where(sig == 1)[0]
+            sig_expr = lognorm[:, sig_idx]
+
+            traj = np.zeros((len(sig_idx), n_times))
+            for ti, t in enumerate(time_unique):
+                t_mask = time_idx_map[t]
+                traj[:, ti] = sig_expr[t_mask, :].mean(axis=0)
+
+            # Z-score standardize per gene
+            traj_mean = traj.mean(axis=1, keepdims=True)
+            traj_std = traj.std(axis=1, keepdims=True)
+            traj_std = np.where(traj_std > 0, traj_std, 1)
+            traj_z = (traj - traj_mean) / traj_std
+
+            n_clust = min(n_clusters, len(sig_idx), n_times)
+            if n_clust < 2:
+                do_cluster = False
+            else:
+                try:
+                    from fcmeans import FCM
+                    fcm = FCM(n_clusters=n_clust, random_state=42, max_iter=300)
+                    fcm.fit(traj_z)
+                    cluster_labels = fcm.predict(traj_z)
+                    membership = fcm.u
+                except Exception:
+                    from sklearn.cluster import KMeans
+                    km = KMeans(n_clusters=n_clust, random_state=42, n_init=10)
+                    km.fit(traj_z)
+                    cluster_labels = km.labels_
+                    # Soft membership from inverse distances
+                    dists = np.linalg.norm(
+                        traj_z[:, np.newaxis, :] - km.cluster_centers_[np.newaxis, :, :],
+                        axis=2
+                    )
+                    inv_dists = 1.0 / (dists + 1e-8)
+                    membership = inv_dists / inv_dists.sum(axis=1, keepdims=True)
+
+                sig_gene_names = [gene_names[i] for i in sig_idx]
+                sig_gene_ids = [gene_ids[i] for i in sig_idx]
+                cluster_df = pd.DataFrame({
+                    'gene': sig_gene_names,
+                    'cluster': [f'C{c}' for c in cluster_labels + 1],
+                })
+                # Top membership score per gene
+                cluster_df['membership'] = np.round(membership.max(axis=1), 4)
+                cluster_df = cluster_df.sort_values(['cluster', 'membership'], ascending=[True, False])
+
+                tc_csv = os.path.join(results_dir, 'timecourse_clusters.csv')
+                cluster_df.to_csv(tc_csv, index=False)
+                result_files.append({'file_path': tc_csv, 'file_type': 'csv', 'category': 'table', 'label': '轨迹聚类结果'})
+
+                # Cluster centers line chart
+                colors = px.colors.qualitative.Set2 if n_clust <= 8 else px.colors.qualitative.Light24
+                fig_centers = go.Figure()
+                for ci in range(n_clust):
+                    mask_c = cluster_labels == ci
+                    if mask_c.sum() == 0:
+                        continue
+                    center = traj_z[mask_c, :].mean(axis=0)
+                    fig_centers.add_trace(go.Scatter(
+                        x=time_unique, y=center, mode='lines+markers',
+                        name=f'C{ci + 1} (n={mask_c.sum()})',
+                        line=dict(color=colors[ci % len(colors)], width=2),
+                        marker=dict(size=7)
+                    ))
+                fig_centers.update_layout(
+                    title='Cluster Centers (z-scored)',
+                    xaxis_title=time_column, yaxis_title='Z-score',
+                    plot_bgcolor='white', width=700, height=500,
+                    legend=dict(font=dict(size=10))
+                )
+                fpath = os.path.join(plots_dir, 'timecourse_cluster_centers.json')
+                with open(fpath, 'w') as f:
+                    f.write(fig_centers.to_json(engine="json"))
+                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'cluster_centers', 'label': '聚类中心轨迹'})
+
+                # Gene x Time heatmap ordered by cluster
+                order = np.argsort(cluster_labels)
+                heatmap_z = traj_z[order, :]
+                y_labels_cluster = [f"C{cluster_labels[i] + 1}_{sig_gene_names[i]}" for i in order]
+                # Cap displayed genes at 200 for readability
+                max_heat = 200
+                if len(order) > max_heat:
+                    step = len(order) // max_heat
+                    sel = np.arange(0, len(order), step)[:max_heat]
+                    heatmap_z = heatmap_z[sel, :]
+                    y_labels_cluster = [y_labels_cluster[j] for j in sel]
+
+                fig_heat = go.Figure(data=go.Heatmap(
+                    z=heatmap_z,
+                    x=[str(t) for t in time_unique],
+                    y=y_labels_cluster,
+                    colorscale='RdBu_r', zmid=0,
+                    colorbar=dict(title='Z-score')
+                ))
+                fig_heat.update_layout(
+                    title='Gene x Time Heatmap (ordered by cluster)',
+                    xaxis_title=time_column, yaxis_title='Gene',
+                    width=800, height=max(500, len(y_labels_cluster) * 12 + 100),
+                    yaxis=dict(tickfont=dict(size=7))
+                )
+                fpath = os.path.join(plots_dir, 'timecourse_heatmap.json')
+                with open(fpath, 'w') as f:
+                    f.write(fig_heat.to_json(engine="json"))
+                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': '基因x时间热图'})
+
+        # Interaction test (if group_column specified)
+        self.progress(85, "交互效应分析...")
+        interaction_csv = None
+        if group_column and group_column in adata.obs.columns:
+            groups = adata.obs[group_column].astype(str)
+            group_dummies = pd.get_dummies(groups, drop_first=True, dtype=float).values
+            n_group_cols = group_dummies.shape[1]
+            interaction = time_basis[:, :, np.newaxis] * group_dummies[:, np.newaxis, :]
+            n_interaction_cols = time_basis.shape[1] * n_group_cols
+            interaction_2d = interaction.reshape(n_obs, -1)
+            full_basis = np.hstack([time_basis, group_dummies, interaction_2d])
+            n_full_model_cols = time_basis.shape[1] + n_group_cols + n_interaction_cols
+
+            F_int, p_int = self._run_interaction_f_test(
+                lognorm, full_basis, n_interaction_cols, n_full_model_cols
+            )
+            try:
+                _, q_int, _, _ = multipletests(p_int, method='fdr_bh')
+            except Exception:
+                q_int = p_int
+
+            int_df = pd.DataFrame({
+                'gene': gene_names,
+                'F': np.round(F_int, 4),
+                'pvalue': p_int,
+                'qvalue': q_int,
+                'sig': (q_int < fdr_threshold).astype(int)
+            })
+            int_df = int_df.sort_values('qvalue')
+            interaction_csv = os.path.join(results_dir, 'timecourse_interaction.csv')
+            int_df.to_csv(interaction_csv, index=False)
+            result_files.append({
+                'file_path': interaction_csv, 'file_type': 'csv',
+                'category': 'table', 'label': '交互效应检验结果'
+            })
+
+        # Save output h5ad
+        self.progress(92, "保存 h5ad...")
+        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
+        os.makedirs(intermediate_dir, exist_ok=True)
+        output_path = os.path.join(intermediate_dir, 'bulk_timecourse_output.h5ad')
+        adata.write_h5ad(output_path)
+
+        self.progress(100, "完成")
+        return {
+            'output_adata': output_path,
+            'result_files': result_files,
+            'summary': {
+                'n_genes_total': n_genes,
+                'n_temporal_sig': n_sig,
+                'fdr_threshold': fdr_threshold,
+                'spline_df': spline_df,
+                'n_timepoints': len(unique_times),
+                'n_clusters': n_clusters if do_cluster else 0,
+                'has_interaction': interaction_csv is not None,
+            }
+        }

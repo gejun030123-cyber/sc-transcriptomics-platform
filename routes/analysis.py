@@ -25,6 +25,7 @@ BULK_MODULE_LIST = [
     {'name': 'bulk_pca', 'display': 'PCA / UMAP', 'desc': 'PCA 和 UMAP 降维可视化'},
     {'name': 'bulk_heatmap', 'display': '热图分析', 'desc': 'Top 差异基因热图、样本相关性热图'},
     {'name': 'bulk_enrichment', 'display': '通路富集', 'desc': 'GO/KEGG/WikiPathways 通路富集分析（ORA / GSEA）'},
+    {'name': 'bulk_timecourse', 'display': '时序分析', 'desc': '多时间点差异基因检测 + 轨迹聚类'},
 ]
 
 MODULE_LIST = SC_MODULE_LIST + BULK_MODULE_LIST
@@ -129,6 +130,18 @@ PARAM_SCHEMAS = {
          'help': '可视化中显示的 Top N 显著通路数。'},
         {'key': 'input_source', 'label': 'DEG 结果文件路径', 'type': 'text', 'default': '',
          'help': '来自已完成的 DEG 分析的 CSV 结果文件路径。包含 gene 和 regulation/log2FC 列。'},
+    ],
+    'bulk_timecourse': [
+        {'key': 'time_column', 'label': '时间列名', 'type': 'text', 'default': 'minute',
+         'help': 'obs 中包含数值型时间点信息的列名，如 minute、hour、day。列中的值必须为数值。'},
+        {'key': 'group_column', 'label': '分组列名（可选，用于交互检验）', 'type': 'text', 'default': '',
+         'help': '用于分组的 obs 列名。填写后将执行 时间 x 分组 交互效应 F-test。留空则仅运行时序主效应分析。'},
+        {'key': 'spline_df', 'label': 'Spline 自由度', 'type': 'number', 'default': 3,
+         'help': '自然立方 spline 的自由度。3 为常用默认值，可拟合非线性时间趋势。增大可拟合更复杂的曲线，但消耗更多自由度。'},
+        {'key': 'n_clusters', 'label': '聚类数', 'type': 'number', 'default': 6,
+         'help': '模糊 c-means 聚类数。通常 4-8 可覆盖主要时间表达模式。需满足：显著时序基因数 >= 聚类数。'},
+        {'key': 'fdr_threshold', 'label': 'FDR 阈值', 'type': 'number', 'default': 0.05, 'step': 0.01,
+         'help': 'BH 校正后的 FDR 显著性阈值。0.05 为标准，0.01 为严格。'},
     ],
 }
 
