@@ -73,6 +73,54 @@ class DEGAnalysis(BaseAnalysis):
             with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'volcano', 'label': f'Volcano: {first_group}'})
 
+        # DEG Dotplot
+        if self.params.get('show_dotplot', True):
+            try:
+                top_genes_list = []
+                for g in groups:
+                    group_df = sc.get.rank_genes_groups_df(adata, group=g)
+                    top_genes_list.extend(group_df.head(5)['names'].tolist())
+                top_genes_list = list(dict.fromkeys(top_genes_list))[:30]
+
+                if top_genes_list:
+                    sc.tl.dendrogram(adata, groupby=groupby)
+                    fig_dot = sc.pl.dotplot(adata, var_names=top_genes_list, groupby=groupby, return_fig=True)
+                    import io, base64
+                    buf = io.BytesIO()
+                    fig_dot.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+                    import matplotlib.pyplot as plt
+                    plt.close('all')
+                    buf.seek(0)
+                    img_b64 = base64.b64encode(buf.read()).decode()
+                    fpath = os.path.join(plots_dir, 'deg_dotplot.json')
+                    with open(fpath, 'w') as f:
+                        json.dump({'data': [{'type': 'image', 'source': f'data:image/png;base64,{img_b64}', 'xref': 'paper', 'yref': 'paper', 'x': 0, 'y': 1, 'sizex': 1, 'sizey': 1, 'sizing': 'stretch'}], 'layout': {'width': 900, 'height': 500, 'title': 'DEG Dotplot'}}, f)
+                    result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'dotplot', 'label': 'DEG Dotplot'})
+            except Exception:
+                pass
+
+        # Gene expression UMAP
+        plot_genes_umap = self.params.get('plot_genes_umap', '').strip()
+        if plot_genes_umap and 'X_umap' in adata.obsm:
+            gene_list = [g.strip() for g in plot_genes_umap.split(',') if g.strip() and g.strip() in adata.var_names]
+            for gene in gene_list[:5]:  # Limit to 5 genes
+                fig_gene = umap_scatter(adata, gene, title=f'{gene} Expression')
+                fpath = os.path.join(plots_dir, f'deg_gene_umap_{gene}.json')
+                with open(fpath, 'w') as f: f.write(json.dumps(fig_gene))
+                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'{gene} Expression'})
+
+        # Export full DEG results
+        all_deg = []
+        for g in groups:
+            df_g = sc.get.rank_genes_groups_df(adata, group=g)
+            df_g['cluster'] = g
+            all_deg.append(df_g)
+        if all_deg:
+            all_deg_df = pd.concat(all_deg)
+            full_csv = os.path.join(results_dir, 'sc_deg_full_results.csv')
+            all_deg_df.to_csv(full_csv, index=False)
+            result_files.append({'file_path': full_csv, 'file_type': 'csv', 'category': 'table', 'label': '完整 DEG 结果'})
+
         self.progress(90, "Saving output...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')
         os.makedirs(intermediate_dir, exist_ok=True)

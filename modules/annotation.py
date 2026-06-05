@@ -17,6 +17,25 @@ DEFAULT_TME_MARKERS = {
     'Proliferating': ['MKI67', 'TOP2A', 'PCNA', 'STMN1', 'CDK1'],
 }
 
+DEFAULT_IMMUNE_MARKERS = {
+    'T cells': ['CD3D', 'CD3E', 'CD3G', 'CD2', 'TRAC'],
+    'CD4+ T': ['CD4', 'IL7R', 'TRBC2'],
+    'CD8+ T': ['CD8A', 'CD8B', 'GZMK', 'GZMA', 'CCL5'],
+    'T naive': ['LEF1', 'CCR7', 'TCF7'],
+    'NK cells': ['NKG7', 'GNLY', 'KLRD1', 'NCAM1', 'PRF1'],
+    'B cells': ['CD79A', 'CD79B', 'MS4A1', 'CD19', 'PAX5'],
+    'Plasma cells': ['JCHAIN', 'MZB1', 'SDC1', 'IGHG1', 'IGKC'],
+    'Monocyte/Macrophage': ['CD14', 'CD68', 'CSF1R', 'LYZ', 'S100A8', 'S100A9'],
+    'Dendritic cells': ['FCER1A', 'CD1C', 'CLEC10A', 'ITGAX', 'HLA-DRA'],
+    'Neutrophils': ['CSF3R', 'CXCR2', 'FCGR3B', 'S100A12'],
+    'pDC': ['GZMB', 'IL3RA', 'COBLL1', 'TCF4'],
+}
+
+MARKER_SETS = {
+    'TME': DEFAULT_TME_MARKERS,
+    'Immune': DEFAULT_IMMUNE_MARKERS,
+}
+
 class AnnotationAnalysis(BaseAnalysis):
     MODULE_NAME = "annotation"
     DISPLAY_NAME = "细胞注释"
@@ -41,7 +60,22 @@ class AnnotationAnalysis(BaseAnalysis):
         leiden_key = f'leiden_{resolution}' if f'leiden_{resolution}' in adata.obs.columns else cluster_key
 
         self.progress(20, "Scoring cell type markers...")
-        markers = DEFAULT_TME_MARKERS
+        marker_set_name = self.params.get('marker_set', 'TME')
+        custom_markers_str = self.params.get('custom_markers', '').strip()
+
+        if custom_markers_str:
+            # Parse custom markers: "CellType1:GENE1,GENE2;CellType2:GENE3,GENE4"
+            markers = {}
+            for ct_genes in custom_markers_str.split(';'):
+                ct_genes = ct_genes.strip()
+                if ':' in ct_genes:
+                    ct, genes_str = ct_genes.split(':', 1)
+                    markers[ct.strip()] = [g.strip() for g in genes_str.split(',') if g.strip()]
+            if not markers:
+                markers = MARKER_SETS.get(marker_set_name, DEFAULT_TME_MARKERS)
+        else:
+            markers = MARKER_SETS.get(marker_set_name, DEFAULT_TME_MARKERS)
+
         for ct, genes in markers.items():
             available_genes = [g for g in genes if g in adata.var_names]
             if available_genes:
@@ -66,26 +100,29 @@ class AnnotationAnalysis(BaseAnalysis):
         os.makedirs(plots_dir, exist_ok=True)
         result_files = []
 
-        import plotly.graph_objects as go
+        # Dotplot for marker validation
         dotplot_genes = []
         for genes in markers.values():
             dotplot_genes.extend([g for g in genes[:2] if g in adata.var_names])
-        dotplot_genes = list(dict.fromkeys(dotplot_genes))[:20]
+        dotplot_genes = list(dict.fromkeys(dotplot_genes))[:25]
 
         if dotplot_genes and 'celltype' in adata.obs.columns:
-            sc.tl.dendrogram(adata, groupby='celltype')
-            fig_dotplot = sc.pl.dotplot(adata, var_names=dotplot_genes, groupby='celltype', return_fig=True)
-            import matplotlib.pyplot as plt
-            import io, base64
-            buf = io.BytesIO()
-            fig_dotplot.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-            plt.close('all')
-            buf.seek(0)
-            img_b64 = base64.b64encode(buf.read()).decode()
-            fpath = os.path.join(plots_dir, 'annotation_dotplot.json')
-            with open(fpath, 'w') as f:
-                json.dump({'data': [{'type': 'image', 'source': f'data:image/png;base64,{img_b64}', 'xref': 'paper', 'yref': 'paper', 'x': 0, 'y': 1, 'sizex': 1, 'sizey': 1, 'sizing': 'stretch'}], 'layout': {'width': 800, 'height': 500, 'title': 'Cell Type Marker Dotplot'}}, f)
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'dotplot', 'label': 'Cell Type Dotplot'})
+            try:
+                sc.tl.dendrogram(adata, groupby='celltype')
+                fig_dotplot = sc.pl.dotplot(adata, var_names=dotplot_genes, groupby='celltype', return_fig=True)
+                import io, base64
+                buf = io.BytesIO()
+                fig_dotplot.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+                import matplotlib.pyplot as plt
+                plt.close('all')
+                buf.seek(0)
+                img_b64 = base64.b64encode(buf.read()).decode()
+                fpath = os.path.join(plots_dir, 'annotation_dotplot.json')
+                with open(fpath, 'w') as f:
+                    json.dump({'data': [{'type': 'image', 'source': f'data:image/png;base64,{img_b64}', 'xref': 'paper', 'yref': 'paper', 'x': 0, 'y': 1, 'sizex': 1, 'sizey': 1, 'sizing': 'stretch'}], 'layout': {'width': 800, 'height': 500, 'title': 'Cell Type Marker Dotplot'}}, f)
+                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'dotplot', 'label': 'Cell Type Dotplot'})
+            except Exception:
+                pass
 
         fig_json = json.dumps(umap_scatter(adata, 'celltype', title='UMAP by Cell Type'))
         fpath = os.path.join(plots_dir, 'annotation_umap_celltype.json')
