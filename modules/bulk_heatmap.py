@@ -103,7 +103,7 @@ class BulkHeatmapAnalysis(BaseAnalysis):
             colorscale='RdBu_r',
             zmid=0,
             colorbar=dict(title='Z-score'),
-            hovertemplate='样本: %{y}<br>基因: %{x}<br>Z-score: %{z:.2f}'
+            hovertemplate='样本: %{y}<br>基因: %{x}<br>Z-score: %{z:.2f}<extra></extra>'
         ))
 
         annotations = []
@@ -128,6 +128,27 @@ class BulkHeatmapAnalysis(BaseAnalysis):
         with open(fpath, 'w') as f: f.write(fig.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': title})
 
+        # 分组注释条
+        if annotation_colors:
+            color_indices = [unique_groups.index(str(groups[i])) for i in range(len(groups))]
+            fig_annot = go.Figure()
+            fig_annot.add_trace(go.Heatmap(
+                z=[[i] for i in color_indices],
+                y=sample_ordered,
+                x=['Group'],
+                colorscale=[[i / max(len(unique_groups) - 1, 1), palette[i % len(palette)]] for i in range(len(unique_groups))],
+                showscale=False,
+                text=[[unique_groups[i]] for i in color_indices],
+                hovertemplate='%{y}: %{text}<extra></extra>'
+            ))
+            fig_annot.update_layout(
+                height=max(400, adata.n_obs * 25 + 150), width=100,
+                margin=dict(l=0, r=0, t=30, b=40)
+            )
+            fpath_annot = os.path.join(plots_dir, 'bulk_heatmap_annotation.json')
+            with open(fpath_annot, 'w') as f: f.write(fig_annot.to_json(engine="json"))
+            result_files.append({'file_path': fpath_annot, 'file_type': 'plotly_json', 'category': 'annotation', 'label': '分组注释条'})
+
         self.progress(85, "生成样本相关性热图...")
         corr_matrix = np.corrcoef(norm_data)
         fig_corr = go.Figure()
@@ -138,7 +159,7 @@ class BulkHeatmapAnalysis(BaseAnalysis):
             colorscale='Blues',
             zmin=0, zmax=1,
             colorbar=dict(title='Pearson r'),
-            hovertemplate='%{y} vs %{x}<br>r = %{z:.3f}'
+            hovertemplate='%{y} vs %{x}<br>r = %{z:.3f}<extra></extra>'
         ))
         fig_corr.update_layout(
             title='样本相关性热图 (Pearson)',

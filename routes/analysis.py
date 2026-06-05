@@ -107,7 +107,7 @@ PARAM_SCHEMAS = {
     'bulk_pca': [
         {'key': 'n_comps', 'label': 'PCA 主成分数量', 'type': 'number', 'default': 10, 'help': 'PCA 主成分数量。通常 5-10 即可。样本数少时自动降至 n_samples-1。'},
         {'key': 'color_by', 'label': '颜色分组列名（留空则不着色）', 'type': 'text', 'default': '', 'help': '用于着色的 obs 列名。留空则不着色。如 condition、batch、celltype 等。'},
-        {'key': 'run_umap', 'label': '同时运行 UMAP', 'type': 'checkbox', 'default': True, 'help': '是否同时运行 UMAP 降维。需要至少 10 个样本。'},
+        {'key': 'dimred_method', 'label': '降维方法', 'type': 'select', 'options': ['pca', 'umap', 'tsne'], 'default': 'pca', 'help': '降维可视化方法。PCA：线性降维，保留全局结构。UMAP：非线性降维，保留局部结构。t-SNE：非线性降维，适合发现聚类。'},
     ],
     'bulk_heatmap': [
         {'key': 'heatmap_type', 'label': '热图类型', 'type': 'select', 'options': ['top_var', 'deg'], 'default': 'top_var', 'help': '热图类型。top_var：显示最高变异的基因。deg：显示差异表达基因（需先运行 DEG 分析）。'},

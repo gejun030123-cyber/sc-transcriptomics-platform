@@ -61,6 +61,30 @@ class BulkQCAnalysis(BaseAnalysis):
         with open(fpath, 'w') as f: f.write(fig.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': '质控总览'})
 
+        # 样本相关性热图
+        norm_for_corr = adata_filtered.copy()
+        sc.pp.normalize_total(norm_for_corr, target_sum=1e6)
+        sc.pp.log1p(norm_for_corr)
+        corr_data = norm_for_corr.X if not hasattr(norm_for_corr.X, 'toarray') else norm_for_corr.X.toarray()
+        corr_matrix = np.corrcoef(corr_data)
+        sample_labels_corr = norm_for_corr.obs.index.tolist()
+
+        fig_corr = go.Figure()
+        fig_corr.add_trace(go.Heatmap(
+            z=corr_matrix.tolist(), x=sample_labels_corr, y=sample_labels_corr,
+            colorscale='Blues', zmin=0, zmax=1,
+            colorbar=dict(title='Pearson r'),
+            hovertemplate='%{y} vs %{x}<br>r = %{z:.3f}<extra></extra>'
+        ))
+        fig_corr.update_layout(
+            title='样本相关性热图 (Pearson)',
+            height=max(400, n_after * 30 + 100), width=max(400, n_after * 30 + 100),
+            plot_bgcolor='white'
+        )
+        fpath = os.path.join(plots_dir, 'bulk_qc_corr.json')
+        with open(fpath, 'w') as f: f.write(fig_corr.to_json(engine="json"))
+        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': '样本相关性热图'})
+
         if n_before > n_after:
             fig_r = go.Figure()
             fig_r.add_trace(go.Bar(x=['过滤前', '过滤后'], y=[n_before, n_after], marker_color=['#e53935', '#4caf50']))
