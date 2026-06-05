@@ -199,13 +199,17 @@ class BulkDEGAnalysis(BaseAnalysis):
         # 基因箱线图
         plot_genes_str = self.params.get('plot_genes', '').strip()
         if plot_genes_str:
+            # 构建基因名→Ensembl ID 的反向映射
+            name_to_id = {v: k for k, v in gene_id_to_name.items()} if gene_id_to_name else {}
             plot_gene_list = [g.strip() for g in plot_genes_str.split(',') if g.strip()]
             for pg in plot_gene_list:
-                if pg in adata.var_names:
+                # 支持用基因名或 Ensembl ID 指定
+                pg_id = name_to_id.get(pg, pg)
+                if pg_id in adata.var_names:
                     fig_box = go.Figure()
                     for grp_name, samples in [(group1, group1_samples), (group2, group2_samples)]:
                         sample_idx = [list(adata.obs.index).index(s) for s in samples if s in adata.obs.index]
-                        gene_idx = list(adata.var_names).index(pg)
+                        gene_idx = list(adata.var_names).index(pg_id)
                         vals = counts[sample_idx, gene_idx]
                         fig_box.add_trace(go.Box(y=vals, name=str(grp_name), boxpoints='all', jitter=0.3))
                     fig_box.update_layout(title=f'{pg} 表达', yaxis_title='Expression',
