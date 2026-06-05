@@ -255,4 +255,5 @@ def analyze(pid, module_name):
     sidebar_modules = BULK_MODULE_LIST if is_bulk else SC_MODULE_LIST
     return render_template('analysis_select.html', project=p, module=mod_info,
                           schema=schema, completed_tasks=completed_tasks,
-                          uploaded_h5ad=uploaded_files, all_modules=sidebar_modules)
+                          uploaded_h5ad=uploaded_files, all_modules=sidebar_modules,
+                          module_display_map=MODULE_DISPLAY_MAP)
