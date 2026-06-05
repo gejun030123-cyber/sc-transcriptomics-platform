@@ -29,7 +29,12 @@ class BulkQCAnalysis(BaseAnalysis):
         max_mt_pct = float(self.params.get('max_mt_pct', 20.0))
 
         self.progress(20, "计算质控指标...")
-        adata.var['mt'] = adata.var_names.str.startswith('MT-')
+        # 优先用 gene_name 检测线粒体基因（Ensembl ID 不以 MT- 开头）
+        if 'gene_name' in adata.var.columns:
+            gene_names_for_mt = adata.var['gene_name'].fillna('').astype(str)
+        else:
+            gene_names_for_mt = adata.var_names.astype(str)
+        adata.var['mt'] = gene_names_for_mt.str.startswith('MT-')
         sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], percent_top=None, log1p=False, inplace=True)
 
         n_before = adata.n_obs

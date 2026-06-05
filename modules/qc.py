@@ -19,9 +19,14 @@ class QCAnalysis(BaseAnalysis):
         adata = sc.read_h5ad(input_path)
 
         self.progress(15, "Flagging MT/ribo/hb genes...")
-        adata.var["mt"] = adata.var_names.str.startswith("MT-")
-        adata.var["ribo"] = adata.var_names.str.startswith(("RPS", "RPL"))
-        adata.var["hb"] = adata.var_names.str.contains("^HB[^(P)]")
+        # 优先用 gene_name 检测（Ensembl ID 不以 MT-/RPS/RPL 开头）
+        if 'gene_name' in adata.var.columns:
+            gene_names_str = adata.var['gene_name'].fillna('').astype(str)
+        else:
+            gene_names_str = adata.var_names.astype(str)
+        adata.var["mt"] = gene_names_str.str.startswith("MT-")
+        adata.var["ribo"] = gene_names_str.str.startswith(("RPS", "RPL"))
+        adata.var["hb"] = gene_names_str.str.contains("^HB[^(P)]")
         sc.pp.calculate_qc_metrics(
             adata, qc_vars=["mt", "ribo", "hb"],
             inplace=True, percent_top=[20], log1p=True
