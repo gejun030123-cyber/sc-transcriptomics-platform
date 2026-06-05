@@ -197,26 +197,37 @@ class BulkDEGAnalysis(BaseAnalysis):
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'ma', 'label': 'MA 图'})
 
         # 基因箱线图
+        boxplot_n = min(5, top_n)  # 默认展示 top N 差异基因的箱线图
+        name_to_id = {v: k for k, v in gene_id_to_name.items()} if gene_id_to_name else {}
+
+        # 收集要绘制的基因列表（用户指定 + 自动 top N）
+        plot_gene_list = []
         plot_genes_str = self.params.get('plot_genes', '').strip()
         if plot_genes_str:
-            # 构建基因名→Ensembl ID 的反向映射
-            name_to_id = {v: k for k, v in gene_id_to_name.items()} if gene_id_to_name else {}
             plot_gene_list = [g.strip() for g in plot_genes_str.split(',') if g.strip()]
-            for pg in plot_gene_list:
-                # 支持用基因名或 Ensembl ID 指定
-                pg_id = name_to_id.get(pg, pg)
-                if pg_id in adata.var_names:
-                    fig_box = go.Figure()
-                    for grp_name, samples in [(group1, group1_samples), (group2, group2_samples)]:
-                        sample_idx = [list(adata.obs.index).index(s) for s in samples if s in adata.obs.index]
-                        gene_idx = list(adata.var_names).index(pg_id)
-                        vals = counts[sample_idx, gene_idx]
-                        fig_box.add_trace(go.Box(y=vals, name=str(grp_name), boxpoints='all', jitter=0.3))
-                    fig_box.update_layout(title=f'{pg} 表达', yaxis_title='Expression',
-                                         plot_bgcolor='white', width=400, height=350)
-                    fpath = os.path.join(plots_dir, f'bulk_deg_box_{pg}.json')
-                    with open(fpath, 'w') as f: f.write(fig_box.to_json(engine="json"))
-                    result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'boxplot', 'label': f'{pg} Boxplot'})
+
+        # 自动添加 top 差异基因（去重）
+        top_de_genes = deg_df[deg_df['regulation'] != 'NS'].head(boxplot_n)
+        for g in top_de_genes['gene'].tolist():
+            if g not in plot_gene_list:
+                plot_gene_list.append(g)
+
+        if plot_gene_list:
+            self.progress(82, f"生成 {len(plot_gene_list)} 个基因箱线图...")
+        for pg in plot_gene_list:
+            pg_id = name_to_id.get(pg, pg)
+            if pg_id in adata.var_names:
+                fig_box = go.Figure()
+                for grp_name, samples in [(group1, group1_samples), (group2, group2_samples)]:
+                    sample_idx = [list(adata.obs.index).index(s) for s in samples if s in adata.obs.index]
+                    gene_idx = list(adata.var_names).index(pg_id)
+                    vals = counts[sample_idx, gene_idx]
+                    fig_box.add_trace(go.Box(y=vals, name=str(grp_name), boxpoints='all', jitter=0.3))
+                fig_box.update_layout(title=f'{pg} 表达', yaxis_title='Expression',
+                                     plot_bgcolor='white', width=400, height=350)
+                fpath = os.path.join(plots_dir, f'bulk_deg_box_{pg}.json')
+                with open(fpath, 'w') as f: f.write(fig_box.to_json(engine="json"))
+                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'boxplot', 'label': f'{pg} Boxplot'})
 
         self.progress(88, "保存差异基因 CSV...")
         results_dir = os.path.join(self.project_dir, 'results')

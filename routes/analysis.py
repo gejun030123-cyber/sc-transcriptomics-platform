@@ -122,7 +122,7 @@ PARAM_SCHEMAS = {
         {'key': 'pval_threshold', 'label': 'padj 显著性阈值', 'type': 'number', 'default': 0.05, 'step': 0.01, 'help': '调整后 p-value 显著性阈值。0.05 为标准，0.01 为严格，0.1 为宽松探索性分析。'},
         {'key': 'top_n', 'label': 'Top N 差异基因数', 'type': 'number', 'default': 20, 'help': '结果中展示的 Top N 差异基因数。用于火山图标注和 Top 基因 CSV 导出。'},
         {'key': 'base_mean_filter', 'label': '最低平均表达量', 'type': 'number', 'default': 1, 'step': 0.5, 'help': '过滤低表达基因。BaseMean 低于此值的基因不参与分析和绘图。建议 1-10。'},
-        {'key': 'plot_genes', 'label': '展示基因（逗号分隔，可选）', 'type': 'text', 'default': '', 'help': '指定要绘制箱线图的基因名，多个用逗号分隔。留空则不生成箱线图。'},
+        {'key': 'plot_genes', 'label': '额外展示基因（逗号分隔，可选）', 'type': 'text', 'default': '', 'help': '指定要额外绘制箱线图的基因名，多个用逗号分隔。Top 差异基因会自动生成箱线图，此字段用于补充其他感兴趣的基因。'},
     ],
     'bulk_pca': [
         {'key': 'n_comps', 'label': 'PCA 主成分数量', 'type': 'number', 'default': 10, 'help': 'PCA 主成分数量。通常 5-10 即可。样本数少时自动降至 n_samples-1。'},
