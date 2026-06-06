@@ -151,6 +151,8 @@ PARAM_SCHEMAS = {
          'help': '可视化中显示的 Top N 显著通路数。'},
         {'key': 'input_source', 'label': 'DEG 结果文件路径', 'type': 'text', 'default': '',
          'help': '来自已完成的 DEG 分析的 CSV 结果文件路径。包含 gene 和 regulation/log2FC 列。'},
+        {'key': 'split_direction', 'label': '分开分析上调/下调基因', 'type': 'checkbox', 'default': False, 'help': '开启后将 DEG 结果按 Up/Down 拆分，分别做 ORA 富集分析，生成独立的气泡图。'},
+        {'key': 'custom_genes', 'label': '自定义基因列表（可选）', 'type': 'textarea', 'default': '', 'help': '手动输入基因名，逗号或换行分隔。填写后忽略 DEG 结果文件，直接用此列表做 ORA。'},
     ],
     'bulk_timecourse': [
         {'key': 'time_column', 'label': '时间列名', 'type': 'text', 'default': 'minute',
