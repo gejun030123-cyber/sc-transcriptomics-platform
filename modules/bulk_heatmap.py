@@ -45,7 +45,18 @@ class BulkHeatmapAnalysis(BaseAnalysis):
 
         self.progress(40, "选择基因...")
 
-        if hm_type == 'top_var' or hm_type not in ('deg',):
+        custom_genes_str = self.params.get('custom_genes', '').strip()
+        if custom_genes_str:
+            gene_list = [g.strip() for g in custom_genes_str.replace('\n', ',').split(',') if g.strip()]
+            var_names_list = list(adata.var_names)
+            top_idx = [var_names_list.index(g) for g in gene_list if g in var_names_list]
+            not_found = [g for g in gene_list if g not in var_names_list]
+            if not top_idx:
+                raise ValueError(f"自定义基因列表中没有找到任何匹配基因。请检查基因名是否正确。")
+            title = f'自定义基因热图 ({len(top_idx)} genes)'
+            if not_found:
+                title += f'，{len(not_found)} 个未找到'
+        elif hm_type == 'top_var' or hm_type not in ('deg',):
             gene_var = np.var(norm_data, axis=0)
             top_idx = np.argsort(gene_var)[::-1][:top_n]
             title = f'Top {top_n} 高变异基因热图'

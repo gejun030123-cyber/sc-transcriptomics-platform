@@ -135,6 +135,7 @@ PARAM_SCHEMAS = {
         {'key': 'heatmap_type', 'label': '热图类型', 'type': 'select', 'options': ['top_var', 'deg'], 'default': 'top_var', 'help': '热图类型。top_var：显示最高变异的基因。deg：显示差异表达基因（需先运行 DEG 分析）。'},
         {'key': 'top_n', 'label': '显示基因数', 'type': 'number', 'default': 50, 'help': '热图中显示的基因数量。通常 30-100。过多会导致热图难以阅读。'},
         {'key': 'groupby', 'label': '样本分组列名（可选）', 'type': 'text', 'default': '', 'help': '样本分组列名，用于在热图旁添加分组注释条。留空则不添加。'},
+        {'key': 'custom_genes', 'label': '自定义基因列表（可选）', 'type': 'textarea', 'default': '', 'help': '手动输入基因名，逗号或换行分隔。填写后忽略热图类型和基因数参数，直接用此列表绘制热图。'},
     ],
     'bulk_enrichment': [
         {'key': 'method', 'label': '富集方法', 'type': 'select', 'options': ['ORA', 'GSEA'], 'default': 'ORA',
