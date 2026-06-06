@@ -26,7 +26,7 @@ class DimredAnalysis(BaseAnalysis):
         ov.pp.scale(adata, max_value=10)
 
         self.progress(35, f"Running PCA ({n_comps} components)...")
-        ov.pp.pca(adata, n_comps=n_comps)
+        sc.pp.pca(adata, n_comps=n_comps, layer='scaled')
 
         self.progress(55, "Computing neighbors...")
         sc.pp.neighbors(adata, n_pcs=n_comps)
