@@ -36,6 +36,12 @@ def task_status(task_id):
             log_entries = json.loads(t.log_text)
         except Exception:
             pass
+    result = {}
+    if t.result_json:
+        try:
+            result = json.loads(t.result_json)
+        except Exception:
+            pass
     return jsonify({
         'status': t.status,
         'progress': t.progress,
@@ -43,6 +49,7 @@ def task_status(task_id):
         'error': t.error_traceback,
         'started_at': t.started_at,
         'finished_at': t.finished_at,
+        'result': result,
         'log': log_entries,
     })
 
@@ -80,18 +87,92 @@ def adata_info(pid):
         return jsonify({'error': 'No h5ad file found'}), 404
     try:
         import anndata
+        import numpy as np
         adata = anndata.read_h5ad(adata_path, backed='r')
+
+        def _dtype_str(series):
+            return str(series.dtype)
+
+        def _dtype_str_arr(arr):
+            return str(arr.dtype)
+
+        # obs 信息
+        obs_info = []
+        for col in adata.obs.columns:
+            s = adata.obs[col]
+            entry = {'name': col, 'dtype': _dtype_str(s)}
+            if s.dtype == object or s.dtype.name == 'category':
+                nuniq = s.nunique()
+                entry['n_unique'] = int(nuniq)
+                if nuniq <= 20:
+                    entry['values'] = [str(v) for v in sorted(s.dropna().unique().tolist())]
+            obs_info.append(entry)
+
+        # var 信息
+        var_info = []
+        for col in adata.var.columns:
+            s = adata.var[col]
+            entry = {'name': col, 'dtype': _dtype_str(s)}
+            if s.dtype == object or s.dtype.name == 'category':
+                nuniq = s.nunique()
+                entry['n_unique'] = int(nuniq)
+                if nuniq <= 20:
+                    entry['values'] = [str(v) for v in sorted(s.dropna().unique().tolist())[:20]]
+            var_info.append(entry)
+
+        # layers
+        layers_keys = list(adata.layers.keys())
+
+        # obsm
+        obsm_info = []
+        for k in adata.obsm.keys():
+            arr = adata.obsm[k]
+            obsm_info.append({'key': k, 'shape': list(arr.shape), 'dtype': _dtype_str_arr(arr)})
+
+        # varm
+        varm_info = []
+        for k in adata.varm.keys():
+            arr = adata.varm[k]
+            varm_info.append({'key': k, 'shape': list(arr.shape), 'dtype': _dtype_str_arr(arr)})
+
+        # obsp
+        obsp_keys = list(adata.obsp.keys())
+
+        # uns
+        uns_info = []
+        for k in adata.uns.keys():
+            v = adata.uns[k]
+            if isinstance(v, np.ndarray):
+                uns_info.append({'key': k, 'type': 'ndarray', 'shape': list(v.shape), 'dtype': str(v.dtype)})
+            elif isinstance(v, dict):
+                uns_info.append({'key': k, 'type': 'dict', 'keys': list(v.keys())[:20]})
+            else:
+                val_str = str(v)[:200]
+                uns_info.append({'key': k, 'type': type(v).__name__, 'preview': val_str})
+
+        # var_names 样本
+        var_names_sample = list(adata.var_names[:min(20, adata.n_vars)])
+        obs_names_sample = list(adata.obs_names[:min(10, adata.n_obs)])
+
         info = {
             'n_obs': int(adata.n_obs),
             'n_vars': int(adata.n_vars),
-            'obs_columns': list(adata.obs.columns),
-            'obsm_keys': list(adata.obsm.keys()),
             'file': os.path.basename(adata_path),
+            'obs_columns': obs_info,
+            'var_columns': var_info,
+            'layers': layers_keys,
+            'obsm': obsm_info,
+            'varm': varm_info,
+            'obsp': obsp_keys,
+            'uns': uns_info,
+            'var_names_sample': [str(v) for v in var_names_sample],
+            'obs_names_sample': [str(v) for v in obs_names_sample],
         }
         adata.file.close()
         return jsonify(info)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
 
 @api_bp.route('/result-file/<file_id>')
 def get_result_file(file_id):
@@ -203,3 +284,84 @@ def obs_columns():
         return jsonify({'columns': cols, 'sample_groups': sample_groups})
     except Exception:
         return jsonify({'columns': [], 'sample_groups': {}})
+
+
+@api_bp.route('/data-info-full')
+def data_info_full():
+    """返回 h5ad 文件的完整结构信息（obs/var 详情、layers、obsm、varm、obsp、uns）"""
+    file_path = request.args.get('file_path', '')
+    if not file_path:
+        return jsonify({'error': 'No file path'}), 400
+    if not file_path.endswith('.h5ad'):
+        return jsonify({'error': 'Not an h5ad file'}), 400
+    try:
+        import anndata
+        import numpy as np
+        adata = anndata.read_h5ad(file_path, backed='r')
+
+        def _dtype_str(series):
+            return str(series.dtype)
+
+        obs_info = []
+        for col in adata.obs.columns:
+            s = adata.obs[col]
+            entry = {'name': col, 'dtype': _dtype_str(s)}
+            if s.dtype == object or s.dtype.name == 'category':
+                nuniq = s.nunique()
+                entry['n_unique'] = int(nuniq)
+                if nuniq <= 20:
+                    entry['values'] = [str(v) for v in sorted(s.dropna().unique().tolist())]
+            obs_info.append(entry)
+
+        var_info = []
+        for col in adata.var.columns:
+            s = adata.var[col]
+            entry = {'name': col, 'dtype': _dtype_str(s)}
+            if s.dtype == object or s.dtype.name == 'category':
+                nuniq = s.nunique()
+                entry['n_unique'] = int(nuniq)
+                if nuniq <= 20:
+                    entry['values'] = [str(v) for v in sorted(s.dropna().unique().tolist())[:20]]
+            var_info.append(entry)
+
+        layers_keys = list(adata.layers.keys())
+
+        obsm_info = []
+        for k in adata.obsm.keys():
+            arr = adata.obsm[k]
+            obsm_info.append({'key': k, 'shape': list(arr.shape), 'dtype': str(arr.dtype)})
+
+        varm_info = []
+        for k in adata.varm.keys():
+            arr = adata.varm[k]
+            varm_info.append({'key': k, 'shape': list(arr.shape), 'dtype': str(arr.dtype)})
+
+        obsp_keys = list(adata.obsp.keys())
+
+        uns_info = []
+        for k in adata.uns.keys():
+            v = adata.uns[k]
+            if isinstance(v, np.ndarray):
+                uns_info.append({'key': k, 'type': 'ndarray', 'shape': list(v.shape), 'dtype': str(v.dtype)})
+            elif isinstance(v, dict):
+                uns_info.append({'key': k, 'type': 'dict', 'keys': list(v.keys())[:20]})
+            else:
+                uns_info.append({'key': k, 'type': type(v).__name__, 'preview': str(v)[:200]})
+
+        var_names_sample = [str(v) for v in adata.var_names[:min(20, adata.n_vars)]]
+
+        info = {
+            'obs_columns': obs_info,
+            'var_columns': var_info,
+            'layers': layers_keys,
+            'obsm': obsm_info,
+            'varm': varm_info,
+            'obsp': obsp_keys,
+            'uns': uns_info,
+            'var_names_sample': var_names_sample,
+        }
+        adata.file.close()
+        return jsonify(info)
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500

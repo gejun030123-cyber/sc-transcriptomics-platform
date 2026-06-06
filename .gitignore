@@ -11,3 +11,5 @@ venv/
 .venv/
 data/
 genesets/
+.superpowers/
+cache/

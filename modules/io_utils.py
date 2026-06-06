@@ -148,4 +148,105 @@ def read_expression_matrix(file_path):
     if gene_names is not None:
         adata.var['gene_name'] = gene_names
 
+    # 将 var_names 从 Ensembl ID 映射为基因名
+    adata = remap_var_names(adata)
+
+    return adata
+
+
+def remap_var_names(adata):
+    """将 adata.var_names 从 Ensembl ID 映射为基因名，处理重复名。
+    原始 ID 保存到 adata.var['gene_id']。
+    如果 var_names 已经是基因名（非 Ensembl ID），不做任何改动。"""
+    import re
+
+    def _is_ensembl_id(name):
+        """检查是否为 Ensembl 基因 ID（如 ENSG00000139618）"""
+        return bool(re.match(r'^ENS[A-Z]*G\d{5,}', str(name)))
+
+    # 如果 var_names 已经是基因名（非 Ensembl ID），直接返回，避免重复处理
+    if adata.n_vars > 0:
+        sample_ids = list(adata.var_names[:min(100, adata.n_vars)])
+        ensembl_count = sum(1 for g in sample_ids if _is_ensembl_id(g))
+        if ensembl_count < len(sample_ids) * 0.5:
+            return adata  # 已经是基因名，无需映射
+
+    gene_name_col = None
+    for col in ['gene_name', 'GeneSymbol', 'gene_symbol', 'gene_symbols', 'symbol',
+                'Symbol', 'Gene Symbol', 'gene', 'Gene', 'GENE_NAME',
+                'feature_name', 'gene_name_x']:
+        if col in adata.var.columns:
+            gene_name_col = col
+            break
+    if gene_name_col is None:
+        for col in adata.var.columns:
+            if 'symbol' in col.lower() or 'name' in col.lower():
+                gene_name_col = col
+                break
+
+    if gene_name_col is None:
+        return adata  # 没有映射信息，保持原样
+
+    gene_names = adata.var[gene_name_col].astype(str).tolist()
+    # 过滤无效值
+    gene_names = [g if g and g != 'nan' and g.strip() else str(adata.var_names[i])
+                  for i, g in enumerate(gene_names)]
+
+    # 保留原始 ID
+    if 'gene_id' not in adata.var.columns:
+        adata.var['gene_id'] = adata.var_names.tolist()
+
+    # 处理重复基因名：第一次出现保留原名，后续加后缀
+    seen = {}
+    unique_names = []
+    for g in gene_names:
+        if g in seen:
+            seen[g] += 1
+            unique_names.append(f"{g}_{seen[g]}")
+        else:
+            seen[g] = 0
+            unique_names.append(g)
+
+    adata.var_names = pd.Index(unique_names)
+    return adata
+
+
+def convert_10x_to_h5ad(mtx_dir, output_path, species=None, genome=None):
+    """
+    将 10x Genomics 三文件格式转换为 h5ad。
+    自动检测 v2 (genes.tsv) 和 v3 (features.tsv) 格式。
+
+    参数:
+        mtx_dir: 包含 barcodes/genes/features/matrix 文件的目录
+        output_path: h5ad 输出路径
+        species: 可选，物种名（如 "human"、"mouse"）
+        genome: 可选，基因组版本（如 "GRCh38"、"mm10"）
+    返回:
+        anndata.AnnData 对象
+    """
+    if not os.path.isdir(mtx_dir):
+        raise FileNotFoundError(f"10x 矩阵目录不存在: {mtx_dir}")
+    import scanpy as sc
+
+    adata = sc.read_10x_mtx(mtx_dir, var_names='gene_symbols', cache=True)
+    adata.var_names_make_unique()
+
+    # 保留 Ensembl ID（read_10x_mtx 在 var_names='gene_symbols' 时
+    # 将原始 ID 存为 adata.var 的 gene_ids 列）
+    if 'gene_ids' not in adata.var.columns:
+        import warnings
+        warnings.warn("未能从 10x 数据中提取 Ensembl gene IDs，使用当前 var_names 作为 gene_ids")
+        adata.var['gene_ids'] = adata.var.index.tolist()
+
+    # 可选元数据
+    if species:
+        adata.uns['species'] = species
+    if genome:
+        adata.uns['genome'] = genome
+
+    # 保存原始计数
+    adata.layers['counts'] = adata.X.copy()
+
+    adata.write_h5ad(output_path)
+    print(f"[io_utils] 10x 数据转换完成: {mtx_dir} -> {output_path} ({adata.n_obs} cells, {adata.n_vars} genes)")
     return adata

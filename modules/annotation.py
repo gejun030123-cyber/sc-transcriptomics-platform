@@ -55,6 +55,8 @@ class AnnotationAnalysis(BaseAnalysis):
 
         self.progress(5, "Loading data...")
         adata = sc.read_h5ad(input_path)
+        from modules.io_utils import remap_var_names
+        adata = remap_var_names(adata)
         cluster_key = self.params.get('cluster_key', 'leiden')
         resolution = self.params.get('resolution', '0.8')
         leiden_key = f'leiden_{resolution}' if f'leiden_{resolution}' in adata.obs.columns else cluster_key

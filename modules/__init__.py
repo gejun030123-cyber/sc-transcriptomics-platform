@@ -15,6 +15,7 @@ from .bulk_pca import BulkPCAAnalysis
 from .bulk_heatmap import BulkHeatmapAnalysis
 from .bulk_enrichment import BulkEnrichmentAnalysis
 from .bulk_timecourse import BulkTimecourseAnalysis
+from .convert_10x import Convert10x
 
 MODULE_REGISTRY = {
     # 单细胞分析模块
@@ -36,6 +37,8 @@ MODULE_REGISTRY = {
     'bulk_heatmap': BulkHeatmapAnalysis,
     'bulk_enrichment': BulkEnrichmentAnalysis,
     'bulk_timecourse': BulkTimecourseAnalysis,
+    # 数据导入模块
+    'convert_10x': Convert10x,
 }
 
 PIPELINE_ORDER = [

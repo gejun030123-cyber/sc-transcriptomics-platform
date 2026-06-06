@@ -19,6 +19,8 @@ class DEGAnalysis(BaseAnalysis):
 
         self.progress(5, "Loading data...")
         adata = sc.read_h5ad(input_path)
+        from modules.io_utils import remap_var_names
+        adata = remap_var_names(adata)
         groupby = self.params.get('groupby', 'celltype')
         method = self.params.get('method', 'wilcoxon')
         n_genes = int(self.params.get('n_genes', 20))

@@ -18,13 +18,15 @@ class DimredAnalysis(BaseAnalysis):
 
         self.progress(5, "Loading data...")
         adata = sc.read_h5ad(input_path)
+        from modules.io_utils import remap_var_names
+        adata = remap_var_names(adata)
         n_comps = int(self.params.get('n_comps', 50))
 
         self.progress(20, "Scaling data...")
         ov.pp.scale(adata, max_value=10)
 
         self.progress(35, f"Running PCA ({n_comps} components)...")
-        ov.pp.pca(adata, n_comps=n_comps)
+        sc.pp.pca(adata, n_comps=n_comps, layer='scaled')
 
         self.progress(55, "Computing neighbors...")
         sc.pp.neighbors(adata, n_pcs=n_comps)

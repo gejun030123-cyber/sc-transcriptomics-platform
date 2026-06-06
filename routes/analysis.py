@@ -7,7 +7,7 @@ from config import Config
 analysis_bp = Blueprint('analysis', __name__)
 
 SC_MODULE_LIST = [
-    {'name': 'qc', 'display': '质控', 'desc': '过滤细胞，去除双细胞'},
+    {'name': 'qc', 'display': '质控', 'desc': 'MT/ribo/hb 过滤 + 双细胞检测 + 细胞周期评分 + 复杂度过滤'},
     {'name': 'preprocess', 'display': '预处理', 'desc': '标准化，选择高变异基因'},
     {'name': 'dimred', 'display': '降维分析', 'desc': 'PCA, UMAP'},
     {'name': 'batch_correct', 'display': '批次校正', 'desc': 'Harmony, ComBat, SysVI'},
@@ -49,6 +49,8 @@ PARAM_SCHEMAS = {
         {'key': 'mito_perc', 'label': '最大线粒体比例', 'type': 'number', 'default': 0.2, 'step': 0.01, 'help': '过滤线粒体基因比例高于此阈值的细胞。人类样本建议 0.1-0.2，小鼠可放宽至 0.25。过高保留低质量细胞，过低丢失应激细胞。'},
         {'key': 'nUMIs', 'label': '最小 UMI 数', 'type': 'number', 'default': 500, 'help': '每个细胞的最小 UMI 总数。低于此值的细胞被视为碎片或死细胞。常用范围 500-1000。'},
         {'key': 'detected_genes', 'label': '最小检测基因数', 'type': 'number', 'default': 250, 'help': '每个细胞检测到的最小基因数。低于此值的细胞可能为低质量或空液滴。常用范围 200-500。'},
+        {'key': 'max_detected_genes', 'label': '最大检测基因数（0 = 不限制）', 'type': 'number', 'default': 0, 'help': '每个细胞检测到的最大基因数。高于此值的细胞可能是双细胞或聚合物。设为 0 表示不限制。建议范围 5000-8000，根据数据分布调整。'},
+        {'key': 'ribo_perc', 'label': '最大核糖体比例 %（0 = 不过滤）', 'type': 'number', 'default': 0, 'step': 1.0, 'help': '过滤核糖体蛋白基因比例高于此值的细胞。核糖体比例过高可能反映细胞应激或人为扩增。设为 0 表示不过滤。建议范围 30-50%。'},
         {'key': 'batch_key', 'label': '批次列名', 'type': 'text', 'default': 'batch', 'help': 'adata.obs 中标识实验批次的列名。用于分批次运行 Scrublet 双细胞检测。'},
     ],
     'preprocess': [
@@ -122,7 +124,7 @@ PARAM_SCHEMAS = {
         {'key': 'pval_threshold', 'label': 'padj 显著性阈值', 'type': 'number', 'default': 0.05, 'step': 0.01, 'help': '调整后 p-value 显著性阈值。0.05 为标准，0.01 为严格，0.1 为宽松探索性分析。'},
         {'key': 'top_n', 'label': 'Top N 差异基因数', 'type': 'number', 'default': 20, 'help': '结果中展示的 Top N 差异基因数。用于火山图标注和 Top 基因 CSV 导出。'},
         {'key': 'base_mean_filter', 'label': '最低平均表达量', 'type': 'number', 'default': 1, 'step': 0.5, 'help': '过滤低表达基因。BaseMean 低于此值的基因不参与分析和绘图。建议 1-10。'},
-        {'key': 'plot_genes', 'label': '展示基因（逗号分隔，可选）', 'type': 'text', 'default': '', 'help': '指定要绘制箱线图的基因名，多个用逗号分隔。留空则不生成箱线图。'},
+        {'key': 'plot_genes', 'label': '额外展示基因（逗号分隔，可选）', 'type': 'text', 'default': '', 'help': '指定要额外绘制箱线图的基因名，多个用逗号分隔。Top 差异基因会自动生成箱线图，此字段用于补充其他感兴趣的基因。'},
     ],
     'bulk_pca': [
         {'key': 'n_comps', 'label': 'PCA 主成分数量', 'type': 'number', 'default': 10, 'help': 'PCA 主成分数量。通常 5-10 即可。样本数少时自动降至 n_samples-1。'},
@@ -255,4 +257,5 @@ def analyze(pid, module_name):
     sidebar_modules = BULK_MODULE_LIST if is_bulk else SC_MODULE_LIST
     return render_template('analysis_select.html', project=p, module=mod_info,
                           schema=schema, completed_tasks=completed_tasks,
-                          uploaded_h5ad=uploaded_files, all_modules=sidebar_modules)
+                          uploaded_h5ad=uploaded_files, all_modules=sidebar_modules,
+                          module_display_map=MODULE_DISPLAY_MAP)
