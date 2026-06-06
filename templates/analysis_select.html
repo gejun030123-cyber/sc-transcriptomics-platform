@@ -51,15 +51,24 @@
 
                 <!-- 数据信息面板 -->
                 <div id="data-info-panel" class="card p-3 mb-3" style="background:#f8f9ff; display:none;">
-                    <h6 class="mb-2"><i class="bi bi-info-circle"></i> 数据信息</h6>
-                    <div class="row small">
-                        <div class="col-md-3"><strong>样本数：</strong><span id="info-n-obs">-</span></div>
-                        <div class="col-md-3"><strong>基因数：</strong><span id="info-n-vars">-</span></div>
-                        <div class="col-md-6"><strong>注释列：</strong><span id="info-obs-cols">-</span></div>
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <h6 class="mb-0"><i class="bi bi-info-circle"></i> 数据结构</h6>
+                        <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse"
+                                data-bs-target="#adata-detail" id="btn-toggle-detail">
+                            展开详情
+                        </button>
                     </div>
-                    <div class="mt-2 small">
-                        <strong>样本名：</strong>
-                        <div id="info-samples" class="text-muted" style="max-height:80px; overflow:auto; word-break:break-all;"></div>
+                    <div class="row small mb-2">
+                        <div class="col-md-3"><strong>样本数 (obs)：</strong><span id="info-n-obs">-</span></div>
+                        <div class="col-md-3"><strong>基因数 (var)：</strong><span id="info-n-vars">-</span></div>
+                        <div class="col-md-6"><strong>obs 注释列：</strong><span id="info-obs-cols">-</span></div>
+                    </div>
+                    <div class="small mb-2">
+                        <strong>obs_names 样本：</strong>
+                        <div id="info-samples" class="text-muted" style="max-height:60px; overflow:auto; word-break:break-all;"></div>
+                    </div>
+                    <div class="collapse" id="adata-detail">
+                        <div id="adata-detail-content"></div>
                     </div>
                 </div>
 
@@ -190,11 +199,122 @@ async function loadFileInfo(filePath) {
         const d = await r.json();
         if (d.error) { panel.style.display = 'none'; return; }
         panel.style.display = 'block';
-        document.getElementById('info-n-obs').textContent = d.n_obs;
-        document.getElementById('info-n-vars').textContent = d.n_vars;
+        document.getElementById('info-n-obs').textContent = d.n_obs.toLocaleString();
+        document.getElementById('info-n-vars').textContent = d.n_vars.toLocaleString();
         document.getElementById('info-obs-cols').textContent = d.obs_columns.length > 0 ? d.obs_columns.join(', ') : '无（将从样本名自动检测分组）';
         document.getElementById('info-samples').textContent = d.sample_names.join(', ');
+
+        // 如果是 h5ad 文件，加载完整结构
+        if (filePath.endsWith('.h5ad')) {
+            loadFullAdataInfo(filePath);
+        } else {
+            document.getElementById('adata-detail-content').innerHTML = '';
+        }
     } catch(e) { panel.style.display = 'none'; }
+}
+
+function renderAdataSection(title, badge, rows) {
+    if (!rows || rows.length === 0) return '';
+    let h = `<div class="mb-3">`;
+    h += `<div class="fw-bold text-primary mb-1" style="font-size:0.88rem;">${title} <span class="badge bg-secondary">${badge}</span></div>`;
+    h += `<div class="table-responsive"><table class="table table-sm table-striped mb-0" style="font-size:0.78rem;">`;
+    h += rows;
+    h += `</table></div></div>`;
+    return h;
+}
+
+async function loadFullAdataInfo(filePath) {
+    const container = document.getElementById('adata-detail-content');
+    container.innerHTML = '<div class="text-center py-2"><div class="spinner-border spinner-border-sm text-primary"></div> 加载完整结构...</div>';
+    try {
+        const r = await fetch(`/api/data-info-full?file_path=${encodeURIComponent(filePath)}`);
+        const d = await r.json();
+        if (d.error) { container.innerHTML = '<div class="text-danger small">' + d.error + '</div>'; return; }
+        let html = '';
+
+        // obs 注释详情
+        if (d.obs_columns && d.obs_columns.length) {
+            let rows = '<thead><tr><th>列名</th><th>类型</th><th>唯一值数</th><th>示例值</th></tr></thead><tbody>';
+            for (const col of d.obs_columns) {
+                const vals = col.values ? col.values.slice(0, 5).join(', ') + (col.values.length > 5 ? '...' : '') : '-';
+                const nun = col.n_unique != null ? col.n_unique : '-';
+                rows += `<tr><td><code>${col.name}</code></td><td>${col.dtype}</td><td>${nun}</td><td class="text-muted">${vals}</td></tr>`;
+            }
+            rows += '</tbody>';
+            html += renderAdataSection('obs 注释列', d.obs_columns.length, rows);
+        }
+
+        // var 注释详情
+        if (d.var_columns && d.var_columns.length) {
+            let rows = '<thead><tr><th>列名</th><th>类型</th><th>唯一值数</th><th>示例值</th></tr></thead><tbody>';
+            for (const col of d.var_columns) {
+                const vals = col.values ? col.values.slice(0, 5).join(', ') + (col.values.length > 5 ? '...' : '') : '-';
+                const nun = col.n_unique != null ? col.n_unique : '-';
+                rows += `<tr><td><code>${col.name}</code></td><td>${col.dtype}</td><td>${nun}</td><td class="text-muted">${vals}</td></tr>`;
+            }
+            rows += '</tbody>';
+            html += renderAdataSection('var 注释列', d.var_columns.length, rows);
+        }
+
+        // var_names 样本
+        if (d.var_names_sample && d.var_names_sample.length) {
+            html += '<div class="mb-3">';
+            html += '<div class="fw-bold text-primary mb-1" style="font-size:0.88rem;">var_names（前 20 个基因）</div>';
+            html += '<div class="small text-muted" style="word-break:break-all;">' + d.var_names_sample.join(', ') + '</div></div>';
+        }
+
+        // layers
+        if (d.layers && d.layers.length) {
+            html += '<div class="mb-3">';
+            html += `<div class="fw-bold text-primary mb-1" style="font-size:0.88rem;">layers <span class="badge bg-secondary">${d.layers.length}</span></div>`;
+            html += '<div class="small">' + d.layers.map(k => '<code class="me-2">' + k + '</code>').join('') + '</div></div>';
+        }
+
+        // obsm
+        if (d.obsm && d.obsm.length) {
+            let rows = '<thead><tr><th>Key</th><th>Shape</th><th>Dtype</th></tr></thead><tbody>';
+            for (const m of d.obsm) {
+                rows += `<tr><td><code>${m.key}</code></td><td>${m.shape.join(' × ')}</td><td>${m.dtype}</td></tr>`;
+            }
+            rows += '</tbody>';
+            html += renderAdataSection('obsm（降维坐标）', d.obsm.length, rows);
+        }
+
+        // varm
+        if (d.varm && d.varm.length) {
+            let rows = '<thead><tr><th>Key</th><th>Shape</th><th>Dtype</th></tr></thead><tbody>';
+            for (const m of d.varm) {
+                rows += `<tr><td><code>${m.key}</code></td><td>${m.shape.join(' × ')}</td><td>${m.dtype}</td></tr>`;
+            }
+            rows += '</tbody>';
+            html += renderAdataSection('varm', d.varm.length, rows);
+        }
+
+        // obsp
+        if (d.obsp && d.obsp.length) {
+            html += '<div class="mb-3">';
+            html += `<div class="fw-bold text-primary mb-1" style="font-size:0.88rem;">obsp（邻接矩阵） <span class="badge bg-secondary">${d.obsp.length}</span></div>`;
+            html += '<div class="small">' + d.obsp.map(k => '<code class="me-2">' + k + '</code>').join('') + '</div></div>';
+        }
+
+        // uns
+        if (d.uns && d.uns.length) {
+            let rows = '<thead><tr><th>Key</th><th>类型</th><th>内容预览</th></tr></thead><tbody>';
+            for (const u of d.uns) {
+                let preview = '';
+                if (u.type === 'ndarray') preview = `shape: ${u.shape.join(' × ')}, dtype: ${u.dtype}`;
+                else if (u.type === 'dict') preview = `子键: ${u.keys.join(', ')}`;
+                else preview = u.preview || '';
+                rows += `<tr><td><code>${u.key}</code></td><td>${u.type}</td><td class="text-muted">${preview}</td></tr>`;
+            }
+            rows += '</tbody>';
+            html += renderAdataSection('uns（全局注释）', d.uns.length, rows);
+        }
+
+        container.innerHTML = html || '<div class="text-muted small">无额外结构信息</div>';
+    } catch(e) {
+        container.innerHTML = '<div class="text-danger small">加载失败: ' + e.message + '</div>';
+    }
 }
 
 async function suggestGroupbyColumns() {

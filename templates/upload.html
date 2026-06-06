@@ -13,8 +13,8 @@
                     </svg>
                 </div>
                 <h5>拖拽文件到此处</h5>
-                <p class="text-muted">支持格式：.h5ad, .h5 (10x), .mtx.gz, .csv, .txt, .xlsx, .xls</p>
-                <input type="file" id="file-input" class="d-none" accept=".h5ad,.h5,.csv,.txt,.gz,.xlsx,.xls" multiple>
+                <p class="text-muted">支持格式：.h5ad, .h5, .mtx/.tsv (10x Genomics), .csv, .txt, .xlsx, .xls</p>
+                <input type="file" id="file-input" class="d-none" accept=".h5ad,.h5,.csv,.txt,.gz,.xlsx,.xls,.mtx,.tsv" multiple>
                 <button class="btn btn-primary btn-sm" onclick="document.getElementById('file-input').click()">
                     选择文件
                 </button>
@@ -30,6 +30,47 @@
             </div>
             <div id="upload-result" class="mt-3 d-none">
                 <div class="alert alert-success" id="upload-msg"></div>
+            </div>
+            <div id="tenx-status" class="mt-3 d-none">
+                <div class="alert alert-info">
+                    <strong>10x Genomics 数据检测</strong>
+                    <div id="tenx-files" class="mt-2 small"></div>
+                    <div id="tenx-version" class="mt-1 small text-muted"></div>
+                </div>
+                <div class="card p-3 mt-2">
+                    <div class="row mb-2">
+                        <div class="col-md-6">
+                            <label class="form-label small">物种（可选）</label>
+                            <select class="form-select form-select-sm" id="tenx-species">
+                                <option value="">不指定</option>
+                                <option value="human">人类 (Human)</option>
+                                <option value="mouse">小鼠 (Mouse)</option>
+                                <option value="rat">大鼠 (Rat)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small">基因组版本（可选）</label>
+                            <input type="text" class="form-control form-control-sm" id="tenx-genome" placeholder="如 GRCh38、mm10">
+                        </div>
+                    </div>
+                    <button class="btn btn-primary btn-sm w-100" id="btn-convert-10x" onclick="startConvert10x()">
+                        转换为 h5ad
+                    </button>
+                </div>
+            </div>
+            <div id="tenx-convert-progress" class="mt-3 d-none">
+                <div class="d-flex justify-content-between mb-1">
+                    <span>10x 数据转换</span>
+                    <span id="tenx-convert-pct">0%</span>
+                </div>
+                <div class="progress-container">
+                    <div class="progress-bar-inner" id="tenx-convert-bar" style="width:0%"></div>
+                </div>
+                <div class="small text-muted mt-1" id="tenx-convert-msg"></div>
+            </div>
+            <div id="tenx-convert-result" class="mt-3 d-none">
+                <div class="alert alert-success" id="tenx-result-msg"></div>
+                <a href="/projects/{{ project.id }}" class="btn btn-outline-primary btn-sm">返回项目</a>
             </div>
         </div>
 
@@ -56,17 +97,43 @@ zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
 zone.addEventListener('drop', e => {
     e.preventDefault();
     zone.classList.remove('dragover');
-    if (e.dataTransfer.files.length) uploadFile(e.dataTransfer.files[0]);
+    const files = e.dataTransfer.files;
+    if (files.length) uploadFiles(Array.from(files));
 });
 fileInput.addEventListener('change', () => {
-    if (fileInput.files.length) uploadFile(fileInput.files[0]);
+    if (fileInput.files.length) uploadFiles(Array.from(fileInput.files));
 });
 
-function uploadFile(file) {
+let uploadQueue = [];
+let uploadIndex = 0;
+
+function uploadFiles(files) {
+    uploadQueue = files;
+    uploadIndex = 0;
+    uploadNext();
+}
+
+function uploadNext() {
+    if (uploadIndex >= uploadQueue.length) {
+        progressDiv.classList.add('d-none');
+        resultDiv.classList.remove('d-none');
+        document.getElementById('upload-msg').textContent = '所有文件上传完成！';
+        check10x();
+        return;
+    }
+    const file = uploadQueue[uploadIndex];
+    uploadFile(file, () => {
+        uploadIndex++;
+        uploadNext();
+    });
+}
+
+function uploadFile(file, onDone) {
     const formData = new FormData();
     formData.append('file', file);
     progressDiv.classList.remove('d-none');
-    document.getElementById('upload-filename').textContent = file.name;
+    document.getElementById('upload-filename').textContent =
+        `(${uploadIndex + 1}/${uploadQueue.length}) ${file.name}`;
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/projects/{{ project.id }}/upload');
@@ -78,17 +145,115 @@ function uploadFile(file) {
         }
     };
     xhr.onload = () => {
-        progressDiv.classList.add('d-none');
-        resultDiv.classList.remove('d-none');
         if (xhr.status === 200 || xhr.status === 302) {
-            document.getElementById('upload-msg').textContent = '上传成功！正在跳转...';
-            setTimeout(() => window.location.href = '/projects/{{ project.id }}', 1000);
+            onDone();
         } else {
+            progressDiv.classList.add('d-none');
+            resultDiv.classList.remove('d-none');
             document.getElementById('upload-msg').className = 'alert alert-danger';
-            document.getElementById('upload-msg').textContent = '上传失败：' + xhr.statusText;
+            document.getElementById('upload-msg').textContent = '上传失败：' + file.name;
         }
     };
+    xhr.onerror = () => {
+        progressDiv.classList.add('d-none');
+        resultDiv.classList.remove('d-none');
+        document.getElementById('upload-msg').className = 'alert alert-danger';
+        document.getElementById('upload-msg').textContent = '网络错误：' + file.name;
+    };
     xhr.send(formData);
+}
+
+function check10x() {
+    fetch('/projects/{{ project.id }}/upload/check-10x')
+        .then(r => r.json())
+        .then(data => {
+            const statusDiv = document.getElementById('tenx-status');
+            if (!data.has_10x) {
+                statusDiv.classList.add('d-none');
+                return;
+            }
+            statusDiv.classList.remove('d-none');
+            const filesDiv = document.getElementById('tenx-files');
+            const f = data.files;
+            filesDiv.innerHTML =
+                `<div>${f.barcodes} ✓</div>` +
+                `<div>${f.genes} ✓</div>` +
+                `<div>${f.matrix} ✓</div>`;
+            document.getElementById('tenx-version').textContent =
+                `版本: ${data.version === 'v3' ? 'v3 (features.tsv)' : 'v2 (genes.tsv)'}`;
+        });
+}
+
+// 页面加载时也检测一次（处理已上传部分文件后刷新页面的情况）
+check10x();
+
+function startConvert10x() {
+    const btn = document.getElementById('btn-convert-10x');
+    btn.disabled = true;
+    btn.textContent = '转换中...';
+
+    const species = document.getElementById('tenx-species').value;
+    const genome = document.getElementById('tenx-genome').value;
+
+    const formData = new FormData();
+    if (species) formData.append('species', species);
+    if (genome) formData.append('genome', genome);
+
+    fetch('/projects/{{ project.id }}/upload/convert-10x', {
+        method: 'POST',
+        body: formData,
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) {
+            btn.disabled = false;
+            btn.textContent = '转换为 h5ad';
+            alert('转换失败：' + data.error);
+            return;
+        }
+        document.getElementById('tenx-convert-progress').classList.remove('d-none');
+        pollConvertTask(data.task_id);
+    })
+    .catch(() => {
+        btn.disabled = false;
+        btn.textContent = '转换为 h5ad';
+        alert('请求失败，请重试');
+    });
+}
+
+function pollConvertTask(taskId) {
+    const interval = setInterval(() => {
+        fetch(`/api/tasks/${taskId}/status`)
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('tenx-convert-bar').style.width = data.progress + '%';
+                document.getElementById('tenx-convert-pct').textContent = data.progress + '%';
+                document.getElementById('tenx-convert-msg').textContent = data.progress_message || '';
+
+                if (data.status === 'completed') {
+                    clearInterval(interval);
+                    document.getElementById('tenx-convert-progress').classList.add('d-none');
+                    document.getElementById('tenx-convert-result').classList.remove('d-none');
+                    const summary = data.result || {};
+                    document.getElementById('tenx-result-msg').innerHTML =
+                        (() => {
+                            let msg = `转换完成！${summary.n_cells || '?'} 个细胞，${summary.n_genes || '?'} 个基因`;
+                            const details = [];
+                            if (summary.sparsity !== undefined) details.push(`稀疏度：${summary.sparsity}%`);
+                            if (summary.file_size_mb !== undefined) details.push(`文件大小：${summary.file_size_mb} MB`);
+                            if (details.length) msg += '<br>' + details.join(' | ');
+                            return msg;
+                        })();
+                } else if (data.status === 'failed') {
+                    clearInterval(interval);
+                    document.getElementById('tenx-convert-progress').classList.add('d-none');
+                    document.getElementById('tenx-convert-result').classList.remove('d-none');
+                    document.getElementById('tenx-result-msg').className = 'alert alert-danger';
+                    document.getElementById('tenx-result-msg').textContent =
+                        '转换失败：' + (data.error_traceback || data.progress_message || '未知错误');
+                }
+            });
+    }, 2000);
 }
 </script>
 {% endblock %}

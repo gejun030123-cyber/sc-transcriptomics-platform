@@ -34,17 +34,35 @@
 <div class="row">
     <div class="col-md-4">
         <div class="card p-3 mb-3">
-            <h6 class="mb-2">已上传文件</h6>
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h6 class="mb-0">已上传文件</h6>
+                <button class="btn btn-sm btn-outline-secondary" onclick="loadAdataInfo()" id="btn-adata-info"
+                        style="display:none;">查看数据结构</button>
+            </div>
             {% if uploaded %}
                 {% for f in uploaded %}
                 <div class="d-flex justify-content-between small py-1 border-bottom">
                     <span>{{ f.name }}</span>
                     <span class="text-muted">{{ f.size_mb }} MB</span>
                 </div>
+                {% if f.name.endswith('.h5ad') %}
+                <script>document.getElementById('btn-adata-info').style.display = '';</script>
+                {% endif %}
                 {% endfor %}
             {% else %}
                 <p class="text-muted small mb-0">暂无上传文件</p>
             {% endif %}
+        </div>
+
+        <!-- H5ad 数据结构面板 -->
+        <div class="card p-3 mb-3" id="adata-info-panel" style="display:none;">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h6 class="mb-0">H5ad 数据结构</h6>
+                <button class="btn-close btn-sm" onclick="document.getElementById('adata-info-panel').style.display='none';"></button>
+            </div>
+            <div id="adata-info-content">
+                <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div> 加载中...</div>
+            </div>
         </div>
     </div>
 
@@ -74,4 +92,137 @@
         </div>
     </div>
 </div>
+
+<script>
+function loadAdataInfo() {
+    const panel = document.getElementById('adata-info-panel');
+    const content = document.getElementById('adata-info-content');
+    panel.style.display = '';
+    content.innerHTML = '<div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div> 加载中...</div>';
+
+    fetch('/api/projects/{{ project.id }}/adata-info')
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) {
+                content.innerHTML = '<div class="text-danger small">' + data.error + '</div>';
+                return;
+            }
+            let html = '';
+
+            // 基本信息
+            html += '<div class="mb-3">';
+            html += '<div class="fw-bold text-primary mb-1">基本信息</div>';
+            html += '<table class="table table-sm table-borderless mb-0" style="font-size:0.85rem;">';
+            html += `<tr><td class="text-muted" style="width:120px;">文件名</td><td>${data.file}</td></tr>`;
+            html += `<tr><td class="text-muted">细胞数 (obs)</td><td><strong>${data.n_obs.toLocaleString()}</strong></td></tr>`;
+            html += `<tr><td class="text-muted">基因数 (var)</td><td><strong>${data.n_vars.toLocaleString()}</strong></td></tr>`;
+            html += '</table></div>';
+
+            // obs 列
+            if (data.obs_columns && data.obs_columns.length) {
+                html += '<div class="mb-3">';
+                html += `<div class="fw-bold text-primary mb-1">obs 注释列 <span class="badge bg-secondary">${data.obs_columns.length}</span></div>`;
+                html += '<div class="table-responsive"><table class="table table-sm table-striped mb-0" style="font-size:0.8rem;">';
+                html += '<thead><tr><th>列名</th><th>类型</th><th>唯一值数</th><th>示例值</th></tr></thead><tbody>';
+                for (const col of data.obs_columns) {
+                    const vals = col.values ? col.values.slice(0, 5).join(', ') + (col.values.length > 5 ? '...' : '') : '-';
+                    const nun = col.n_unique != null ? col.n_unique : '-';
+                    html += `<tr><td><code>${col.name}</code></td><td>${col.dtype}</td><td>${nun}</td><td class="text-muted">${vals}</td></tr>`;
+                }
+                html += '</tbody></table></div></div>';
+            }
+
+            // var 列
+            if (data.var_columns && data.var_columns.length) {
+                html += '<div class="mb-3">';
+                html += `<div class="fw-bold text-primary mb-1">var 注释列 <span class="badge bg-secondary">${data.var_columns.length}</span></div>`;
+                html += '<div class="table-responsive"><table class="table table-sm table-striped mb-0" style="font-size:0.8rem;">';
+                html += '<thead><tr><th>列名</th><th>类型</th><th>唯一值数</th><th>示例值</th></tr></thead><tbody>';
+                for (const col of data.var_columns) {
+                    const vals = col.values ? col.values.slice(0, 5).join(', ') + (col.values.length > 5 ? '...' : '') : '-';
+                    const nun = col.n_unique != null ? col.n_unique : '-';
+                    html += `<tr><td><code>${col.name}</code></td><td>${col.dtype}</td><td>${nun}</td><td class="text-muted">${vals}</td></tr>`;
+                }
+                html += '</tbody></table></div></div>';
+            }
+
+            // var_names 样本
+            if (data.var_names_sample && data.var_names_sample.length) {
+                html += '<div class="mb-3">';
+                html += '<div class="fw-bold text-primary mb-1">var_names（前 20 个基因）</div>';
+                html += '<div class="small text-muted" style="word-break:break-all;">' + data.var_names_sample.join(', ') + '</div>';
+                html += '</div>';
+            }
+
+            // obs_names 样本
+            if (data.obs_names_sample && data.obs_names_sample.length) {
+                html += '<div class="mb-3">';
+                html += '<div class="fw-bold text-primary mb-1">obs_names（前 10 个细胞）</div>';
+                html += '<div class="small text-muted" style="word-break:break-all;">' + data.obs_names_sample.join(', ') + '</div>';
+                html += '</div>';
+            }
+
+            // layers
+            if (data.layers && data.layers.length) {
+                html += '<div class="mb-3">';
+                html += `<div class="fw-bold text-primary mb-1">layers <span class="badge bg-secondary">${data.layers.length}</span></div>`;
+                html += '<div class="small">' + data.layers.map(k => '<code class="me-2">' + k + '</code>').join('') + '</div>';
+                html += '</div>';
+            }
+
+            // obsm
+            if (data.obsm && data.obsm.length) {
+                html += '<div class="mb-3">';
+                html += `<div class="fw-bold text-primary mb-1">obsm（降维坐标） <span class="badge bg-secondary">${data.obsm.length}</span></div>`;
+                html += '<table class="table table-sm table-striped mb-0" style="font-size:0.8rem;">';
+                html += '<thead><tr><th>Key</th><th>Shape</th><th>Dtype</th></tr></thead><tbody>';
+                for (const m of data.obsm) {
+                    html += `<tr><td><code>${m.key}</code></td><td>${m.shape.join(' × ')}</td><td>${m.dtype}</td></tr>`;
+                }
+                html += '</tbody></table></div>';
+            }
+
+            // varm
+            if (data.varm && data.varm.length) {
+                html += '<div class="mb-3">';
+                html += `<div class="fw-bold text-primary mb-1">varm <span class="badge bg-secondary">${data.varm.length}</span></div>`;
+                html += '<table class="table table-sm table-striped mb-0" style="font-size:0.8rem;">';
+                html += '<thead><tr><th>Key</th><th>Shape</th><th>Dtype</th></tr></thead><tbody>';
+                for (const m of data.varm) {
+                    html += `<tr><td><code>${m.key}</code></td><td>${m.shape.join(' × ')}</td><td>${m.dtype}</td></tr>`;
+                }
+                html += '</tbody></table></div>';
+            }
+
+            // obsp
+            if (data.obsp && data.obsp.length) {
+                html += '<div class="mb-3">';
+                html += `<div class="fw-bold text-primary mb-1">obsp（邻接矩阵） <span class="badge bg-secondary">${data.obsp.length}</span></div>`;
+                html += '<div class="small">' + data.obsp.map(k => '<code class="me-2">' + k + '</code>').join('') + '</div>';
+                html += '</div>';
+            }
+
+            // uns
+            if (data.uns && data.uns.length) {
+                html += '<div class="mb-2">';
+                html += `<div class="fw-bold text-primary mb-1">uns（全局注释） <span class="badge bg-secondary">${data.uns.length}</span></div>`;
+                html += '<table class="table table-sm table-striped mb-0" style="font-size:0.8rem;">';
+                html += '<thead><tr><th>Key</th><th>类型</th><th>内容预览</th></tr></thead><tbody>';
+                for (const u of data.uns) {
+                    let preview = '';
+                    if (u.type === 'ndarray') preview = `shape: ${u.shape.join(' × ')}, dtype: ${u.dtype}`;
+                    else if (u.type === 'dict') preview = `子键: ${u.keys.join(', ')}`;
+                    else preview = u.preview || '';
+                    html += `<tr><td><code>${u.key}</code></td><td>${u.type}</td><td class="text-muted">${preview}</td></tr>`;
+                }
+                html += '</tbody></table></div>';
+            }
+
+            content.innerHTML = html;
+        })
+        .catch(err => {
+            content.innerHTML = '<div class="text-danger small">请求失败: ' + err.message + '</div>';
+        });
+}
+</script>
 {% endblock %}

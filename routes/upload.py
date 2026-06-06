@@ -6,7 +6,64 @@ from config import Config
 
 upload_bp = Blueprint('upload', __name__)
 
-ALLOWED_EXT = {'.h5ad', '.h5', '.csv', '.txt', '.mtx', '.gz', '.xlsx', '.xls'}
+ALLOWED_EXT = {'.h5ad', '.h5', '.csv', '.txt', '.mtx', '.gz', '.xlsx', '.xls', '.tsv'}
+
+# 10x 文件名匹配模式
+_10X_FILE_PATTERNS = {
+    'barcodes': ['barcodes.tsv', 'barcodes.tsv.gz'],
+    'genes_v2': ['genes.tsv', 'genes.tsv.gz'],
+    'genes_v3': ['features.tsv', 'features.tsv.gz'],
+    'matrix': ['matrix.mtx', 'matrix.mtx.gz'],
+}
+
+def check_10x_files(uploads_dir):
+    """检测 uploads 目录中是否包含完整的 10x 三文件组合。"""
+    if not os.path.isdir(uploads_dir):
+        return {'has_10x': False}
+
+    existing = set(os.listdir(uploads_dir))
+    result = {'has_10x': False, 'files': {}, 'version': None}
+
+    # 检测 barcodes
+    barcodes = None
+    for name in _10X_FILE_PATTERNS['barcodes']:
+        if name in existing:
+            barcodes = name
+            break
+    if not barcodes:
+        return result
+
+    # 检测 matrix
+    matrix = None
+    for name in _10X_FILE_PATTERNS['matrix']:
+        if name in existing:
+            matrix = name
+            break
+    if not matrix:
+        return result
+
+    # 检测 genes（优先 v3）
+    genes = None
+    version = None
+    for name in _10X_FILE_PATTERNS['genes_v3']:
+        if name in existing:
+            genes = name
+            version = 'v3'
+            break
+    if not genes:
+        for name in _10X_FILE_PATTERNS['genes_v2']:
+            if name in existing:
+                genes = name
+                version = 'v2'
+                break
+    if not genes:
+        return result
+
+    return {
+        'has_10x': True,
+        'files': {'barcodes': barcodes, 'genes': genes, 'matrix': matrix},
+        'version': version,
+    }
 
 @upload_bp.route('/<pid>/upload', methods=['GET', 'POST'])
 def upload(pid):
@@ -36,3 +93,50 @@ def upload(pid):
         flash(f'文件 "{fname}" 上传成功', 'success')
         return redirect(url_for('projects.detail', pid=pid))
     return render_template('upload.html', project=p)
+
+
+@upload_bp.route('/<pid>/upload/check-10x')
+def check_10x(pid):
+    p = Project.get_by_id(pid)
+    if not p:
+        return jsonify({'has_10x': False, 'error': '项目未找到'}), 404
+    uploads_dir = os.path.join(Config.DATA_DIR, 'projects', pid, 'uploads')
+    return jsonify(check_10x_files(uploads_dir))
+
+
+@upload_bp.route('/<pid>/upload/convert-10x', methods=['POST'])
+def convert_10x(pid):
+    import json as _json
+    from models import AnalysisTask
+    from worker import submit_task
+
+    p = Project.get_by_id(pid)
+    if not p:
+        return jsonify({'error': '项目未找到'}), 404
+
+    uploads_dir = os.path.join(Config.DATA_DIR, 'projects', pid, 'uploads')
+    check = check_10x_files(uploads_dir)
+    if not check['has_10x']:
+        return jsonify({'error': '未检测到完整的 10x 数据文件'}), 400
+
+    species = request.form.get('species', '').strip() or None
+    genome = request.form.get('genome', '').strip() or None
+
+    task = AnalysisTask(
+        project_id=pid,
+        module_name='convert_10x',
+        status='pending',
+        params_json=_json.dumps({
+            'mtx_dir': uploads_dir,
+            'species': species,
+            'genome': genome,
+        }, ensure_ascii=False),
+    )
+    task.save()
+
+    proj_dir = os.path.join(Config.DATA_DIR, 'projects', pid)
+    submit_task(task.id, pid, 'convert_10x',
+                {'mtx_dir': uploads_dir, 'species': species, 'genome': genome},
+                proj_dir, uploads_dir)
+
+    return jsonify({'task_id': task.id})

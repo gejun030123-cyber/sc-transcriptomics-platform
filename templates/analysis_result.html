@@ -88,6 +88,25 @@
 {% endif %}
 
 {% if task.status == 'completed' %}
+<div class="card p-4 mb-4" id="output-adata-panel" style="display:none;">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="mb-0">输出数据结构 (adata)</h5>
+        <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse"
+                data-bs-target="#output-adata-detail" id="btn-toggle-output-detail">
+            展开详情
+        </button>
+    </div>
+    <div class="row small mb-2">
+        <div class="col-md-3"><strong>样本数 (obs)：</strong><span id="out-n-obs">-</span></div>
+        <div class="col-md-3"><strong>基因数 (var)：</strong><span id="out-n-vars">-</span></div>
+        <div class="col-md-3"><strong>obs 列数：</strong><span id="out-obs-cols-count">-</span></div>
+        <div class="col-md-3"><strong>layers：</strong><span id="out-layers-count">-</span></div>
+    </div>
+    <div class="collapse" id="output-adata-detail">
+        <div id="output-adata-content"></div>
+    </div>
+</div>
+
 <div class="mt-3">
     <a href="/projects/{{ project.id }}/results" class="btn btn-primary btn-sm">查看全部结果</a>
     {% if next_module %}
@@ -96,6 +115,123 @@
     </a>
     {% endif %}
 </div>
+
+<script>
+async function loadOutputAdataInfo() {
+    const adataPath = "{{ task.output_adata_path | default('') }}";
+    if (!adataPath) return;
+    const panel = document.getElementById('output-adata-panel');
+    try {
+        // 先拿基本信息
+        const r = await fetch(`/api/data-info?file_path=${encodeURIComponent(adataPath)}`);
+        const d = await r.json();
+        if (d.error) return;
+        panel.style.display = '';
+        document.getElementById('out-n-obs').textContent = d.n_obs.toLocaleString();
+        document.getElementById('out-n-vars').textContent = d.n_vars.toLocaleString();
+
+        // 拿完整结构
+        const r2 = await fetch(`/api/data-info-full?file_path=${encodeURIComponent(adataPath)}`);
+        const d2 = await r2.json();
+        if (d2.error) return;
+        document.getElementById('out-obs-cols-count').textContent = (d2.obs_columns || []).length;
+        document.getElementById('out-layers-count').textContent = (d2.layers || []).length;
+
+        let html = '';
+
+        function renderSection(title, badge, rows) {
+            if (!rows || rows.length === 0) return '';
+            let h = `<div class="mb-3">`;
+            h += `<div class="fw-bold text-primary mb-1" style="font-size:0.88rem;">${title} <span class="badge bg-secondary">${badge}</span></div>`;
+            h += `<div class="table-responsive"><table class="table table-sm table-striped mb-0" style="font-size:0.78rem;">`;
+            h += rows;
+            h += `</table></div></div>`;
+            return h;
+        }
+
+        // obs
+        if (d2.obs_columns && d2.obs_columns.length) {
+            let rows = '<thead><tr><th>列名</th><th>类型</th><th>唯一值数</th><th>示例值</th></tr></thead><tbody>';
+            for (const col of d2.obs_columns) {
+                const vals = col.values ? col.values.slice(0, 5).join(', ') + (col.values.length > 5 ? '...' : '') : '-';
+                const nun = col.n_unique != null ? col.n_unique : '-';
+                rows += `<tr><td><code>${col.name}</code></td><td>${col.dtype}</td><td>${nun}</td><td class="text-muted">${vals}</td></tr>`;
+            }
+            rows += '</tbody>';
+            html += renderSection('obs 注释列', d2.obs_columns.length, rows);
+        }
+
+        // var
+        if (d2.var_columns && d2.var_columns.length) {
+            let rows = '<thead><tr><th>列名</th><th>类型</th><th>唯一值数</th><th>示例值</th></tr></thead><tbody>';
+            for (const col of d2.var_columns) {
+                const vals = col.values ? col.values.slice(0, 5).join(', ') + (col.values.length > 5 ? '...' : '') : '-';
+                const nun = col.n_unique != null ? col.n_unique : '-';
+                rows += `<tr><td><code>${col.name}</code></td><td>${col.dtype}</td><td>${nun}</td><td class="text-muted">${vals}</td></tr>`;
+            }
+            rows += '</tbody>';
+            html += renderSection('var 注释列', d2.var_columns.length, rows);
+        }
+
+        // var_names
+        if (d2.var_names_sample && d2.var_names_sample.length) {
+            html += '<div class="mb-3"><div class="fw-bold text-primary mb-1" style="font-size:0.88rem;">var_names（前 20 个基因）</div>';
+            html += '<div class="small text-muted" style="word-break:break-all;">' + d2.var_names_sample.join(', ') + '</div></div>';
+        }
+
+        // layers
+        if (d2.layers && d2.layers.length) {
+            html += '<div class="mb-3"><div class="fw-bold text-primary mb-1" style="font-size:0.88rem;">layers <span class="badge bg-secondary">' + d2.layers.length + '</span></div>';
+            html += '<div class="small">' + d2.layers.map(k => '<code class="me-2">' + k + '</code>').join('') + '</div></div>';
+        }
+
+        // obsm
+        if (d2.obsm && d2.obsm.length) {
+            let rows = '<thead><tr><th>Key</th><th>Shape</th><th>Dtype</th></tr></thead><tbody>';
+            for (const m of d2.obsm) {
+                rows += `<tr><td><code>${m.key}</code></td><td>${m.shape.join(' × ')}</td><td>${m.dtype}</td></tr>`;
+            }
+            rows += '</tbody>';
+            html += renderSection('obsm（降维坐标）', d2.obsm.length, rows);
+        }
+
+        // varm
+        if (d2.varm && d2.varm.length) {
+            let rows = '<thead><tr><th>Key</th><th>Shape</th><th>Dtype</th></tr></thead><tbody>';
+            for (const m of d2.varm) {
+                rows += `<tr><td><code>${m.key}</code></td><td>${m.shape.join(' × ')}</td><td>${m.dtype}</td></tr>`;
+            }
+            rows += '</tbody>';
+            html += renderSection('varm', d2.varm.length, rows);
+        }
+
+        // obsp
+        if (d2.obsp && d2.obsp.length) {
+            html += '<div class="mb-3"><div class="fw-bold text-primary mb-1" style="font-size:0.88rem;">obsp（邻接矩阵） <span class="badge bg-secondary">' + d2.obsp.length + '</span></div>';
+            html += '<div class="small">' + d2.obsp.map(k => '<code class="me-2">' + k + '</code>').join('') + '</div></div>';
+        }
+
+        // uns
+        if (d2.uns && d2.uns.length) {
+            let rows = '<thead><tr><th>Key</th><th>类型</th><th>内容预览</th></tr></thead><tbody>';
+            for (const u of d2.uns) {
+                let preview = '';
+                if (u.type === 'ndarray') preview = `shape: ${u.shape.join(' × ')}, dtype: ${u.dtype}`;
+                else if (u.type === 'dict') preview = `子键: ${u.keys.join(', ')}`;
+                else preview = u.preview || '';
+                rows += `<tr><td><code>${u.key}</code></td><td>${u.type}</td><td class="text-muted">${preview}</td></tr>`;
+            }
+            rows += '</tbody>';
+            html += renderSection('uns（全局注释）', d2.uns.length, rows);
+        }
+
+        document.getElementById('output-adata-content').innerHTML = html || '<div class="text-muted small">无额外结构信息</div>';
+    } catch(e) {
+        console.error('Failed to load output adata info:', e);
+    }
+}
+loadOutputAdataInfo();
+</script>
 {% endif %}
 {% endblock %}
 

@@ -209,3 +209,44 @@ def remap_var_names(adata):
 
     adata.var_names = pd.Index(unique_names)
     return adata
+
+
+def convert_10x_to_h5ad(mtx_dir, output_path, species=None, genome=None):
+    """
+    将 10x Genomics 三文件格式转换为 h5ad。
+    自动检测 v2 (genes.tsv) 和 v3 (features.tsv) 格式。
+
+    参数:
+        mtx_dir: 包含 barcodes/genes/features/matrix 文件的目录
+        output_path: h5ad 输出路径
+        species: 可选，物种名（如 "human"、"mouse"）
+        genome: 可选，基因组版本（如 "GRCh38"、"mm10"）
+    返回:
+        anndata.AnnData 对象
+    """
+    if not os.path.isdir(mtx_dir):
+        raise FileNotFoundError(f"10x 矩阵目录不存在: {mtx_dir}")
+    import scanpy as sc
+
+    adata = sc.read_10x_mtx(mtx_dir, var_names='gene_symbols', cache=True)
+    adata.var_names_make_unique()
+
+    # 保留 Ensembl ID（read_10x_mtx 在 var_names='gene_symbols' 时
+    # 将原始 ID 存为 adata.var 的 gene_ids 列）
+    if 'gene_ids' not in adata.var.columns:
+        import warnings
+        warnings.warn("未能从 10x 数据中提取 Ensembl gene IDs，使用当前 var_names 作为 gene_ids")
+        adata.var['gene_ids'] = adata.var.index.tolist()
+
+    # 可选元数据
+    if species:
+        adata.uns['species'] = species
+    if genome:
+        adata.uns['genome'] = genome
+
+    # 保存原始计数
+    adata.layers['counts'] = adata.X.copy()
+
+    adata.write_h5ad(output_path)
+    print(f"[io_utils] 10x 数据转换完成: {mtx_dir} -> {output_path} ({adata.n_obs} cells, {adata.n_vars} genes)")
+    return adata
