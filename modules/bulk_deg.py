@@ -245,6 +245,9 @@ class BulkDEGAnalysis(BaseAnalysis):
         padj_method = self.params.get('padj_method', 'fdr_bh')
         base_mean_filter = float(self.params.get('base_mean_filter', 0))
         regulation_filter = self.params.get('regulation_filter', 'both')
+        auto_comparisons = self.params.get('auto_comparisons', 'manual')
+        reference_group = self.params.get('reference_group', '').strip()
+        test_type = self.params.get('test_type', 'pairwise')
 
         self.progress(15, "构建计数矩阵...")
 
@@ -312,6 +315,26 @@ class BulkDEGAnalysis(BaseAnalysis):
         os.makedirs(plots_dir, exist_ok=True)
         os.makedirs(results_dir, exist_ok=True)
         result_files = []
+
+        # 自动生成比较列表
+        if auto_comparisons in ('all_pairwise', 'vs_reference'):
+            all_groups = sorted(adata.obs[groupby].astype(str).unique().tolist())
+            if auto_comparisons == 'vs_reference':
+                if not reference_group:
+                    reference_group = all_groups[0]
+                comparison_pairs = [(g, reference_group) for g in all_groups if g != reference_group]
+            elif auto_comparisons == 'all_pairwise':
+                comparison_pairs = []
+                for i in range(len(all_groups)):
+                    for j in range(i + 1, len(all_groups)):
+                        g1, g2 = all_groups[i], all_groups[j]
+                        # 确保参考组在第二个位置（group2）以统一 logFC 方向
+                        if reference_group and g2 == reference_group:
+                            comparison_pairs.append((g1, g2))
+                        elif reference_group and g1 == reference_group:
+                            comparison_pairs.append((g2, g1))
+                        else:
+                            comparison_pairs.append((g1, g2))
 
         if comparison_pairs:
             # 多组比较模式
