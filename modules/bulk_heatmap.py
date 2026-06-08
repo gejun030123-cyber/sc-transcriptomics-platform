@@ -34,8 +34,9 @@ class BulkHeatmapAnalysis(BaseAnalysis):
         # 清理 inf/NaN
         counts = np.nan_to_num(counts, nan=0.0, posinf=0.0, neginf=0.0)
 
-        sc.pp.normalize_total(adata, target_sum=1e6)
-        sc.pp.log1p(adata)
+        if 'normalization' not in adata.uns:
+            sc.pp.normalize_total(adata, target_sum=1e6)
+            sc.pp.log1p(adata)
         norm_data = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
         norm_data = norm_data.astype(float)
         norm_data = np.nan_to_num(norm_data, nan=0.0, posinf=0.0, neginf=0.0)
