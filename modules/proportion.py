@@ -45,9 +45,11 @@ class ProportionAnalysis(BaseAnalysis):
         fig = go.Figure()
         for col in ct.columns:
             fig.add_trace(go.Bar(name=str(col), x=ct.index.tolist(), y=ct[col].values))
-        fig.update_layout(barmode='stack', title='Cell Proportions by Group',
-                         xaxis_title=batch_key, yaxis_title='Proportion',
-                         plot_bgcolor='white', width=800, height=500)
+        fig.update_layout(**self.get_plotly_layout(
+            title='Cell Proportions by Group',
+            barmode='stack',
+            xaxis_title=batch_key, yaxis_title='Proportion',
+        ))
         fpath = os.path.join(plots_dir, 'proportion_stacked.json')
         with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': 'Cell Proportions (Stacked)'})
@@ -65,6 +67,43 @@ class ProportionAnalysis(BaseAnalysis):
         ct.to_csv(os.path.join(results_dir, 'cell_proportions.csv'))
         result_files.append({'file_path': os.path.join(results_dir, 'cell_counts.csv'), 'file_type': 'csv', 'category': 'table', 'label': 'Cell Counts'})
         result_files.append({'file_path': os.path.join(results_dir, 'cell_proportions.csv'), 'file_type': 'csv', 'category': 'table', 'label': 'Cell Proportions'})
+
+        # Pairwise group comparison
+        compare_groups_str = self.params.get('compare_groups', '').strip()
+        compare_pairs = []
+        if compare_groups_str:
+            for item in compare_groups_str.replace('\n', ';').split(';'):
+                item = item.strip()
+                if '-vs-' in item:
+                    parts = item.split('-vs-')
+                    if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                        compare_pairs.append((parts[0].strip(), parts[1].strip()))
+
+        for group_a, group_b in compare_pairs:
+            if group_a in ct.index and group_b in ct.index:
+                self.progress(80, f"Comparing {group_a} vs {group_b}...")
+                mask = adata.obs[batch_key].isin([group_a, group_b])
+                adata_sub = adata[mask]
+                ct_sub_abs = pd.crosstab(adata_sub.obs[batch_key], adata_sub.obs[groupby])
+                ct_sub = pd.crosstab(adata_sub.obs[batch_key], adata_sub.obs[groupby], normalize='index')
+
+                chi2_sub, pval_sub, _, _ = chi2_contingency(ct_sub_abs)
+
+                fig_sub = go.Figure()
+                for col in ct_sub.columns:
+                    fig_sub.add_trace(go.Bar(name=str(col), x=ct_sub.index.tolist(), y=ct_sub[col].values))
+                fig_sub.update_layout(**self.get_plotly_layout(
+                    title=f'Cell Proportions: {group_a} vs {group_b} (p={pval_sub:.4f})',
+                    barmode='stack',
+                    xaxis_title=batch_key, yaxis_title='Proportion',
+                    width=600, height=400,
+                ))
+                safe_name = f'{group_a}_vs_{group_b}'.replace(' ', '_')
+                fpath = os.path.join(plots_dir, f'proportion_compare_{safe_name}.json')
+                with open(fpath, 'w') as f: json.dump(json.loads(fig_sub.to_json()), f)
+                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': f'{group_a} vs {group_b} 比例比较'})
+
+                ct_sub_abs.to_csv(os.path.join(results_dir, f'cell_counts_{safe_name}.csv'))
 
         self.progress(90, "Saving output...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')
