@@ -209,6 +209,52 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     return deg_df, result_files, n_up, n_down
 
 
+def _run_lrt_test(adata, counts, groupby, method, pval_threshold, gene_id_to_name,
+                  results_dir, padj_method='fdr_bh'):
+    """Run LRT (Likelihood Ratio Test) across all groups at once. Only works with edger method."""
+    import omicverse as ov
+    from inmoose.edgepy import DGEList, glmLRT
+    from patsy import dmatrix
+    from statsmodels.stats.multitest import multipletests
+
+    count_df = pd.DataFrame(counts.T, index=adata.var_names.tolist(), columns=adata.obs.index.tolist())
+    dds = ov.bulk.pyDEG(count_df)
+    dds.drop_duplicates_index()
+    dds.normalize()
+
+    # Build multi-group design
+    groups = adata.obs[groupby].astype(str)
+    anno = pd.DataFrame({'group': groups.values}, index=groups.index)
+    design = dmatrix("~C(group)", data=anno, return_type='dataframe')
+
+    var = pd.DataFrame(index=count_df.index)
+    var.index.name = 'gene_id'
+    dge = DGEList(counts=count_df.values, samples=anno, group_col='group', genes=var)
+    dge.estimateGLMCommonDisp(design=design)
+    fit = dge.glmFit(design=design)
+    lrt = glmLRT(fit)
+    lrt.index = var.index
+
+    pvalues = lrt['pvalue'].values.reshape(-1)
+    _, qvalues, _, _ = multipletests(np.nan_to_num(pvalues, 0), method=padj_method)
+
+    result = pd.DataFrame({
+        'gene': [gene_id_to_name.get(g, g) if gene_id_to_name else g for g in lrt.index],
+        'LRT_stat': lrt.get('F', lrt.get('LR', pd.Series(0, index=lrt.index))).values if hasattr(lrt, 'columns') else np.zeros(len(lrt.index)),
+        'pvalue': pvalues,
+        'padj': qvalues,
+    })
+    result = result.sort_values('padj')
+    result['significant'] = result['padj'] < pval_threshold
+
+    # Save
+    lrt_csv = os.path.join(results_dir, 'bulk_deg_lrt_results.csv')
+    result.to_csv(lrt_csv, index=False)
+
+    n_sig = int(result['significant'].sum())
+    return result, lrt_csv, n_sig
+
+
 class BulkDEGAnalysis(BaseAnalysis):
     MODULE_NAME = "bulk_deg"
     DISPLAY_NAME = "Bulk 差异表达分析"
@@ -336,6 +382,29 @@ class BulkDEGAnalysis(BaseAnalysis):
                         else:
                             comparison_pairs.append((g1, g2))
 
+        # LRT 多组检验（仅 edger）
+        lrt_files = []
+        lrt_n_sig = 0
+        if test_type == 'lrt':
+            if method != 'edger':
+                self.progress(10, f"LRT 仅支持 edger 方法，当前方法 {method} 将使用 pairwise 检验")
+                test_type = 'pairwise'
+            else:
+                try:
+                    import inmoose
+                    self.progress(10, "运行 LRT 多组检验...")
+                    lrt_result, lrt_csv, lrt_n_sig = _run_lrt_test(
+                        adata, counts, groupby, method, pval_threshold,
+                        gene_id_to_name, results_dir, padj_method=padj_method
+                    )
+                    lrt_files.append({'file_path': lrt_csv, 'file_type': 'csv', 'category': 'table', 'label': f'LRT 多组检验结果 ({lrt_n_sig} 个显著基因)'})
+                except ImportError:
+                    self.progress(10, "inmoose 未安装，跳过 LRT 检验")
+                    test_type = 'pairwise'
+                except Exception as e:
+                    self.progress(10, f"LRT 检验失败: {e}，回退到 pairwise")
+                    test_type = 'pairwise'
+
         if comparison_pairs:
             # 多组比较模式
             all_deg_dfs = []
@@ -372,6 +441,60 @@ class BulkDEGAnalysis(BaseAnalysis):
                 result_files.append({'file_path': merged_csv, 'file_type': 'csv', 'category': 'table',
                                      'label': '所有比较合并结果'})
 
+                # 多比较合并表（logFC + padj 矩阵格式）
+                if len(all_deg_dfs) >= 2:
+                    from plotly.subplots import make_subplots
+
+                    # 构建 logFC + padj 矩阵
+                    comparison_names = [f'{g1}-vs-{g2}' for g1, g2 in comparison_pairs if
+                                        len(list(adata.obs.index[adata.obs[groupby] == g1])) >= 2 and
+                                        len(list(adata.obs.index[adata.obs[groupby] == g2])) >= 2]
+                    merged_parts = []
+                    for comp_name, deg_df in zip(comparison_names, all_deg_dfs):
+                        part = deg_df[['gene', 'log2FC', 'padj', 'regulation']].copy()
+                        part.columns = ['gene', f'{comp_name}_log2FC', f'{comp_name}_padj', f'{comp_name}_regulation']
+                        if merged_parts:
+                            merged_parts.append(part.drop(columns=['gene']))
+                        else:
+                            merged_parts.append(part)
+                    merged_matrix_df = pd.concat(merged_parts, axis=1)
+                    merged_matrix_csv = os.path.join(results_dir, 'bulk_deg_merged_comparisons.csv')
+                    merged_matrix_df.to_csv(merged_matrix_csv, index=False)
+                    result_files.append({'file_path': merged_matrix_csv, 'file_type': 'csv', 'category': 'table', 'label': '多比较合并结果'})
+
+                    # 共享差异基因统计
+                    up_sets = [set(df[df['regulation'] == 'Up']['gene']) for df in all_deg_dfs if 'Up' in df['regulation'].values]
+                    down_sets = [set(df[df['regulation'] == 'Down']['gene']) for df in all_deg_dfs if 'Down' in df['regulation'].values]
+                    shared_up = len(set.intersection(*up_sets)) if len(up_sets) >= 2 else 0
+                    shared_down = len(set.intersection(*down_sets)) if len(down_sets) >= 2 else 0
+
+                    # Volcano 并排展示
+                    import plotly.graph_objects as go
+                    n_comp = len(comparison_names)
+                    fig_multi = make_subplots(rows=1, cols=n_comp, subplot_titles=comparison_names,
+                                               horizontal_spacing=0.05)
+                    for m_idx, (comp_name, deg_df) in enumerate(zip(comparison_names, all_deg_dfs)):
+                        colors = ['#e53935' if r == 'Up' else '#1565c0' if r == 'Down' else '#9e9e9e'
+                                  for r in deg_df['regulation']]
+                        neg_log_p = -np.log10(deg_df['padj'].values + 1e-300)
+                        fig_multi.add_trace(go.Scattergl(
+                            x=deg_df['log2FC'].tolist(), y=neg_log_p.tolist(),
+                            mode='markers', marker=dict(color=colors, size=4),
+                            text=deg_df['gene'].tolist(), showlegend=False),
+                            row=1, col=m_idx + 1)
+                        fig_multi.update_xaxes(title_text='log2FC', row=1, col=m_idx + 1)
+                        if m_idx == 0:
+                            fig_multi.update_yaxes(title_text='-log10(padj)', row=1, col=1)
+                    fig_multi.update_layout(height=400, width=max(600, 300 * n_comp), title='多组比较 Volcano 图')
+                    fpath = os.path.join(plots_dir, 'bulk_deg_volcano_multi.json')
+                    with open(fpath, 'w') as f:
+                        f.write(fig_multi.to_json(engine="json"))
+                    result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'volcano', 'label': '多组比较 Volcano'})
+                else:
+                    shared_up = 0
+                    shared_down = 0
+                    comparison_names = [f'{g1}-vs-{g2}' for g1, g2 in comparison_pairs]
+
                 # 箱线图（取第一个比较的结果生成）
                 first_deg = all_deg_dfs[0]
                 g1_first, g2_first = comparison_pairs[0]
@@ -382,13 +505,33 @@ class BulkDEGAnalysis(BaseAnalysis):
             else:
                 raise ValueError("所有比较均因样本数不足被跳过，请检查分组信息。")
 
+            # LRT 文件加入结果
+            result_files.extend(lrt_files)
+
+            # 构建 per_comparison 统计
+            per_comparison = {}
+            for comp_name, deg_df in zip(
+                [f'{g1}-vs-{g2}' for g1, g2 in comparison_pairs if
+                 len(list(adata.obs.index[adata.obs[groupby] == g1])) >= 2 and
+                 len(list(adata.obs.index[adata.obs[groupby] == g2])) >= 2],
+                all_deg_dfs):
+                per_comparison[comp_name] = {
+                    'n_up': int((deg_df['regulation'] == 'Up').sum()),
+                    'n_down': int((deg_df['regulation'] == 'Down').sum()),
+                }
+
             summary = {
-                'comparisons': [f'{g1}-vs-{g2}' for g1, g2 in comparison_pairs],
-                'n_comparisons': len(all_deg_dfs),
-                'skipped_comparisons': skipped,
                 'method': method,
+                'test_type': test_type,
+                'n_comparisons': len(all_deg_dfs),
+                'comparisons': [f'{g1}-vs-{g2}' for g1, g2 in comparison_pairs],
+                'per_comparison': per_comparison,
+                'shared_up_genes': shared_up,
+                'shared_down_genes': shared_down,
+                'skipped_comparisons': skipped,
                 'fc_threshold': fc_threshold,
                 'pval_threshold': pval_threshold,
+                'lrt_n_sig': lrt_n_sig,
             }
         else:
             # 单次比较模式
@@ -437,7 +580,11 @@ class BulkDEGAnalysis(BaseAnalysis):
                 'n_down': n_down,
                 'fc_threshold': fc_threshold,
                 'pval_threshold': pval_threshold,
+                'lrt_n_sig': lrt_n_sig,
             }
+
+        # LRT 文件加入结果（单次比较模式）
+        result_files.extend(lrt_files)
 
         self.progress(95, "保存 h5ad...")
         adata.obs['group'] = adata.obs[groupby] if groupby in adata.obs.columns else 'unknown'
