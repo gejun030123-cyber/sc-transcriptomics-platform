@@ -265,7 +265,8 @@ def data_info():
     try:
         from modules.io_utils import read_expression_matrix
         adata = read_expression_matrix(file_path)
-        qc_columns = {'total_counts', 'n_genes_by_counts', 'pct_counts_mt', 'size_factor', 'total_counts_mt'}
+        qc_columns = {'total_counts', 'n_genes_by_counts', 'pct_counts_mt', 'size_factor',
+                       'total_counts_mt', 'total_counts_ribo', 'pct_counts_ribo', '_auto_group'}
         obs_cols = [c for c in adata.obs.columns if c not in qc_columns]
         return jsonify({
             'n_obs': adata.n_obs,
@@ -288,7 +289,8 @@ def obs_columns():
         import re
         import pandas as pd
         adata = read_expression_matrix(file_path)
-        qc_columns = {'total_counts', 'n_genes_by_counts', 'pct_counts_mt', 'size_factor', 'total_counts_mt'}
+        qc_columns = {'total_counts', 'n_genes_by_counts', 'pct_counts_mt', 'size_factor',
+                       'total_counts_mt', 'total_counts_ribo', 'pct_counts_ribo', '_auto_group'}
         cols = [c for c in adata.obs.columns if c not in qc_columns]
 
         # 检测可能的时间列：数值型且唯一值 < 20
