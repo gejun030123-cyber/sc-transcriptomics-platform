@@ -46,3 +46,30 @@ PIPELINE_ORDER = [
     'qc_reassess', 'annotation', 'deg', 'trajectory', 'proportion',
     'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca', 'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
 ]
+
+# 模块依赖约束：value 中的模块必须在 key 之前执行
+PIPELINE_DEPS = {
+    'preprocess': ['qc'],
+    'dimred': ['preprocess'],
+    'batch_correct': ['preprocess'],
+    'clustering': ['dimred'],
+    'qc_reassess': ['clustering'],
+    'annotation': ['clustering'],
+    'deg': ['clustering'],
+    'trajectory': ['clustering'],
+    'proportion': ['clustering'],
+}
+
+def validate_pipeline_order(modules):
+    """校验模块执行顺序是否满足依赖约束。
+    返回 (is_valid: bool, errors: list[str])。
+    """
+    errors = []
+    seen = set()
+    for mod in modules:
+        deps = PIPELINE_DEPS.get(mod, [])
+        for dep in deps:
+            if dep not in seen and dep in modules:
+                errors.append(f"'{mod}' 依赖 '{dep}'，但 '{dep}' 未在其之前执行")
+        seen.add(mod)
+    return len(errors) == 0, errors
