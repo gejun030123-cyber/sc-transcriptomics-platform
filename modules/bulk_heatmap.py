@@ -38,6 +38,7 @@ class BulkHeatmapAnalysis(BaseAnalysis):
         sc.pp.log1p(adata)
         norm_data = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
         norm_data = norm_data.astype(float)
+        norm_data = np.nan_to_num(norm_data, nan=0.0, posinf=0.0, neginf=0.0)
 
         plots_dir = os.path.join(self.project_dir, 'plots')
         os.makedirs(plots_dir, exist_ok=True)
