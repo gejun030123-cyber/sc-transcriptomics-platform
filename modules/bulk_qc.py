@@ -167,16 +167,21 @@ class BulkQCAnalysis(BaseAnalysis):
         plots_dir = os.path.join(self.project_dir, 'plots')
         os.makedirs(plots_dir, exist_ok=True)
 
-        fig = make_subplots(rows=2, cols=2,
+        fig = make_subplots(rows=3, cols=2,
             subplot_titles=['文库大小分布', '检测基因数',
-                           '线粒体基因比例', '文库大小 vs 检测基因数'])
-        fig.add_trace(go.Bar(x=list(range(n_before)), y=lib_sizes, marker_color='#1a237e', name='文库大小'), row=1, col=1)
-        fig.add_trace(go.Bar(x=list(range(n_before)), y=n_genes_detected, marker_color='#283593', name='基因数'), row=1, col=2)
-        fig.add_trace(go.Bar(x=list(range(n_before)), y=mt_pct, marker_color='#e53935', name='MT%'), row=2, col=1)
+                           '线粒体基因比例', '核糖体基因比例',
+                           'Gini 系数', '文库大小 vs 检测基因数'],
+            vertical_spacing=0.08)
+        sample_idx = list(range(n_before))
+        fig.add_trace(go.Bar(x=sample_idx, y=lib_sizes.tolist(), marker_color='#1a237e', name='文库大小'), row=1, col=1)
+        fig.add_trace(go.Bar(x=sample_idx, y=n_genes_detected.tolist(), marker_color='#283593', name='基因数'), row=1, col=2)
+        fig.add_trace(go.Bar(x=sample_idx, y=mt_pct.tolist(), marker_color='#e53935', name='MT%'), row=2, col=1)
+        fig.add_trace(go.Bar(x=sample_idx, y=ribo_pct.tolist(), marker_color='#ff8f00', name='Ribo%'), row=2, col=2)
+        fig.add_trace(go.Bar(x=sample_idx, y=gini_values.tolist(), marker_color='#6a1b9a', name='Gini'), row=3, col=1)
         colors = ['#4caf50' if m else '#e53935' for m in mask]
-        fig.add_trace(go.Scattergl(x=lib_sizes, y=n_genes_detected, mode='markers',
-            marker=dict(color=colors, size=6), name='样本'), row=2, col=2)
-        fig.update_layout(height=600, width=800, showlegend=False, title='Bulk RNA-seq 质控总览')
+        fig.add_trace(go.Scattergl(x=lib_sizes.tolist(), y=n_genes_detected.tolist(), mode='markers',
+            marker=dict(color=colors, size=6), name='样本'), row=3, col=2)
+        fig.update_layout(height=900, width=800, showlegend=False, title='Bulk RNA-seq 质控总览')
         fpath = os.path.join(plots_dir, 'bulk_qc_overview.json')
         with open(fpath, 'w') as f: f.write(fig.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': '质控总览'})
@@ -227,6 +232,26 @@ class BulkQCAnalysis(BaseAnalysis):
         fpath = os.path.join(plots_dir, 'bulk_qc_pca.json')
         with open(fpath, 'w') as f: f.write(fig_pca.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': '样本 PCA'})
+
+        # PCA 方差解释 elbow 图
+        pca_var = np.var(adata_filtered.obsm['X_pca'], axis=0)
+        pca_variance = pca_var / pca_var.sum()
+        n_pcs = len(pca_variance)
+        pc_labels = [f'PC{i+1}' for i in range(n_pcs)]
+        cumulative = np.cumsum(pca_variance).tolist()
+        fig_elbow = go.Figure()
+        fig_elbow.add_trace(go.Bar(x=pc_labels, y=pca_variance.tolist(),
+            marker_color='#1a237e', name='方差比例'))
+        fig_elbow.add_trace(go.Scatter(x=pc_labels, y=cumulative,
+            mode='lines+markers', marker_color='#e53935', name='累积比例', yaxis='y2'))
+        fig_elbow.update_layout(
+            title='PCA 方差解释比例',
+            xaxis_title='主成分', yaxis_title='方差解释比例',
+            yaxis2=dict(title='累积比例', overlaying='y', side='right', range=[0, 1.05]),
+            width=600, height=400, plot_bgcolor='white')
+        fpath = os.path.join(plots_dir, 'bulk_qc_pca_elbow.json')
+        with open(fpath, 'w') as f: f.write(fig_elbow.to_json(engine="json"))
+        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': 'PCA 方差解释'})
 
         self.progress(90, "保存输出...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')
