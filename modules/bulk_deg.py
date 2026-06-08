@@ -38,7 +38,9 @@ def _parse_custom_groups(cg_str):
 
 def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1, group2,
                            method, fc_threshold, pval_threshold, top_n, gene_id_to_name,
-                           plots_dir, results_dir, suffix='', viz_params=None):
+                           plots_dir, results_dir, suffix='', viz_params=None,
+                           cooks_filter=True, independent_filter=True, padj_method='fdr_bh',
+                           base_mean_filter=0, regulation_filter='both'):
     """Run DEG for one comparison pair. Returns (deg_df, result_files, n_up, n_down)."""
     import plotly.graph_objects as go
     import omicverse as ov
@@ -59,11 +61,24 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     dds = ov.bulk.pyDEG(count_df)
     dds.drop_duplicates_index()
 
-    method_map = {'t-test': 'ttest', 'mann-whitney': 'wilcox', 'deseq2': 'DEseq2'}
+    method_map = {
+        't-test': 'ttest', 'mann-whitney': 'wilcox',
+        'deseq2': 'DEseq2', 'edger': 'edgepy', 'limma': 'limma'
+    }
     ov_method = method_map.get(method, 'ttest')
 
+    if ov_method in ('edgepy', 'limma'):
+        try:
+            import inmoose
+        except ImportError:
+            raise ImportError(f"方法 {method} 需要安装 inmoose: pip install inmoose patsy")
+
     dds.normalize()
-    result = dds.deg_analysis(group1_samples, group2_samples, method=ov_method)
+    result = dds.deg_analysis(
+        group1_samples, group2_samples, method=ov_method,
+        cooks_filter=cooks_filter, independent_filter=independent_filter,
+        multipletests_method=padj_method
+    )
 
     # Extract results
     gene_ids_list = result.index.tolist()
@@ -103,6 +118,11 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         'regulation': regulation
     })
     deg_df = deg_df.sort_values('padj')
+
+    # 基础表达量过滤
+    if base_mean_filter > 0:
+        base_mean = (deg_df['mean_group1'] + deg_df['mean_group2']) / 2
+        deg_df = deg_df[base_mean >= base_mean_filter].copy()
 
     n_up = sum(1 for r in regulation if r == 'Up')
     n_down = sum(1 for r in regulation if r == 'Down')
@@ -180,6 +200,12 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     result_files.append({'file_path': top_csv, 'file_type': 'csv', 'category': 'table',
                          'label': f'Top {top_n} 差异基因 ({group1} vs {group2})'})
 
+    # 差异方向过滤
+    if regulation_filter == 'up':
+        deg_df = deg_df[deg_df['regulation'] == 'Up'].copy()
+    elif regulation_filter == 'down':
+        deg_df = deg_df[deg_df['regulation'] == 'Down'].copy()
+
     return deg_df, result_files, n_up, n_down
 
 
@@ -209,6 +235,16 @@ class BulkDEGAnalysis(BaseAnalysis):
         custom_groups_str = self.params.get('custom_groups', '').strip()
         custom_groups = _parse_custom_groups(custom_groups_str)
         comparison_pairs = _parse_comparisons(comparisons_str)
+
+        cooks_filter = self.params.get('cooks_filter', True)
+        if isinstance(cooks_filter, str):
+            cooks_filter = cooks_filter.lower() in ('true', '1', 'yes', 'on')
+        independent_filter = self.params.get('independent_filter', True)
+        if isinstance(independent_filter, str):
+            independent_filter = independent_filter.lower() in ('true', '1', 'yes', 'on')
+        padj_method = self.params.get('padj_method', 'fdr_bh')
+        base_mean_filter = float(self.params.get('base_mean_filter', 0))
+        regulation_filter = self.params.get('regulation_filter', 'both')
 
         self.progress(15, "构建计数矩阵...")
 
@@ -295,7 +331,10 @@ class BulkDEGAnalysis(BaseAnalysis):
                     adata, counts, g1_samples, g2_samples, g1, g2,
                     method, fc_threshold, pval_threshold, top_n,
                     gene_id_to_name, plots_dir, results_dir, suffix=str(idx),
-                    viz_params=self.params.get('_visualization', {}))
+                    viz_params=self.params.get('_visualization', {}),
+                    cooks_filter=cooks_filter, independent_filter=independent_filter,
+                    padj_method=padj_method, base_mean_filter=base_mean_filter,
+                    regulation_filter=regulation_filter)
                 all_deg_dfs.append(deg_df)
                 result_files.extend(files)
 
@@ -357,7 +396,10 @@ class BulkDEGAnalysis(BaseAnalysis):
                 adata, counts, group1_samples, group2_samples, group1, group2,
                 method, fc_threshold, pval_threshold, top_n,
                 gene_id_to_name, plots_dir, results_dir,
-                viz_params=self.params.get('_visualization', {}))
+                viz_params=self.params.get('_visualization', {}),
+                cooks_filter=cooks_filter, independent_filter=independent_filter,
+                padj_method=padj_method, base_mean_filter=base_mean_filter,
+                regulation_filter=regulation_filter)
             result_files.extend(files)
 
             # 箱线图
