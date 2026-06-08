@@ -117,6 +117,12 @@ PARAM_SCHEMAS = {
         {'key': 'min_counts', 'label': '最小文库 reads 数', 'type': 'number', 'default': 100000, 'help': '最小文库 reads 数。低于此值的样本被过滤。人类/小鼠 RNA-seq 通常要求 ≥100000，小样本可降至 50000。'},
         {'key': 'min_genes', 'label': '最小检测基因数', 'type': 'number', 'default': 5000, 'help': '每个样本检测到的最小基因数。低于此值的样本可能质量差。通常 5000-8000。'},
         {'key': 'max_mt_pct', 'label': '最大线粒体基因比例 (%)', 'type': 'number', 'default': 20.0, 'step': 0.1, 'help': '最大线粒体基因比例（%）。高于此值的样本可能降解严重。RNA-seq 通常 15-20%。'},
+        {'key': 'max_ribo_pct', 'label': '最大核糖体基因比例 (%)', 'type': 'number', 'default': 40.0, 'step': 0.1, 'help': '最大核糖体基因比例（%）。RPL/RPS 基因比例过高提示 rRNA 污染。PolyA 建库通常 < 5-10%，rRNA 去除建库可至 40-50%。'},
+        {'key': 'min_gini', 'label': '最小文库复杂度 (Gini)', 'type': 'number', 'default': 0, 'step': 0.01, 'help': '最小 Gini 系数（0 = 不过滤）。Gini > 0.8 提示文库复杂度低（PCR 过度扩增）。'},
+        {'key': 'min_sample_expr', 'label': '基因最低表达样本数', 'type': 'number', 'default': 0, 'step': 1, 'help': '基因在至少 N 个样本中 CPM > 1 才保留。0 = 不过滤。建议设为样本总数的 10-20%。'},
+        {'key': 'group_column', 'label': '分组列名（可选）', 'type': 'text', 'default': '', 'help': '样本分组列名（adata.obs 中的列）。留空则自动从样本名推断（取第一个分隔符前的前缀）。填写后启用组内/组间距离分析和分组着色图。'},
+        {'key': 'detect_outliers', 'label': '检测离群样本', 'type': 'checkbox', 'default': True, 'help': '基于 PCA 马氏距离检测离群样本。仅在 summary 中告警，不自动剔除。'},
+        {'key': 'filter_strategy', 'label': '过滤策略', 'type': 'select', 'options': ['conservative', 'standard', 'custom'], 'default': 'standard', 'help': 'conservative：宽松阈值（适合小样本）；standard：推荐阈值；custom：自定义所有阈值。'},
     ],
     'bulk_normalize': [
         {'key': 'method', 'label': '标准化方法', 'type': 'select', 'options': ['deseq2', 'cpm', 'log2_quantile'], 'default': 'deseq2', 'help': '标准化方法。DESeq2：中位比率法，适用于差异分析前标准化，RNA-seq 金标准。CPM：每百万计数，简单但不考虑组成偏差。log2_quantile：分位数标准化，适合样本间可比性要求高的场景。'},
