@@ -17,7 +17,7 @@ VISUALIZATION_THEMES = {
     'dark': {
         'bg_color': '#1a1a2e',
         'color_palette': ['#e94560', '#0f3460', '#16213e', '#533483',
-                          '#e94560', '#00b4d8', '#48cae4', '#90e0ef'],
+                          '#00b4d8', '#48cae4', '#90e0ef', '#f8f9fa'],
         'font_family': 'Arial',
     },
 }
@@ -41,6 +41,8 @@ class BaseAnalysis(ABC):
 
     def apply_filters(self, adata, module_name):
         """根据 self.params['_filters'][module_name] 中的声明式规则过滤 adata。"""
+        import logging
+        logger = logging.getLogger(__name__)
         filters = self.params.get('_filters', {}).get(module_name, [])
         for rule in filters:
             col = rule.get('column', '')
@@ -57,12 +59,22 @@ class BaseAnalysis(ABC):
             elif op == '!=':
                 mask = adata.obs[col] != val
             elif op == 'in':
+                if not hasattr(val, '__iter__') or isinstance(val, str):
+                    logger.warning(f"过滤规则 'in' 需要列表类型的 value，收到: {type(val).__name__}")
+                    continue
                 mask = adata.obs[col].isin(val)
             elif op == 'not_in':
+                if not hasattr(val, '__iter__') or isinstance(val, str):
+                    logger.warning(f"过滤规则 'not_in' 需要列表类型的 value，收到: {type(val).__name__}")
+                    continue
                 mask = ~adata.obs[col].isin(val)
             elif op == 'between':
+                if not isinstance(val, (list, tuple)) or len(val) < 2:
+                    logger.warning(f"过滤规则 'between' 需要 [min, max]，收到: {val}")
+                    continue
                 mask = adata.obs[col].between(val[0], val[1])
             else:
+                logger.warning(f"不支持的过滤操作符: {op!r}，规则: {rule}")
                 continue
             n_before = adata.n_obs
             adata = adata[mask].copy()
@@ -81,6 +93,7 @@ class BaseAnalysis(ABC):
             'width': viz.get('figure_width', 800),
             'height': viz.get('figure_height', 500),
             'plot_bgcolor': viz.get('bg_color', theme['bg_color']),
+            'colorway': viz.get('color_palette', theme['color_palette']),
             'font': {
                 'family': viz.get('font_family', theme['font_family']),
                 'size': viz.get('font_size', 12),
