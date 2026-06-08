@@ -135,3 +135,60 @@ class BulkQCAnalysis(BaseAnalysis):
                 'median_genes': int(np.median(adata_filtered.obs['n_genes_by_counts'])),
             }
         }
+
+
+# --- 辅助函数 ---
+
+
+def _gini(values):
+    """计算 Gini 系数。values 为原始 count 数组（非负）。"""
+    vals = np.sort(values[values >= 0])
+    n = len(vals)
+    if n == 0:
+        return 0.0
+    if np.sum(vals) == 0:
+        return 0.0
+    index = np.arange(1, n + 1)
+    return (2.0 * np.sum(index * vals) / (n * np.sum(vals))) - (n + 1) / n
+
+
+def _infer_groups(sample_names):
+    """从样本名推断分组，取第一个分隔符前的前缀。"""
+    groups = []
+    for name in sample_names:
+        name = str(name)
+        assigned = False
+        for sep in ['-', '_']:
+            if sep in name:
+                groups.append(name.split(sep)[0])
+                assigned = True
+                break
+        if not assigned:
+            groups.append(name)
+    return groups
+
+
+def _detect_outliers_mahal(pca_coords, sample_names):
+    """基于 PCA 坐标的马氏距离检测离群样本，返回离群样本名列表。"""
+    if pca_coords.shape[0] < 4 or pca_coords.shape[1] < 2:
+        return []
+    n_components = min(3, pca_coords.shape[1])
+    coords = pca_coords[:, :n_components]
+    mean = coords.mean(axis=0)
+    cov = np.cov(coords.T)
+    try:
+        cov_inv = np.linalg.pinv(cov)
+    except np.linalg.LinAlgError:
+        return []
+    distances = []
+    for i in range(coords.shape[0]):
+        diff = coords[i] - mean
+        d = np.sqrt(diff @ cov_inv @ diff)
+        distances.append(d)
+    distances = np.array(distances)
+    med = np.median(distances)
+    mad = np.median(np.abs(distances - med))
+    if mad < 1e-10:
+        return []
+    threshold = med + 3 * 1.4826 * mad
+    return [sample_names[i] for i, d in enumerate(distances) if d > threshold]
