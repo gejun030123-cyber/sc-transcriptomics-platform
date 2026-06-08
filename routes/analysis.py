@@ -125,7 +125,14 @@ PARAM_SCHEMAS = {
         {'key': 'filter_strategy', 'label': '过滤策略', 'type': 'select', 'options': ['conservative', 'standard', 'custom'], 'default': 'standard', 'help': 'conservative：宽松阈值（适合小样本）；standard：推荐阈值；custom：自定义所有阈值。'},
     ],
     'bulk_normalize': [
-        {'key': 'method', 'label': '标准化方法', 'type': 'select', 'options': ['deseq2', 'cpm', 'log2_quantile'], 'default': 'deseq2', 'help': '标准化方法。DESeq2：中位比率法，适用于差异分析前标准化，RNA-seq 金标准。CPM：每百万计数，简单但不考虑组成偏差。log2_quantile：分位数标准化，适合样本间可比性要求高的场景。'},
+        {'key': 'method', 'label': '标准化方法', 'type': 'select', 'options': ['deseq2', 'tmm', 'cpm', 'vst', 'rlog', 'log2_quantile'], 'default': 'deseq2',
+         'help': '标准化方法。差异分析：DESeq2（中位比率法，金标准）或 TMM（edgeR 方法，组成偏差大时更优）。可视化/高维：VST（方差稳定）或 rlog（小样本更稳定）。简单归一：CPM（每百万计数）或 log2 分位数。'},
+        {'key': 'min_expr_value', 'label': '最小表达阈值 (CPM)', 'type': 'number', 'default': 1, 'step': 0.1,
+         'help': '基因表达量需达到此 CPM 阈值才算有效表达。默认 1。'},
+        {'key': 'min_expr_samples', 'label': '最小表达样本数', 'type': 'number', 'default': 3, 'step': 1,
+         'help': '基因在至少 N 个样本中达到最小表达阈值才保留。0 = 不过滤。建议设为最小组的样本数。'},
+        {'key': 'max_zero_pct', 'label': '最大零值比例 (%)', 'type': 'number', 'default': 0, 'step': 1,
+         'help': '基因在超过此比例的样本中为零则被过滤。0 = 不过滤。建议 50-70%。'},
     ],
     'bulk_deg': [
         {'key': 'groupby', 'label': '分组列名', 'type': 'text', 'default': '', 'help': '分组列名。adata.obs 中用于区分实验组和对照组的列。如 condition、treatment、group。'},
