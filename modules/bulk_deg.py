@@ -88,7 +88,12 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         gene_names = gene_ids_list
     log2fc = result['log2FC'].values
     pvalues = result['pvalue'].values
-    padj = result['qvalue'].values
+    if 'qvalue' in result.columns:
+        padj = result['qvalue'].values
+    elif 'padj' in result.columns:
+        padj = result['padj'].values
+    else:
+        padj = np.ones(len(result))
     n_genes = len(gene_names)
 
     # Regulation direction
@@ -124,8 +129,7 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         base_mean = (deg_df['mean_group1'] + deg_df['mean_group2']) / 2
         deg_df = deg_df[base_mean >= base_mean_filter].copy()
 
-    n_up = sum(1 for r in regulation if r == 'Up')
-    n_down = sum(1 for r in regulation if r == 'Down')
+    # n_up/n_down will be calculated after filtering, before return
 
     # Volcano plot
     file_suffix = f'_{suffix}' if suffix else ''
@@ -205,6 +209,10 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         deg_df = deg_df[deg_df['regulation'] == 'Up'].copy()
     elif regulation_filter == 'down':
         deg_df = deg_df[deg_df['regulation'] == 'Down'].copy()
+
+    # 从过滤后的 deg_df 计算 n_up/n_down
+    n_up = int((deg_df['regulation'] == 'Up').sum())
+    n_down = int((deg_df['regulation'] == 'Down').sum())
 
     return deg_df, result_files, n_up, n_down
 
@@ -449,15 +457,12 @@ class BulkDEGAnalysis(BaseAnalysis):
                     comparison_names = [f'{g1}-vs-{g2}' for g1, g2 in comparison_pairs if
                                         len(list(adata.obs.index[adata.obs[groupby] == g1])) >= 2 and
                                         len(list(adata.obs.index[adata.obs[groupby] == g2])) >= 2]
-                    merged_parts = []
+                    # 构建 logFC + padj 矩阵（按 gene 列外连接，避免索引错位）
+                    merged_matrix_df = all_deg_dfs[0][['gene']].copy()
                     for comp_name, deg_df in zip(comparison_names, all_deg_dfs):
-                        part = deg_df[['gene', 'log2FC', 'padj', 'regulation']].copy()
-                        part.columns = ['gene', f'{comp_name}_log2FC', f'{comp_name}_padj', f'{comp_name}_regulation']
-                        if merged_parts:
-                            merged_parts.append(part.drop(columns=['gene']))
-                        else:
-                            merged_parts.append(part)
-                    merged_matrix_df = pd.concat(merged_parts, axis=1)
+                        sub = deg_df[['gene', 'log2FC', 'padj', 'regulation']].copy()
+                        sub.columns = ['gene', f'{comp_name}_log2FC', f'{comp_name}_padj', f'{comp_name}_regulation']
+                        merged_matrix_df = merged_matrix_df.merge(sub, on='gene', how='outer')
                     merged_matrix_csv = os.path.join(results_dir, 'bulk_deg_merged_comparisons.csv')
                     merged_matrix_df.to_csv(merged_matrix_csv, index=False)
                     result_files.append({'file_path': merged_matrix_csv, 'file_type': 'csv', 'category': 'table', 'label': '多比较合并结果'})
