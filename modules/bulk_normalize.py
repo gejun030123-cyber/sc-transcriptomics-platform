@@ -1,5 +1,4 @@
 import os
-import json
 import numpy as np
 import pandas as pd
 from modules.base import BaseAnalysis
@@ -16,7 +15,6 @@ class BulkNormalizeAnalysis(BaseAnalysis):
     def run(self, input_path):
         import scanpy as sc
         import plotly.graph_objects as go
-        from modules.visualization import scatter_plot
 
         self.progress(5, "加载数据...")
         from modules.io_utils import read_expression_matrix
@@ -79,11 +77,9 @@ class BulkNormalizeAnalysis(BaseAnalysis):
 
             # 清理 inf/NaN 值
             adata.X = np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
-            if 'normalized' in adata.layers:
-                adata.layers['normalized'] = np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
+            adata.layers['normalized'] = np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
 
         elif method == 'log2_quantile':
-            from scipy.stats import gmean
             log_counts = np.log2(raw_counts + 1)
             from scipy.stats import rankdata
             ranked = np.apply_along_axis(rankdata, 0, log_counts)
@@ -97,8 +93,7 @@ class BulkNormalizeAnalysis(BaseAnalysis):
 
             # 清理 inf/NaN 值
             adata.X = np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
-            if 'normalized' in adata.layers:
-                adata.layers['normalized'] = np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
+            adata.layers['normalized'] = np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
 
         elif method == 'vst':
             size_factors = _estimate_size_factors(raw_counts)
@@ -121,8 +116,12 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         os.makedirs(plots_dir, exist_ok=True)
         result_files = []
 
-        norm_layer = adata.layers.get('normalized', adata.X)
-        norm_lib = norm_layer.sum(axis=1) if hasattr(norm_layer, 'sum') else np.ones(adata.n_obs)
+        # 文库大小对比图：仅对线性尺度方法有意义
+        if method in ('vst', 'rlog'):
+            norm_lib = raw_lib  # vst/rlog 无 normalized 层，用原始文库大小展示
+        else:
+            norm_layer = adata.layers.get('normalized', adata.X)
+            norm_lib = norm_layer.sum(axis=1) if hasattr(norm_layer, 'sum') else np.ones(adata.n_obs)
 
         from plotly.subplots import make_subplots
         fig = make_subplots(rows=1, cols=2, subplot_titles=['标准化前 (Raw)', '标准化后 (Normalized)'])
@@ -143,14 +142,16 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             with open(fpath, 'w') as f: f.write(fig_sf.to_json(engine="json"))
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': 'Size Factors'})
 
-        # 标准化前后箱线图对比
+        # 标准化前后表达分布对比
         sample_labels = adata.obs.index.tolist()
         fig_box = make_subplots(rows=1, cols=2, subplot_titles=['标准化前 (log2 raw)', '标准化后'])
-        for i in range(adata.n_obs):
-            fig_box.add_trace(go.Box(y=np.log2(raw_counts[i] + 1), name=sample_labels[i],
-                                     showlegend=False, marker_color='#e53935'), row=1, col=1)
-            fig_box.add_trace(go.Box(y=adata.X[i].tolist(), name=sample_labels[i],
-                                     showlegend=False, marker_color='#4caf50'), row=1, col=2)
+        # 使用单个 violin trace 展示所有样本的分布
+        raw_log2 = np.log2(raw_counts + 1)
+        fig_box.add_trace(go.Violin(y=raw_log2.flatten(), name='Raw', box_visible=True,
+                                     meanline_visible=True, marker_color='#e53935', showlegend=False), row=1, col=1)
+        norm_flat = adata.X.flatten()
+        fig_box.add_trace(go.Violin(y=norm_flat, name='Normalized', box_visible=True,
+                                     meanline_visible=True, marker_color='#4caf50', showlegend=False), row=1, col=2)
         fig_box.update_layout(height=400, width=800, title='标准化前后表达分布对比')
         fpath = os.path.join(plots_dir, 'bulk_norm_boxplot_compare.json')
         with open(fpath, 'w') as f: f.write(fig_box.to_json(engine="json"))
