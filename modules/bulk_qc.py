@@ -24,6 +24,9 @@ class BulkQCAnalysis(BaseAnalysis):
         from modules.io_utils import read_expression_matrix
         adata = read_expression_matrix(input_path)
 
+        # 应用自定义过滤规则
+        adata = self.apply_filters(adata, 'bulk_qc')
+
         min_counts = int(self.params.get('min_counts', 100000))
         min_genes = int(self.params.get('min_genes', 5000))
         max_mt_pct = float(self.params.get('max_mt_pct', 20.0))
