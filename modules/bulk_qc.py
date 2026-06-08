@@ -120,6 +120,7 @@ class BulkQCAnalysis(BaseAnalysis):
         # 输出样本指标表和过滤日志
         results_dir = os.path.join(self.project_dir, 'results')
         os.makedirs(results_dir, exist_ok=True)
+        result_files = []
 
         metrics_df = pd.DataFrame(filter_log_rows)
         metrics_csv = os.path.join(results_dir, 'bulk_qc_sample_metrics.csv')
@@ -128,12 +129,43 @@ class BulkQCAnalysis(BaseAnalysis):
         filter_log_csv = os.path.join(results_dir, 'bulk_qc_filter_log.csv')
         metrics_df.to_csv(filter_log_csv, index=False)
 
+        result_files.append({'file_path': metrics_csv, 'file_type': 'csv', 'category': 'table', 'label': '样本 QC 指标'})
+        result_files.append({'file_path': filter_log_csv, 'file_type': 'csv', 'category': 'table', 'label': '过滤日志'})
+
+        # 基因层面过滤
+        genes_before_filter = adata_filtered.n_vars
+        gene_filter_rows = []
+        if min_sample_expr > 0:
+            raw_filt = adata_filtered.X.toarray() if hasattr(adata_filtered.X, 'toarray') else np.asarray(adata_filtered.X)
+            lib_sizes_filt = raw_filt.sum(axis=1, keepdims=True)
+            lib_sizes_filt[lib_sizes_filt == 0] = 1
+            cpm = raw_filt / lib_sizes_filt * 1e6
+            expr_count_per_gene = (cpm > 1).sum(axis=0)
+            gene_mask = expr_count_per_gene >= min_sample_expr
+
+            removed_gene_names = adata_filtered.var_names[~gene_mask].tolist()
+            for g in removed_gene_names:
+                idx = list(adata_filtered.var_names).index(g)
+                gene_filter_rows.append({
+                    'gene': g,
+                    'expressed_in_n_samples': int(expr_count_per_gene[idx]),
+                    'action': 'removed',
+                })
+            adata_filtered = adata_filtered[:, gene_mask].copy()
+
+        # 管家基因稳定性检查
+        housekeeping_genes = ['GAPDH', 'ACTB', 'B2M', 'HPRT1', 'TBP', 'UBC', 'YWHAZ', 'SDHA', 'HMBS', 'RPLP0']
+        found_hk = [g for g in housekeeping_genes if g in adata_filtered.var_names]
+
+        # 基因过滤日志
+        if min_sample_expr > 0 and gene_filter_rows:
+            gene_filter_csv = os.path.join(results_dir, 'bulk_qc_gene_filter.csv')
+            pd.DataFrame(gene_filter_rows).to_csv(gene_filter_csv, index=False)
+            result_files.append({'file_path': gene_filter_csv, 'file_type': 'csv', 'category': 'table', 'label': '基因过滤日志'})
+
         self.progress(60, "生成质控图表...")
         plots_dir = os.path.join(self.project_dir, 'plots')
         os.makedirs(plots_dir, exist_ok=True)
-        result_files = []
-        result_files.append({'file_path': metrics_csv, 'file_type': 'csv', 'category': 'table', 'label': '样本 QC 指标'})
-        result_files.append({'file_path': filter_log_csv, 'file_type': 'csv', 'category': 'table', 'label': '过滤日志'})
 
         fig = make_subplots(rows=2, cols=2,
             subplot_titles=['文库大小分布', '检测基因数',
