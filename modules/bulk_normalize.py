@@ -33,7 +33,8 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         # 低表达基因前置过滤
         n_genes_before = adata.n_vars
         if min_expr_samples > 0:
-            raw_for_filter = adata.X.toarray() if hasattr(adata.X, 'toarray') else np.asarray(adata.X)
+            from scipy import sparse as _sp
+            raw_for_filter = adata.X.toarray() if _sp.issparse(adata.X) else np.asarray(adata.X)
             lib_for_filter = raw_for_filter.sum(axis=1, keepdims=True)
             lib_for_filter[lib_for_filter == 0] = 1
             cpm_check = raw_for_filter / lib_for_filter * 1e6
@@ -44,36 +45,20 @@ class BulkNormalizeAnalysis(BaseAnalysis):
                 gene_mask = gene_mask & (zero_pct <= max_zero_pct)
             adata = adata[:, gene_mask].copy()
 
-        raw_counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
+        from scipy import sparse as _sp
+        raw_counts = np.asarray(adata.X.toarray()) if _sp.issparse(adata.X) else np.asarray(adata.X)
         raw_counts = raw_counts.astype(float)
         adata.layers['raw'] = raw_counts.copy()
         raw_lib = raw_counts.sum(axis=1)
 
         if method == 'deseq2':
-            from scipy.stats import gmean
-            counts = raw_counts[raw_counts.sum(axis=1) > 0]
-            # 只用所有样本都 >0 的基因计算 geometric mean（DESeq2 标准做法）
-            nonzero_mask = (counts > 0).all(axis=0)
-            if nonzero_mask.sum() == 0:
-                # Fallback: 没有全非零基因，用 log-based gmean
-                geo_means = np.exp(np.log(counts + 1).mean(axis=0))
-            else:
-                geo_means = np.ones(counts.shape[1])
-                geo_means[nonzero_mask] = gmean(counts[:, nonzero_mask], axis=0)
-            ratios = counts / (geo_means + 1e-10)
-            size_factors = np.median(ratios, axis=1)
-            # 防止 size_factor 为 0
-            size_factors = np.where(size_factors > 0, size_factors, 1.0)
+            size_factors = _estimate_size_factors(raw_counts)
             adata.obs['size_factor'] = size_factors
-            norm_counts = counts / size_factors[:, None]
+            norm_counts = raw_counts / size_factors[:, None]
             adata.layers['normalized'] = norm_counts
             adata.X = np.log2(norm_counts + 1)
-
-            # 清理 inf/NaN 值
-            import numpy as _np
-            adata.X = _np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
-            if 'normalized' in adata.layers:
-                adata.layers['normalized'] = _np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
+            adata.X = np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
+            adata.layers['normalized'] = np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
 
         elif method == 'tmm':
             tmm_factors = _tmm_normalize(raw_counts)
@@ -87,22 +72,22 @@ class BulkNormalizeAnalysis(BaseAnalysis):
 
         elif method == 'cpm':
             lib_sizes = raw_counts.sum(axis=1, keepdims=True)
+            lib_sizes[lib_sizes == 0] = 1  # 避免除零
             cpm = raw_counts / lib_sizes * 1e6
             adata.layers['normalized'] = cpm
             adata.X = np.log2(cpm + 1)
 
             # 清理 inf/NaN 值
-            import numpy as _np
-            adata.X = _np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
+            adata.X = np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
             if 'normalized' in adata.layers:
-                adata.layers['normalized'] = _np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
+                adata.layers['normalized'] = np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
 
         elif method == 'log2_quantile':
             from scipy.stats import gmean
             log_counts = np.log2(raw_counts + 1)
             from scipy.stats import rankdata
             ranked = np.apply_along_axis(rankdata, 0, log_counts)
-            ref_distribution = np.sort(np.mean(log_counts, axis=1))
+            ref_distribution = np.mean(np.sort(log_counts, axis=0), axis=1)
             norm = np.zeros_like(log_counts)
             for i in range(log_counts.shape[1]):
                 sorted_idx = np.argsort(ranked[:, i])
@@ -111,45 +96,24 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             adata.X = norm
 
             # 清理 inf/NaN 值
-            import numpy as _np
-            adata.X = _np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
+            adata.X = np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
             if 'normalized' in adata.layers:
-                adata.layers['normalized'] = _np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
+                adata.layers['normalized'] = np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
 
         elif method == 'vst':
-            from scipy.stats import gmean
-            counts_for_sf = raw_counts[raw_counts.sum(axis=1) > 0]
-            nonzero_mask = (counts_for_sf > 0).all(axis=0)
-            if nonzero_mask.sum() == 0:
-                geo_means = np.exp(np.log(counts_for_sf + 1).mean(axis=0))
-            else:
-                geo_means = np.ones(counts_for_sf.shape[1])
-                geo_means[nonzero_mask] = gmean(counts_for_sf[:, nonzero_mask], axis=0)
-            ratios = counts_for_sf / (geo_means + 1e-10)
-            size_factors = np.median(ratios, axis=1)
-            size_factors = np.where(size_factors > 0, size_factors, 1.0)
+            size_factors = _estimate_size_factors(raw_counts)
             adata.obs['size_factor'] = size_factors
             adata.X = _vst_transform(raw_counts, size_factors)
 
         elif method == 'rlog':
-            from scipy.stats import gmean
-            counts_for_sf = raw_counts[raw_counts.sum(axis=1) > 0]
-            nonzero_mask = (counts_for_sf > 0).all(axis=0)
-            if nonzero_mask.sum() == 0:
-                geo_means = np.exp(np.log(counts_for_sf + 1).mean(axis=0))
-            else:
-                geo_means = np.ones(counts_for_sf.shape[1])
-                geo_means[nonzero_mask] = gmean(counts_for_sf[:, nonzero_mask], axis=0)
-            ratios = counts_for_sf / (geo_means + 1e-10)
-            size_factors = np.median(ratios, axis=1)
-            size_factors = np.where(size_factors > 0, size_factors, 1.0)
+            size_factors = _estimate_size_factors(raw_counts)
             adata.obs['size_factor'] = size_factors
             adata.X = _rlog_transform(raw_counts, size_factors)
 
         # 统一输出标记
         adata.uns['normalization'] = {
             'method': method,
-            'is_log_transformed': method in ('deseq2', 'tmm', 'cpm', 'log2_quantile', 'rlog'),
+            'is_log_transformed': method in ('deseq2', 'tmm', 'cpm', 'vst', 'log2_quantile', 'rlog'),
         }
 
         self.progress(60, "生成标准化前后对比图...")
@@ -274,7 +238,13 @@ def _tmm_normalize(counts):
             wi = (fi - counts[i, mask][keep]) / (fi * counts[i, mask][keep])
             wr = (fr - counts[ref_idx, mask][keep]) / (fr * counts[ref_idx, mask][keep])
             weights = 1.0 / (wi + wr + 1e-30)
-            factors[i] = 2 ** np.average(Mi[keep], weights=weights)
+            factors[i] = 2 ** (-np.average(Mi[keep], weights=weights))
+
+    # 归一化使几何均值为 1
+    log_factors = np.log(factors[factors > 0])
+    if len(log_factors) > 0:
+        geo_mean = np.exp(np.mean(log_factors))
+        factors = factors / geo_mean
 
     return factors
 
@@ -304,3 +274,19 @@ def _rlog_transform(counts, size_factors, prior_mean=None):
     rlog = prior_mean + shrinkage * gene_effects[None, :] + sample_residuals
 
     return np.nan_to_num(rlog, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _estimate_size_factors(raw_counts):
+    """DESeq2 中位比率法计算 size factors。raw_counts: (n_samples, n_genes)."""
+    from scipy.stats import gmean
+    # 用所有样本（不过滤全零样本）
+    nonzero_all = (raw_counts > 0).all(axis=0)
+    if nonzero_all.sum() == 0:
+        geo_means = np.exp(np.log(raw_counts + 1).mean(axis=0))
+    else:
+        geo_means = np.ones(raw_counts.shape[1])
+        geo_means[nonzero_all] = gmean(raw_counts[:, nonzero_all], axis=0)
+    ratios = raw_counts / (geo_means + 1e-10)
+    size_factors = np.median(ratios, axis=1)
+    size_factors = np.where(size_factors > 0, size_factors, 1.0)
+    return size_factors
