@@ -130,3 +130,69 @@ class BulkNormalizeAnalysis(BaseAnalysis):
                 'median_size_factor': round(float(adata.obs['size_factor'].median()), 3) if 'size_factor' in adata.obs.columns else None,
             }
         }
+
+
+# --- 辅助函数 ---
+
+
+def _tmm_normalize(counts):
+    """TMM 标准化（edgeR 风格）。counts: (n_samples, n_genes) ndarray of raw counts.
+    返回 per-sample TMM 因子。"""
+    n_samples, n_genes = counts.shape
+    lib_sizes = counts.sum(axis=1)
+    lib_sizes[lib_sizes == 0] = 1
+
+    # 参考样本：文库大小最接近中位数
+    median_lib = np.median(lib_sizes)
+    ref_idx = int(np.argmin(np.abs(lib_sizes - median_lib)))
+
+    factors = np.ones(n_samples)
+    for i in range(n_samples):
+        if i == ref_idx:
+            continue
+        mask = (counts[i] > 0) & (counts[ref_idx] > 0)
+        if mask.sum() < 10:
+            continue
+        fi = lib_sizes[i]
+        fr = lib_sizes[ref_idx]
+        Mi = np.log2((counts[i, mask] / fi) / (counts[ref_idx, mask] / fr))
+        Ai = 0.5 * (np.log2(counts[i, mask] / fi) + np.log2(counts[ref_idx, mask] / fr))
+
+        m_lo, m_hi = np.percentile(Mi, [30, 70])
+        a_hi = np.percentile(Ai, 95)
+        keep = (Mi >= m_lo) & (Mi <= m_hi) & (Ai <= a_hi)
+
+        if keep.sum() > 0:
+            wi = (fi - counts[i, mask][keep]) / (fi * counts[i, mask][keep])
+            wr = (fr - counts[ref_idx, mask][keep]) / (fr * counts[ref_idx, mask][keep])
+            weights = 1.0 / (wi + wr + 1e-30)
+            factors[i] = 2 ** np.average(Mi[keep], weights=weights)
+
+    return factors
+
+
+def _vst_transform(counts, size_factors):
+    """近似 VST。counts: raw counts (n_samples, n_genes), size_factors: (n_samples,)."""
+    normed = counts / size_factors[:, None]
+    normed = np.maximum(normed, 0)
+    vst = np.log2(normed + 0.5)
+    return np.nan_to_num(vst, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _rlog_transform(counts, size_factors, prior_mean=None):
+    """近似 rlog。小样本时通过正则化收缩基因效应。"""
+    normed = counts / size_factors[:, None]
+    normed = np.maximum(normed, 0)
+    log_normed = np.log2(normed + 0.5)
+
+    n_samples = counts.shape[0]
+    if prior_mean is None:
+        prior_mean = float(np.mean(log_normed))
+
+    gene_effects = log_normed.mean(axis=0) - prior_mean
+    shrinkage = min(1.0, n_samples / 30.0)
+
+    sample_residuals = log_normed - log_normed.mean(axis=0, keepdims=True)
+    rlog = prior_mean + shrinkage * gene_effects[None, :] + sample_residuals
+
+    return np.nan_to_num(rlog, nan=0.0, posinf=0.0, neginf=0.0)
