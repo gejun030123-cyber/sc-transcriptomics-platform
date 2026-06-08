@@ -50,15 +50,8 @@ class BulkQCAnalysis(BaseAnalysis):
         else:
             gene_names_for_mt = adata.var_names.astype(str)
         adata.var['mt'] = gene_names_for_mt.str.startswith('MT-')
-        sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], percent_top=None, log1p=False, inplace=True)
-
-        # 核糖体基因检测
-        if 'gene_name' in adata.var.columns:
-            gene_names_for_ribo = adata.var['gene_name'].fillna('').astype(str)
-        else:
-            gene_names_for_ribo = adata.var_names.astype(str)
-        adata.var['ribo'] = gene_names_for_ribo.str.startswith(('RPL', 'RPS'))
-        sc.pp.calculate_qc_metrics(adata, qc_vars=['ribo'], percent_top=None, log1p=False, inplace=True)
+        adata.var['ribo'] = gene_names_for_mt.str.startswith(('RPL', 'RPS'))
+        sc.pp.calculate_qc_metrics(adata, qc_vars=['mt', 'ribo'], percent_top=None, log1p=False, inplace=True)
 
         n_before = adata.n_obs
         lib_sizes = adata.obs['total_counts'].values
@@ -126,8 +119,9 @@ class BulkQCAnalysis(BaseAnalysis):
         metrics_csv = os.path.join(results_dir, 'bulk_qc_sample_metrics.csv')
         metrics_df.to_csv(metrics_csv, index=False)
 
+        filter_log_df = metrics_df[~metrics_df['passed']]
         filter_log_csv = os.path.join(results_dir, 'bulk_qc_filter_log.csv')
-        metrics_df.to_csv(filter_log_csv, index=False)
+        filter_log_df.to_csv(filter_log_csv, index=False)
 
         result_files.append({'file_path': metrics_csv, 'file_type': 'csv', 'category': 'table', 'label': '样本 QC 指标'})
         result_files.append({'file_path': filter_log_csv, 'file_type': 'csv', 'category': 'table', 'label': '过滤日志'})
@@ -143,14 +137,15 @@ class BulkQCAnalysis(BaseAnalysis):
             expr_count_per_gene = (cpm > 1).sum(axis=0)
             gene_mask = expr_count_per_gene >= min_sample_expr
 
-            removed_gene_names = adata_filtered.var_names[~gene_mask].tolist()
-            for g in removed_gene_names:
-                idx = list(adata_filtered.var_names).index(g)
-                gene_filter_rows.append({
-                    'gene': g,
+            removed_indices = np.where(~gene_mask)[0]
+            gene_filter_rows = [
+                {
+                    'gene': adata_filtered.var_names[idx],
                     'expressed_in_n_samples': int(expr_count_per_gene[idx]),
                     'action': 'removed',
-                })
+                }
+                for idx in removed_indices
+            ]
             adata_filtered = adata_filtered[:, gene_mask].copy()
 
         # 管家基因稳定性检查
@@ -232,6 +227,9 @@ class BulkQCAnalysis(BaseAnalysis):
             with open(fpath, 'w') as f: f.write(fig_r.to_json(engine="json"))
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': '样本过滤结果'})
 
+        # 保存原始 counts 副本（PCA 前会标准化 adata_filtered）
+        adata_raw_filtered = adata_filtered.copy()
+
         self.progress(80, "运行 PCA 离群检测...")
         outlier_samples = []
         sc.pp.normalize_total(adata_filtered, target_sum=1e6)
@@ -275,8 +273,11 @@ class BulkQCAnalysis(BaseAnalysis):
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': '样本 PCA'})
 
         # PCA 方差解释 elbow 图
-        pca_var = np.var(adata_filtered.obsm['X_pca'], axis=0)
-        pca_variance = pca_var / pca_var.sum()
+        if 'pca' in adata_filtered.uns and 'variance_ratio' in adata_filtered.uns['pca']:
+            pca_variance = adata_filtered.uns['pca']['variance_ratio']
+        else:
+            pca_var = np.var(adata_filtered.obsm['X_pca'], axis=0)
+            pca_variance = pca_var / pca_var.sum()
         n_pcs = len(pca_variance)
         pc_labels = [f'PC{i+1}' for i in range(n_pcs)]
         cumulative = np.cumsum(pca_variance).tolist()
@@ -382,29 +383,27 @@ class BulkQCAnalysis(BaseAnalysis):
 
         # 管家基因稳定性热图
         if found_hk:
-            hk_in_adata = [g for g in found_hk if g in adata_filtered.var_names]
-            if hk_in_adata:
-                norm_hk = adata_filtered[:, hk_in_adata].copy()
-                sc.pp.normalize_total(norm_hk, target_sum=1e6)
-                sc.pp.log1p(norm_hk)
-                hk_data = norm_hk.X if not hasattr(norm_hk.X, 'toarray') else norm_hk.X.toarray()
-                hk_genes = norm_hk.var_names.tolist()
-                hk_samples = norm_hk.obs.index.tolist()
-                hk_cv = {}
-                for j, g in enumerate(hk_genes):
-                    vals = hk_data[:, j]
-                    cv = float(np.std(vals) / (np.mean(vals) + 1e-10))
-                    hk_cv[g] = cv
-                cv_labels = [f'{g} (CV={hk_cv[g]:.2f})' for g in hk_genes]
-                fig_hk = go.Figure(data=go.Heatmap(
-                    z=hk_data.T.tolist(), x=hk_samples, y=cv_labels,
-                    colorscale='YlOrRd', colorbar=dict(title='log10(CPM+1)')))
-                fig_hk.update_layout(title='管家基因表达稳定性',
-                    width=max(400, len(hk_samples)*40+200),
-                    height=max(200, len(hk_genes)*30+100))
-                fpath = os.path.join(plots_dir, 'bulk_qc_housekeeping.json')
-                with open(fpath, 'w') as f: f.write(fig_hk.to_json(engine="json"))
-                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': '管家基因稳定性'})
+            norm_hk = adata_raw_filtered[:, found_hk].copy()
+            sc.pp.normalize_total(norm_hk, target_sum=1e6)
+            sc.pp.log1p(norm_hk)
+            hk_data = norm_hk.X if not hasattr(norm_hk.X, 'toarray') else norm_hk.X.toarray()
+            hk_genes = norm_hk.var_names.tolist()
+            hk_samples = norm_hk.obs.index.tolist()
+            hk_cv = {}
+            for j, g in enumerate(hk_genes):
+                vals = hk_data[:, j]
+                cv = float(np.std(vals) / (np.mean(vals) + 1e-10))
+                hk_cv[g] = cv
+            cv_labels = [f'{g} (CV={hk_cv[g]:.2f})' for g in hk_genes]
+            fig_hk = go.Figure(data=go.Heatmap(
+                z=hk_data.T.tolist(), x=hk_samples, y=cv_labels,
+                colorscale='YlOrRd', colorbar=dict(title='log10(CPM+1)')))
+            fig_hk.update_layout(title='管家基因表达稳定性',
+                width=max(400, len(hk_samples)*40+200),
+                height=max(200, len(hk_genes)*30+100))
+            fpath = os.path.join(plots_dir, 'bulk_qc_housekeeping.json')
+            with open(fpath, 'w') as f: f.write(fig_hk.to_json(engine="json"))
+            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': '管家基因稳定性'})
 
         self.progress(90, "保存输出...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')
@@ -414,7 +413,7 @@ class BulkQCAnalysis(BaseAnalysis):
             adata_filtered.obs.drop(columns=['_auto_group'], inplace=True)
 
         output_path = os.path.join(intermediate_dir, 'bulk_qc_output.h5ad')
-        adata_filtered.write_h5ad(output_path)
+        adata_raw_filtered.write_h5ad(output_path)
 
         removed_samples = [r['sample'] for r in filter_log_rows if not r['passed']]
         removed_reasons = {r['sample']: r['fail_reasons'] for r in filter_log_rows if not r['passed']}
@@ -481,10 +480,7 @@ def _detect_outliers_mahal(pca_coords, sample_names):
     coords = pca_coords[:, :n_components]
     mean = coords.mean(axis=0)
     cov = np.cov(coords.T)
-    try:
-        cov_inv = np.linalg.pinv(cov)
-    except np.linalg.LinAlgError:
-        return []
+    cov_inv = np.linalg.pinv(cov)
     distances = []
     for i in range(coords.shape[0]):
         diff = coords[i] - mean
