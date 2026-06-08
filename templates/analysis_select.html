@@ -32,6 +32,19 @@
             <p class="text-muted">{{ module.desc }}</p>
 
             <form method="post" class="param-form">
+                <!-- 预设工具栏 -->
+                <div class="d-flex gap-2 mb-3 align-items-center" id="preset-toolbar">
+                    <div class="dropdown">
+                        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button"
+                                data-bs-toggle="dropdown" id="btn-load-preset">加载预设</button>
+                        <ul class="dropdown-menu" id="preset-list">
+                            <li><span class="dropdown-item text-muted small">加载中...</span></li>
+                        </ul>
+                    </div>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-save-preset"
+                            data-bs-toggle="modal" data-bs-target="#savePresetModal">保存预设</button>
+                </div>
+
                 <div class="mb-3">
                     <label class="form-label">输入数据</label>
                     <select name="input_path" class="form-select" required>
@@ -91,6 +104,9 @@
                     {% elif param.type == 'checkbox' %}
                     <input type="checkbox" name="{{ param.key }}" class="form-check-input"
                            {% if param.default %}checked{% endif %}>
+                    {% elif param.type == 'textarea' %}
+                    <textarea name="{{ param.key }}" class="form-control" id="param-{{ param.key }}"
+                              rows="3" placeholder="{{ param.help }}">{{ param.default }}</textarea>
                     {% elif param.type == 'number' %}
                     <input type="number" name="{{ param.key }}" class="form-control"
                            value="{{ param.default }}" step="{{ param.step|default(1) }}">
@@ -110,10 +126,154 @@
         </div>
     </div>
 </div>
+
+<!-- 保存预设模态框 -->
+<div class="modal fade" id="savePresetModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">保存参数预设</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">预设名称</label>
+                    <input type="text" class="form-control" id="preset-name" placeholder="如: PBMC 标准 QC 参数">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">描述（可选）</label>
+                    <input type="text" class="form-control" id="preset-desc" placeholder="简要说明用途">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">保存范围</label>
+                    <select class="form-select" id="preset-scope">
+                        <option value="project">当前项目</option>
+                        <option value="global">全局（所有项目可用）</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="btn-confirm-save">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
 <script>
+// === 预设系统 ===
+const PROJECT_ID = '{{ project.id }}';
+const MODULE_NAME = '{{ module.name }}';
+const ANALYSIS_TYPE = MODULE_NAME.startsWith('bulk_') ? 'bulk' : 'sc';
+
+function collectCurrentParams() {
+    const params = {};
+    document.querySelectorAll('.param-form input, .param-form select, .param-form textarea').forEach(el => {
+        const name = el.name;
+        if (!name || name === 'input_path') return;
+        if (el.type === 'checkbox') {
+            params[name] = el.checked;
+        } else {
+            params[name] = el.value;
+        }
+    });
+    return params;
+}
+
+function applyPresetToForm(presetParams) {
+    if (!presetParams) return;
+    Object.entries(presetParams).forEach(([key, value]) => {
+        const el = document.querySelector(`[name="${key}"]`);
+        if (!el) return;
+        if (el.type === 'checkbox') {
+            el.checked = !!value;
+        } else {
+            el.value = value;
+        }
+    });
+}
+
+async function loadPresets() {
+    try {
+        const resp = await fetch(`/api/presets?project_id=${PROJECT_ID}&type=${ANALYSIS_TYPE}`);
+        const data = await resp.json();
+        const list = document.getElementById('preset-list');
+        list.innerHTML = '';
+        if (!data.presets || data.presets.length === 0) {
+            list.innerHTML = '<li><span class="dropdown-item text-muted small">暂无预设</span></li>';
+            return;
+        }
+        data.presets.forEach(p => {
+            const li = document.createElement('li');
+            const scopeLabel = p.scope === 'global' ? ' [全局]' : '';
+            li.innerHTML = `<a class="dropdown-item" href="#" data-preset-id="${p.id}"
+                              data-scope="${p.scope}">${p.name}${scopeLabel}<br>
+                              <small class="text-muted">${p.description || ''}</small></a>`;
+            li.querySelector('a').addEventListener('click', async (e) => {
+                e.preventDefault();
+                const pid = e.currentTarget.dataset.presetId;
+                const r = await fetch(`/api/presets/${pid}?project_id=${PROJECT_ID}`);
+                const d = await r.json();
+                if (d.preset && d.preset.params) {
+                    applyPresetToForm(d.preset.params[MODULE_NAME] || {});
+                }
+            });
+            list.appendChild(li);
+        });
+    } catch (e) {
+        console.error('加载预设失败:', e);
+    }
+}
+
+document.getElementById('btn-confirm-save').addEventListener('click', async () => {
+    const name = document.getElementById('preset-name').value.trim();
+    if (!name) { alert('请输入预设名称'); return; }
+    const desc = document.getElementById('preset-desc').value.trim();
+    const scope = document.getElementById('preset-scope').value;
+    const params = collectCurrentParams();
+    const body = {
+        name, description: desc, scope, analysis_type: ANALYSIS_TYPE,
+        project_id: PROJECT_ID,
+        params: { [MODULE_NAME]: params },
+    };
+    try {
+        const resp = await fetch('/api/presets', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            bootstrap.Modal.getInstance(document.getElementById('savePresetModal')).hide();
+            document.getElementById('preset-name').value = '';
+            document.getElementById('preset-desc').value = '';
+            loadPresets();
+        } else {
+            alert(data.error || '保存失败');
+        }
+    } catch (e) {
+        alert('保存失败: ' + e.message);
+    }
+});
+
+loadPresets();
+
+// 表单提交时注入 _visualization 配置
+document.querySelector('.param-form').addEventListener('submit', function() {
+    let vizHidden = this.querySelector('input[name="_visualization"]');
+    if (!vizHidden) {
+        vizHidden = document.createElement('input');
+        vizHidden.type = 'hidden';
+        vizHidden.name = '_visualization';
+        this.appendChild(vizHidden);
+    }
+    if (!vizHidden.value) {
+        vizHidden.value = JSON.stringify({});
+    }
+});
+
 const inputSelect = document.querySelector('select[name="input_path"]');
 const dynamicSelects = document.querySelectorAll('.dynamic-select');
 const groupbyFields = document.querySelectorAll('.groupby-field');
