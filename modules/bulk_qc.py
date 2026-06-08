@@ -30,6 +30,18 @@ class BulkQCAnalysis(BaseAnalysis):
         min_counts = int(self.params.get('min_counts', 100000))
         min_genes = int(self.params.get('min_genes', 5000))
         max_mt_pct = float(self.params.get('max_mt_pct', 20.0))
+        max_ribo_pct = float(self.params.get('max_ribo_pct', 40.0))
+        min_gini = float(self.params.get('min_gini', 0))
+        min_sample_expr = int(self.params.get('min_sample_expr', 0))
+        detect_outliers = self.params.get('detect_outliers', True)
+        filter_strategy = self.params.get('filter_strategy', 'standard')
+
+        # 过滤策略预设覆盖阈值
+        if filter_strategy == 'conservative':
+            min_counts = min(min_counts, 50000)
+            min_genes = min(min_genes, 3000)
+            max_mt_pct = max(max_mt_pct, 30.0)
+            max_ribo_pct = max(max_ribo_pct, 60.0)
 
         self.progress(20, "计算质控指标...")
         # 优先用 gene_name 检测线粒体基因（Ensembl ID 不以 MT- 开头）
@@ -40,20 +52,88 @@ class BulkQCAnalysis(BaseAnalysis):
         adata.var['mt'] = gene_names_for_mt.str.startswith('MT-')
         sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], percent_top=None, log1p=False, inplace=True)
 
+        # 核糖体基因检测
+        if 'gene_name' in adata.var.columns:
+            gene_names_for_ribo = adata.var['gene_name'].fillna('').astype(str)
+        else:
+            gene_names_for_ribo = adata.var_names.astype(str)
+        adata.var['ribo'] = gene_names_for_ribo.str.startswith(('RPL', 'RPS'))
+        sc.pp.calculate_qc_metrics(adata, qc_vars=['ribo'], percent_top=None, log1p=False, inplace=True)
+
         n_before = adata.n_obs
         lib_sizes = adata.obs['total_counts'].values
         n_genes_detected = adata.obs['n_genes_by_counts'].values
         mt_pct = adata.obs['pct_counts_mt'].values if 'pct_counts_mt' in adata.obs.columns else np.zeros(n_before)
+        ribo_pct = adata.obs['pct_counts_ribo'].values if 'pct_counts_ribo' in adata.obs.columns else np.zeros(n_before)
+
+        # 文库复杂度 (Gini) 和新颖度
+        raw_counts = adata.X.toarray() if hasattr(adata.X, 'toarray') else np.asarray(adata.X)
+        gini_values = np.array([_gini(raw_counts[i]) for i in range(n_before)])
+        novelty_values = np.log10(n_genes_detected + 1) / np.log10(lib_sizes + 1)
 
         self.progress(40, "过滤样本...")
-        mask = (lib_sizes >= min_counts) & (n_genes_detected >= min_genes) & (mt_pct <= max_mt_pct)
+        # 分组推断
+        sample_names = adata.obs.index.tolist()
+        group_col = self.params.get('group_column', '').strip()
+        if group_col and group_col in adata.obs.columns:
+            groups = adata.obs[group_col].astype(str).tolist()
+        else:
+            groups = _infer_groups(sample_names)
+            adata.obs['_auto_group'] = groups
+            group_col = '_auto_group'
+
+        # 样本过滤
+        mask = (lib_sizes >= min_counts) & (n_genes_detected >= min_genes) & (mt_pct <= max_mt_pct) & (ribo_pct <= max_ribo_pct)
+        if min_gini > 0:
+            mask = mask & (gini_values >= min_gini)
+
+        # 过滤日志
+        filter_log_rows = []
+        for i in range(n_before):
+            fail_reasons = []
+            if lib_sizes[i] < min_counts:
+                fail_reasons.append(f'lib_size<{min_counts}')
+            if n_genes_detected[i] < min_genes:
+                fail_reasons.append(f'n_genes<{min_genes}')
+            if mt_pct[i] > max_mt_pct:
+                fail_reasons.append(f'mt_pct>{max_mt_pct}')
+            if ribo_pct[i] > max_ribo_pct:
+                fail_reasons.append(f'ribo_pct>{max_ribo_pct}')
+            if min_gini > 0 and gini_values[i] < min_gini:
+                fail_reasons.append(f'gini<{min_gini}')
+            filter_log_rows.append({
+                'sample': sample_names[i],
+                'group': groups[i],
+                'passed': len(fail_reasons) == 0,
+                'lib_size': int(lib_sizes[i]),
+                'n_genes': int(n_genes_detected[i]),
+                'mt_pct': round(float(mt_pct[i]), 2),
+                'ribo_pct': round(float(ribo_pct[i]), 2),
+                'gini': round(float(gini_values[i]), 4),
+                'novelty': round(float(novelty_values[i]), 4),
+                'fail_reasons': '; '.join(fail_reasons) if fail_reasons else '',
+            })
+
         adata_filtered = adata[mask].copy()
         n_after = adata_filtered.n_obs
+
+        # 输出样本指标表和过滤日志
+        results_dir = os.path.join(self.project_dir, 'results')
+        os.makedirs(results_dir, exist_ok=True)
+
+        metrics_df = pd.DataFrame(filter_log_rows)
+        metrics_csv = os.path.join(results_dir, 'bulk_qc_sample_metrics.csv')
+        metrics_df.to_csv(metrics_csv, index=False)
+
+        filter_log_csv = os.path.join(results_dir, 'bulk_qc_filter_log.csv')
+        metrics_df.to_csv(filter_log_csv, index=False)
 
         self.progress(60, "生成质控图表...")
         plots_dir = os.path.join(self.project_dir, 'plots')
         os.makedirs(plots_dir, exist_ok=True)
         result_files = []
+        result_files.append({'file_path': metrics_csv, 'file_type': 'csv', 'category': 'table', 'label': '样本 QC 指标'})
+        result_files.append({'file_path': filter_log_csv, 'file_type': 'csv', 'category': 'table', 'label': '过滤日志'})
 
         fig = make_subplots(rows=2, cols=2,
             subplot_titles=['文库大小分布', '检测基因数',
