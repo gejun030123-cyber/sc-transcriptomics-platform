@@ -592,7 +592,9 @@ class BulkDEGAnalysis(BaseAnalysis):
         result_files.extend(lrt_files)
 
         self.progress(95, "保存 h5ad...")
-        adata.obs['group'] = adata.obs[groupby] if groupby in adata.obs.columns else 'unknown'
+        # 临时标记分组（不覆写已有 group 列，避免错误输入污染输出 h5ad）
+        if groupby in adata.obs.columns and 'group' not in adata.obs.columns:
+            adata.obs['group'] = adata.obs[groupby]
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')
         os.makedirs(intermediate_dir, exist_ok=True)
         output_path = os.path.join(intermediate_dir, 'bulk_deg_output.h5ad')
