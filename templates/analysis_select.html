@@ -15,14 +15,22 @@
             <h6 class="mb-2">
                 {% if module.name.startswith('bulk_') %}Bulk RNA-seq 流程{% else %}单细胞分析流程{% endif %}
             </h6>
-            {% for m in all_modules %}
-            <a href="/projects/{{ project.id }}/analyze/{{ m.name }}"
-               class="sidebar-module d-block text-decoration-none small {% if m.name == module.name %}active{% endif %}">
-                {{ m.display }}
-                {% set completed = completed_tasks|selectattr('module_name', 'equalto', m.name)|list %}
-                {% if completed %}<span class="float-end text-success">&#10003;</span>{% endif %}
-            </a>
-            {% endfor %}
+            <div id="module-list" class="module-drag-list">
+                {% for m in all_modules %}
+                <div class="module-item d-flex align-items-center py-1 {% if m.name == module.name %}active{% endif %}"
+                     data-module="{{ m.name }}" draggable="true">
+                    <span class="drag-handle me-2" style="cursor:grab; color:#999;">☰</span>
+                    <a href="/projects/{{ project.id }}/analyze/{{ m.name }}"
+                       class="text-decoration-none small flex-grow-1">{{ m.display }}</a>
+                    {% set completed = completed_tasks|selectattr('module_name', 'equalto', m.name)|list %}
+                    {% if completed %}<span class="text-success small">&#10003;</span>{% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            <div class="mt-2 border-top pt-2">
+                <button type="button" class="btn btn-outline-secondary btn-sm w-100" id="btn-save-pipeline"
+                        data-bs-toggle="modal" data-bs-target="#savePipelineModal">保存为流程模板</button>
+            </div>
         </div>
     </div>
 
@@ -159,9 +167,42 @@
         </div>
     </div>
 </div>
+
+<!-- 保存流程模板模态框 -->
+<div class="modal fade" id="savePipelineModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">保存流程模板</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">模板名称</label>
+                    <input type="text" class="form-control" id="pipeline-name" placeholder="如: 标准单细胞流程">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">描述（可选）</label>
+                    <input type="text" class="form-control" id="pipeline-desc">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="btn-confirm-pipeline-save">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
+<style>
+.module-drag-list .module-item { padding: 4px 8px; border-radius: 4px; transition: background 0.15s; }
+.module-drag-list .module-item:hover { background: #f0f0f0; }
+.module-drag-list .module-item.active { background: #e7f1ff; font-weight: 600; }
+.module-drag-list .module-item.dragging { opacity: 0.4; }
+.module-drag-list .module-item.drag-over { border-top: 2px solid #0d6efd; }
+</style>
 <script>
 // === 预设系统 ===
 const PROJECT_ID = '{{ project.id }}';
@@ -551,5 +592,68 @@ if (form) {
 if (inputSelect && inputSelect.value) {
     suggestGroupbyColumns();
 }
+
+// === 模块拖拽排序 ===
+(function() {
+    const list = document.getElementById('module-list');
+    if (!list) return;
+    let dragItem = null;
+    list.querySelectorAll('.module-item').forEach(item => {
+        item.addEventListener('dragstart', (e) => {
+            dragItem = item;
+            item.classList.add('dragging');
+            e.dataTransfer.effectAllowed = 'move';
+        });
+        item.addEventListener('dragend', () => {
+            if (dragItem) dragItem.classList.remove('dragging');
+            list.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+            dragItem = null;
+        });
+        item.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            if (item !== dragItem) item.classList.add('drag-over');
+        });
+        item.addEventListener('dragleave', () => { item.classList.remove('drag-over'); });
+        item.addEventListener('drop', (e) => {
+            e.preventDefault();
+            item.classList.remove('drag-over');
+            if (dragItem && dragItem !== item) {
+                const allItems = [...list.querySelectorAll('.module-item')];
+                const fromIdx = allItems.indexOf(dragItem);
+                const toIdx = allItems.indexOf(item);
+                if (fromIdx < toIdx) { item.after(dragItem); }
+                else { item.before(dragItem); }
+            }
+        });
+    });
+})();
+
+document.getElementById('btn-confirm-pipeline-save').addEventListener('click', async () => {
+    const name = document.getElementById('pipeline-name').value.trim();
+    if (!name) { alert('请输入模板名称'); return; }
+    const desc = document.getElementById('pipeline-desc').value.trim();
+    const modules = [...document.querySelectorAll('#module-list .module-item')].map(el => el.dataset.module);
+    const body = {
+        name, description: desc,
+        analysis_type: ANALYSIS_TYPE,
+        project_id: PROJECT_ID,
+        scope: 'project',
+        pipeline: { modules, skip_validation: false },
+        params: collectCurrentParams(),
+    };
+    try {
+        const resp = await fetch('/api/presets', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        if (resp.ok) {
+            bootstrap.Modal.getInstance(document.getElementById('savePipelineModal')).hide();
+            document.getElementById('pipeline-name').value = '';
+            document.getElementById('pipeline-desc').value = '';
+        }
+    } catch (e) { alert('保存失败: ' + e.message); }
+});
 </script>
 {% endblock %}
