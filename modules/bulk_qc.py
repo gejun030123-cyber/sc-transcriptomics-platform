@@ -294,6 +294,118 @@ class BulkQCAnalysis(BaseAnalysis):
         with open(fpath, 'w') as f: f.write(fig_elbow.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': 'PCA 方差解释'})
 
+        # 组内 vs 组间距离箱线图
+        if len(set(groups)) > 1 and n_after > 3:
+            norm_arr = norm_for_corr.X if not hasattr(norm_for_corr.X, 'toarray') else norm_for_corr.X.toarray()
+            corr_mat_all = np.corrcoef(norm_arr)
+            dist_mat = 1 - corr_mat_all
+            intra_dists, inter_dists = [], []
+            filtered_sample_list = norm_for_corr.obs.index.tolist()
+            for i in range(n_after):
+                for j in range(i + 1, n_after):
+                    gi = groups[sample_names.index(filtered_sample_list[i])]
+                    gj = groups[sample_names.index(filtered_sample_list[j])]
+                    if gi == gj:
+                        intra_dists.append(float(dist_mat[i, j]))
+                    else:
+                        inter_dists.append(float(dist_mat[i, j]))
+
+            fig_dist = go.Figure()
+            if intra_dists:
+                fig_dist.add_trace(go.Box(y=intra_dists, name='组内距离', marker_color='#4caf50'))
+            if inter_dists:
+                fig_dist.add_trace(go.Box(y=inter_dists, name='组间距离', marker_color='#e53935'))
+            try:
+                from scipy.stats import ttest_ind
+                _, pval = ttest_ind(intra_dists, inter_dists, equal_var=False)
+                title_suffix = f' (p={pval:.2e})'
+            except Exception:
+                title_suffix = ''
+            fig_dist.update_layout(
+                title=f'组内 vs 组间距离{title_suffix}',
+                yaxis_title='1 - Pearson r', width=500, height=400, plot_bgcolor='white')
+            fpath = os.path.join(plots_dir, 'bulk_qc_group_distance.json')
+            with open(fpath, 'w') as f: f.write(fig_dist.to_json(engine="json"))
+            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': '组内/组间距离'})
+
+        # QC 指标散点矩阵 (Pairs Plot)
+        obs_filtered = adata_filtered.obs
+        pairs_groups = [groups[sample_names.index(s)] for s in obs_filtered.index.tolist()]
+        unique_pg = sorted(set(pairs_groups))
+        pg_color_map = {g: f'hsl({i*360//max(1,len(unique_pg))},70%,50%)' for i, g in enumerate(unique_pg)}
+        pg_colors = [pg_color_map[g] for g in pairs_groups]
+
+        fig_pairs = go.Figure(data=go.Splom(
+            dimensions=[
+                dict(label='Library Size', values=obs_filtered['total_counts'].tolist()),
+                dict(label='N Genes', values=obs_filtered['n_genes_by_counts'].tolist()),
+                dict(label='MT%', values=obs_filtered['pct_counts_mt'].tolist() if 'pct_counts_mt' in obs_filtered.columns else [0]*n_after),
+                dict(label='Ribo%', values=obs_filtered['pct_counts_ribo'].tolist() if 'pct_counts_ribo' in obs_filtered.columns else [0]*n_after),
+            ],
+            marker=dict(color=pg_colors, size=5, line=dict(width=0.5, color='white')),
+            text=obs_filtered.index.tolist(),
+            showupperhalf=False,
+        ))
+        fig_pairs.update_layout(title='QC 指标散点矩阵', width=700, height=700)
+        fpath = os.path.join(plots_dir, 'bulk_qc_pairs_plot.json')
+        with open(fpath, 'w') as f: f.write(fig_pairs.to_json(engine="json"))
+        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': 'QC 指标散点矩阵'})
+
+        # 各组 QC 指标小提琴图
+        if len(unique_groups) > 1:
+            violin_data = []
+            for s in obs_filtered.index.tolist():
+                g = groups[sample_names.index(s)]
+                violin_data.append({
+                    'group': g,
+                    'MT%': float(obs_filtered.loc[s, 'pct_counts_mt']) if 'pct_counts_mt' in obs_filtered.columns else 0,
+                    'Ribo%': float(obs_filtered.loc[s, 'pct_counts_ribo']) if 'pct_counts_ribo' in obs_filtered.columns else 0,
+                    'Library Size': float(obs_filtered.loc[s, 'total_counts']),
+                    'N Genes': float(obs_filtered.loc[s, 'n_genes_by_counts']),
+                })
+            violin_df = pd.DataFrame(violin_data)
+            fig_violin = make_subplots(rows=2, cols=2,
+                subplot_titles=['MT%', 'Ribo%', 'Library Size', 'N Genes'],
+                shared_xaxes=True)
+            metrics = [('MT%', 1, 1), ('Ribo%', 1, 2), ('Library Size', 2, 1), ('N Genes', 2, 2)]
+            for metric, row, col in metrics:
+                for g in unique_groups:
+                    vals = violin_df[violin_df['group'] == g][metric].tolist()
+                    fig_violin.add_trace(go.Violin(
+                        y=vals, name=g, box_visible=True, meanline_visible=True,
+                        legendgroup=g, showlegend=(row == 1 and col == 1)),
+                        row=row, col=col)
+            fig_violin.update_layout(title='各组 QC 指标分布', height=600, width=700)
+            fpath = os.path.join(plots_dir, 'bulk_qc_violin_by_group.json')
+            with open(fpath, 'w') as f: f.write(fig_violin.to_json(engine="json"))
+            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': '各组 QC 指标分布'})
+
+        # 管家基因稳定性热图
+        if found_hk:
+            hk_in_adata = [g for g in found_hk if g in adata_filtered.var_names]
+            if hk_in_adata:
+                norm_hk = adata_filtered[:, hk_in_adata].copy()
+                sc.pp.normalize_total(norm_hk, target_sum=1e6)
+                sc.pp.log1p(norm_hk)
+                hk_data = norm_hk.X if not hasattr(norm_hk.X, 'toarray') else norm_hk.X.toarray()
+                hk_genes = norm_hk.var_names.tolist()
+                hk_samples = norm_hk.obs.index.tolist()
+                hk_cv = {}
+                for j, g in enumerate(hk_genes):
+                    vals = hk_data[:, j]
+                    cv = float(np.std(vals) / (np.mean(vals) + 1e-10))
+                    hk_cv[g] = cv
+                cv_labels = [f'{g} (CV={hk_cv[g]:.2f})' for g in hk_genes]
+                fig_hk = go.Figure(data=go.Heatmap(
+                    z=hk_data.T.tolist(), x=hk_samples, y=cv_labels,
+                    colorscale='YlOrRd', colorbar=dict(title='log10(CPM+1)')))
+                fig_hk.update_layout(title='管家基因表达稳定性',
+                    width=max(400, len(hk_samples)*40+200),
+                    height=max(200, len(hk_genes)*30+100))
+                fpath = os.path.join(plots_dir, 'bulk_qc_housekeeping.json')
+                with open(fpath, 'w') as f: f.write(fig_hk.to_json(engine="json"))
+                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': '管家基因稳定性'})
+
         self.progress(90, "保存输出...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')
         os.makedirs(intermediate_dir, exist_ok=True)
