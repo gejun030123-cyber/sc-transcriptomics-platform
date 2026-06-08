@@ -84,10 +84,10 @@ PARAM_SCHEMAS = {
         {'key': 'method', 'label': '注释方法', 'type': 'select', 'options': ['auto_marker', 'manual'], 'default': 'auto_marker', 'help': '注释方法。auto_marker：使用内置 TME marker 基因自动打分。manual：手动指定 marker 基因。'},
         {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于分组的聚类列名。通常为 leiden 或 leiden_0.8 等。'},
         {'key': 'resolution', 'label': 'Leiden 分辨率', 'type': 'text', 'default': '0.8', 'help': '对应的 Leiden 分辨率，用于定位正确的聚类列。'},
-        {'key': 'marker_set', 'label': 'Marker 基因集', 'type': 'select', 'options': ['TME', 'Immune'], 'default': 'TME',
-         'help': 'TME：肿瘤微环境 marker（上皮、CAF、内皮、免疫细胞等）。Immune：免疫细胞 marker（T、B、NK、髓系等）。'},
-        {'key': 'custom_markers', 'label': '自定义 Marker（可选）', 'type': 'text', 'default': '',
-         'help': '格式：CellType1:GENE1,GENE2;CellType2:GENE3,GENE4。留空则使用上方选择的预设基因集。'},
+        {'key': 'marker_set', 'label': 'Marker 基因集', 'type': 'select', 'options': ['TME', 'Immune', 'Blood'], 'default': 'TME',
+         'help': 'TME：肿瘤微环境 marker（上皮、CAF、内皮、免疫细胞等）。Immune：免疫细胞 marker（T、B、NK、髓系等）。Blood：血液细胞 marker（HSC、红系、巨核、粒系等）。'},
+        {'key': 'custom_markers', 'label': '自定义 Marker（可选）', 'type': 'textarea', 'default': '',
+         'help': '每行一个细胞类型，格式：CellType:GENE1,GENE2。示例：\nT_cell:CD3D,CD3E,CD2\nB_cell:CD19,MS4A1,CD79A\nMacrophage:CD68,CD163,MSR1'},
     ],
     'deg': [
         {'key': 'groupby', 'label': '分组依据', 'type': 'text', 'default': '', 'help': '差异分析的分组依据列名。如 celltype、leiden、condition 等。留空则自动使用 leiden。'},
@@ -98,14 +98,20 @@ PARAM_SCHEMAS = {
          'help': '是否生成 Top 差异基因的 dotplot 可视化。'},
         {'key': 'plot_genes_umap', 'label': 'UMAP 展示基因（逗号分隔）', 'type': 'text', 'default': '',
          'help': '指定要在 UMAP 上展示表达分布的基因名，多个用逗号分隔。留空则不生成。'},
+        {'key': 'custom_dotplot_genes', 'label': '自定义 Dotplot 基因（可选）', 'type': 'textarea', 'default': '',
+         'help': '手动输入基因名，逗号或换行分隔。填写后 Dotplot 使用此列表而非自动 Top N DEG。'},
     ],
     'trajectory': [
         {'key': 'method', 'label': '轨迹方法', 'type': 'select', 'options': ['diffusion_map', 'slingshot'], 'default': 'diffusion_map', 'help': '轨迹推断方法。diffusion_map：基于扩散图的拟时序，适合连续过渡。slingshot：基于 MST 的轨迹，适合分支结构。'},
         {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于轨迹推断的聚类列名。'},
+        {'key': 'plot_genes', 'label': '拟时序基因表达（可选）', 'type': 'textarea', 'default': '',
+         'help': '手动输入基因名，逗号或换行分隔。生成这些基因沿拟时序的表达曲线图。最多 10 个基因。'},
     ],
     'proportion': [
         {'key': 'groupby', 'label': '分组依据', 'type': 'text', 'default': 'celltype', 'help': '统计比例的细胞类型列名。通常为 celltype 或 leiden。'},
         {'key': 'batch_key', 'label': '批次列名', 'type': 'text', 'default': 'batch', 'help': '用于比较的分组列名。如 batch、condition、treatment 等。'},
+        {'key': 'compare_groups', 'label': '指定比较组（可选）', 'type': 'text', 'default': '',
+         'help': '格式：GroupA-vs-GroupB，多个比较用分号分隔（如 A-vs-B;C-vs-D）。仅比较指定组的细胞比例差异。留空则比较所有组。'},
     ],
     'bulk_qc': [
         {'key': 'min_counts', 'label': '最小文库 reads 数', 'type': 'number', 'default': 100000, 'help': '最小文库 reads 数。低于此值的样本被过滤。人类/小鼠 RNA-seq 通常要求 ≥100000，小样本可降至 50000。'},
@@ -125,6 +131,10 @@ PARAM_SCHEMAS = {
         {'key': 'top_n', 'label': 'Top N 差异基因数', 'type': 'number', 'default': 20, 'help': '结果中展示的 Top N 差异基因数。用于火山图标注和 Top 基因 CSV 导出。'},
         {'key': 'base_mean_filter', 'label': '最低平均表达量', 'type': 'number', 'default': 1, 'step': 0.5, 'help': '过滤低表达基因。BaseMean 低于此值的基因不参与分析和绘图。建议 1-10。'},
         {'key': 'plot_genes', 'label': '额外展示基因（逗号分隔，可选）', 'type': 'text', 'default': '', 'help': '指定要额外绘制箱线图的基因名，多个用逗号分隔。Top 差异基因会自动生成箱线图，此字段用于补充其他感兴趣的基因。'},
+        {'key': 'comparisons', 'label': '多组比较（可选）', 'type': 'text', 'default': '',
+         'help': '多个比较用分号分隔，格式：A-vs-B;C-vs-D。填写后实验组/对照组参数被忽略。示例：DrugA-vs-Control;DrugB-vs-Control;DrugA-vs-DrugB'},
+        {'key': 'custom_groups', 'label': '自定义合并组（可选）', 'type': 'textarea', 'default': '',
+         'help': '每行一个定义，格式：新组名=原组1+原组2。示例：High=Treated_1h+Treated_3h。定义后可在多组比较中使用新组名。'},
     ],
     'bulk_pca': [
         {'key': 'n_comps', 'label': 'PCA 主成分数量', 'type': 'number', 'default': 10, 'help': 'PCA 主成分数量。通常 5-10 即可。样本数少时自动降至 n_samples-1。'},
@@ -165,6 +175,8 @@ PARAM_SCHEMAS = {
          'help': '模糊 c-means 聚类数。通常 4-8 可覆盖主要时间表达模式。需满足：显著时序基因数 >= 聚类数。'},
         {'key': 'fdr_threshold', 'label': 'FDR 阈值', 'type': 'number', 'default': 0.05, 'step': 0.01,
          'help': 'BH 校正后的 FDR 显著性阈值。0.05 为标准，0.01 为严格。'},
+        {'key': 'pairwise_groups', 'label': '分组配对比较（可选）', 'type': 'text', 'default': '',
+         'help': '格式：GroupA-vs-GroupB。在每个时间点对两组做 Welch t-test，生成时序差异热图。需同时填写分组列名。'},
     ],
 }
 
@@ -226,6 +238,19 @@ def analyze(pid, module_name):
         if not input_path:
             flash('请选择输入数据', 'danger')
             return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
+        # 注入 _visualization 和 _filters 到 params
+        viz_json = request.form.get('_visualization', '')
+        filters_json = request.form.get('_filters', '')
+        if viz_json:
+            try:
+                params['_visualization'] = json.loads(viz_json)
+            except json.JSONDecodeError:
+                pass
+        if filters_json:
+            try:
+                params['_filters'] = json.loads(filters_json)
+            except json.JSONDecodeError:
+                pass
         task = AnalysisTask(project_id=pid, module_name=module_name,
                            params_json=json.dumps(params))
         task.save()
