@@ -15,6 +15,7 @@ from .bulk_pca import BulkPCAAnalysis
 from .bulk_heatmap import BulkHeatmapAnalysis
 from .bulk_enrichment import BulkEnrichmentAnalysis
 from .bulk_timecourse import BulkTimecourseAnalysis
+from .bulk_deg_integration import BulkDEGIntegrationAnalysis
 from .convert_10x import Convert10x
 
 MODULE_REGISTRY = {
@@ -37,6 +38,7 @@ MODULE_REGISTRY = {
     'bulk_heatmap': BulkHeatmapAnalysis,
     'bulk_enrichment': BulkEnrichmentAnalysis,
     'bulk_timecourse': BulkTimecourseAnalysis,
+    'bulk_deg_integration': BulkDEGIntegrationAnalysis,
     # 数据导入模块
     'convert_10x': Convert10x,
 }
@@ -45,6 +47,7 @@ PIPELINE_ORDER = [
     'qc', 'preprocess', 'dimred', 'batch_correct', 'clustering',
     'qc_reassess', 'annotation', 'deg', 'trajectory', 'proportion',
     'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca', 'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
+    'bulk_deg_integration',
 ]
 
 # 模块依赖约束：value 中的模块必须在 key 之前执行

@@ -27,6 +27,7 @@ BULK_MODULE_LIST = [
     {'name': 'bulk_heatmap', 'display': '热图分析', 'desc': 'Top 差异基因热图、样本相关性热图'},
     {'name': 'bulk_enrichment', 'display': '通路富集', 'desc': 'GO/KEGG/WikiPathways 通路富集分析（ORA / GSEA）'},
     {'name': 'bulk_timecourse', 'display': '时序分析', 'desc': '多时间点差异基因检测 + 轨迹聚类'},
+    {'name': 'bulk_deg_integration', 'display': '多组差异整合', 'desc': '多组比较结果整合：Upset 图、一致性评分、logFC 矩阵分析'},
 ]
 
 MODULE_LIST = SC_MODULE_LIST + BULK_MODULE_LIST
@@ -204,6 +205,16 @@ PARAM_SCHEMAS = {
          'help': 'BH 校正后的 FDR 显著性阈值。0.05 为标准，0.01 为严格。'},
         {'key': 'pairwise_groups', 'label': '分组配对比较（可选）', 'type': 'text', 'default': '',
          'help': '格式：GroupA-vs-GroupB。在每个时间点对两组做 Welch t-test，生成时序差异热图。需同时填写分组列名。'},
+    ],
+    'bulk_deg_integration': [
+        {'key': 'min_comparisons', 'label': '最小比较数', 'type': 'number', 'default': 2, 'step': 1,
+         'help': '基因至少在 N 个比较中显著才纳入一致性分析。建议 2-3。'},
+        {'key': 'consistency_n', 'label': 'Top N 一致性基因', 'type': 'number', 'default': 50, 'step': 5,
+         'help': '一致性评分最高的 Top N 基因用于热图和排名展示。'},
+        {'key': 'fc_threshold', 'label': 'Fold Change 阈值', 'type': 'number', 'default': 2.0, 'step': 0.1,
+         'help': '差异基因判定的 FC 阈值（与 bulk_deg 保持一致）。'},
+        {'key': 'pval_threshold', 'label': 'padj 显著性阈值', 'type': 'number', 'default': 0.05, 'step': 0.01,
+         'help': '差异基因判定的 padj 阈值（与 bulk_deg 保持一致）。'},
     ],
 }
 
