@@ -25,8 +25,28 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         method = self.params.get('method', 'deseq2')
         self.progress(20, f"标准化方法: {method}...")
 
+        # 前置过滤参数
+        min_expr_value = float(self.params.get('min_expr_value', 1))
+        min_expr_samples = int(self.params.get('min_expr_samples', 3))
+        max_zero_pct = float(self.params.get('max_zero_pct', 0))
+
+        # 低表达基因前置过滤
+        n_genes_before = adata.n_vars
+        if min_expr_samples > 0:
+            raw_for_filter = adata.X.toarray() if hasattr(adata.X, 'toarray') else np.asarray(adata.X)
+            lib_for_filter = raw_for_filter.sum(axis=1, keepdims=True)
+            lib_for_filter[lib_for_filter == 0] = 1
+            cpm_check = raw_for_filter / lib_for_filter * 1e6
+            n_expr = np.array((cpm_check >= min_expr_value).sum(axis=0)).flatten()
+            gene_mask = n_expr >= min_expr_samples
+            if max_zero_pct > 0:
+                zero_pct = np.array((raw_for_filter == 0).sum(axis=0)).flatten() / adata.n_obs * 100
+                gene_mask = gene_mask & (zero_pct <= max_zero_pct)
+            adata = adata[:, gene_mask].copy()
+
         raw_counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
         raw_counts = raw_counts.astype(float)
+        adata.layers['raw'] = raw_counts.copy()
         raw_lib = raw_counts.sum(axis=1)
 
         if method == 'deseq2':
@@ -54,6 +74,16 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             adata.X = _np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
             if 'normalized' in adata.layers:
                 adata.layers['normalized'] = _np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
+
+        elif method == 'tmm':
+            tmm_factors = _tmm_normalize(raw_counts)
+            tmm_factors = np.where(tmm_factors > 0, tmm_factors, 1.0)
+            adata.obs['size_factor'] = tmm_factors
+            norm_counts = raw_counts / tmm_factors[:, None]
+            adata.layers['normalized'] = norm_counts
+            adata.X = np.log2(norm_counts + 1)
+            adata.X = np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
+            adata.layers['normalized'] = np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
 
         elif method == 'cpm':
             lib_sizes = raw_counts.sum(axis=1, keepdims=True)
@@ -85,6 +115,42 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             adata.X = _np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
             if 'normalized' in adata.layers:
                 adata.layers['normalized'] = _np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
+
+        elif method == 'vst':
+            from scipy.stats import gmean
+            counts_for_sf = raw_counts[raw_counts.sum(axis=1) > 0]
+            nonzero_mask = (counts_for_sf > 0).all(axis=0)
+            if nonzero_mask.sum() == 0:
+                geo_means = np.exp(np.log(counts_for_sf + 1).mean(axis=0))
+            else:
+                geo_means = np.ones(counts_for_sf.shape[1])
+                geo_means[nonzero_mask] = gmean(counts_for_sf[:, nonzero_mask], axis=0)
+            ratios = counts_for_sf / (geo_means + 1e-10)
+            size_factors = np.median(ratios, axis=1)
+            size_factors = np.where(size_factors > 0, size_factors, 1.0)
+            adata.obs['size_factor'] = size_factors
+            adata.X = _vst_transform(raw_counts, size_factors)
+
+        elif method == 'rlog':
+            from scipy.stats import gmean
+            counts_for_sf = raw_counts[raw_counts.sum(axis=1) > 0]
+            nonzero_mask = (counts_for_sf > 0).all(axis=0)
+            if nonzero_mask.sum() == 0:
+                geo_means = np.exp(np.log(counts_for_sf + 1).mean(axis=0))
+            else:
+                geo_means = np.ones(counts_for_sf.shape[1])
+                geo_means[nonzero_mask] = gmean(counts_for_sf[:, nonzero_mask], axis=0)
+            ratios = counts_for_sf / (geo_means + 1e-10)
+            size_factors = np.median(ratios, axis=1)
+            size_factors = np.where(size_factors > 0, size_factors, 1.0)
+            adata.obs['size_factor'] = size_factors
+            adata.X = _rlog_transform(raw_counts, size_factors)
+
+        # 统一输出标记
+        adata.uns['normalization'] = {
+            'method': method,
+            'is_log_transformed': method in ('deseq2', 'tmm', 'cpm', 'log2_quantile', 'rlog'),
+        }
 
         self.progress(60, "生成标准化前后对比图...")
         plots_dir = os.path.join(self.project_dir, 'plots')
