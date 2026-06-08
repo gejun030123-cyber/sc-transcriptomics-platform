@@ -409,8 +409,15 @@ class BulkQCAnalysis(BaseAnalysis):
         self.progress(90, "保存输出...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')
         os.makedirs(intermediate_dir, exist_ok=True)
+        # 移除临时分组列
+        if '_auto_group' in adata_filtered.obs.columns:
+            adata_filtered.obs.drop(columns=['_auto_group'], inplace=True)
+
         output_path = os.path.join(intermediate_dir, 'bulk_qc_output.h5ad')
         adata_filtered.write_h5ad(output_path)
+
+        removed_samples = [r['sample'] for r in filter_log_rows if not r['passed']]
+        removed_reasons = {r['sample']: r['fail_reasons'] for r in filter_log_rows if not r['passed']}
 
         self.progress(100, "完成")
         return {
@@ -420,9 +427,17 @@ class BulkQCAnalysis(BaseAnalysis):
                 'samples_before': n_before,
                 'samples_after': n_after,
                 'samples_removed': n_before - n_after,
-                'genes_total': adata_filtered.n_vars,
+                'removed_samples': removed_samples,
+                'removed_reasons': removed_reasons,
+                'genes_before': genes_before_filter,
+                'genes_after': adata_filtered.n_vars,
+                'genes_removed': genes_before_filter - adata_filtered.n_vars,
+                'outlier_samples': outlier_samples if detect_outliers else [],
+                'filter_strategy': filter_strategy,
                 'median_lib_size': int(np.median(adata_filtered.obs['total_counts'])),
                 'median_genes': int(np.median(adata_filtered.obs['n_genes_by_counts'])),
+                'median_ribo_pct': round(float(np.median(adata_filtered.obs['pct_counts_ribo'])), 2) if 'pct_counts_ribo' in adata_filtered.obs.columns else 0,
+                'median_gini': round(float(np.median([_gini(raw_counts[sample_names.index(s)]) for s in adata_filtered.obs.index.tolist()])), 4),
             }
         }
 
