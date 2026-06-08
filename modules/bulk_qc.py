@@ -194,6 +194,12 @@ class BulkQCAnalysis(BaseAnalysis):
         corr_matrix = np.corrcoef(corr_data)
         sample_labels_corr = norm_for_corr.obs.index.tolist()
 
+        # 分组颜色
+        filtered_groups = [groups[sample_names.index(s)] for s in sample_labels_corr]
+        unique_groups = sorted(set(filtered_groups))
+        group_color_map = {g: f'hsl({i*360//max(1,len(unique_groups))},70%,50%)' for i, g in enumerate(unique_groups)}
+        group_colors = [group_color_map[g] for g in filtered_groups]
+
         fig_corr = go.Figure()
         fig_corr.add_trace(go.Heatmap(
             z=corr_matrix.tolist(), x=sample_labels_corr, y=sample_labels_corr,
@@ -201,10 +207,18 @@ class BulkQCAnalysis(BaseAnalysis):
             colorbar=dict(title='Pearson r'),
             hovertemplate='%{y} vs %{x}<br>r = %{z:.3f}<extra></extra>'
         ))
+        # 分组 annotation bar (y-axis color strip via annotations)
+        for i, (sample, color) in enumerate(zip(sample_labels_corr, group_colors)):
+            fig_corr.add_annotation(
+                x=-0.02, y=i, xref='paper', yref='y',
+                text='', showarrow=False,
+                xanchor='right',
+                bgcolor=color, bordercolor=color, width=12, height=12)
         fig_corr.update_layout(
             title='样本相关性热图 (Pearson)',
-            height=max(400, n_after * 30 + 100), width=max(400, n_after * 30 + 100),
-            plot_bgcolor='white'
+            height=max(400, n_after * 30 + 100), width=max(500, n_after * 30 + 200),
+            plot_bgcolor='white',
+            margin=dict(l=80)
         )
         fpath = os.path.join(plots_dir, 'bulk_qc_corr.json')
         with open(fpath, 'w') as f: f.write(fig_corr.to_json(engine="json"))
@@ -219,19 +233,46 @@ class BulkQCAnalysis(BaseAnalysis):
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': '样本过滤结果'})
 
         self.progress(80, "运行 PCA 离群检测...")
+        outlier_samples = []
         sc.pp.normalize_total(adata_filtered, target_sum=1e6)
         sc.pp.log1p(adata_filtered)
-        sc.pp.pca(adata_filtered, n_comps=min(10, n_after - 1))
-        fig_pca = go.Figure()
-        pc = adata_filtered.obsm['X_pca']
-        fig_pca.add_trace(go.Scattergl(x=pc[:, 0], y=pc[:, 1], mode='markers+text',
-            text=adata_filtered.obs.index.tolist(), textposition='top center',
-            marker=dict(size=8, color='#1a237e')))
-        fig_pca.update_layout(title='质控后样本 PCA', xaxis_title='PC1', yaxis_title='PC2',
-                             plot_bgcolor='white', width=600, height=500)
-        fpath = os.path.join(plots_dir, 'bulk_qc_pca.json')
-        with open(fpath, 'w') as f: f.write(fig_pca.to_json(engine="json"))
-        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': '样本 PCA'})
+        n_comps = min(10, n_after - 1)
+        if n_comps >= 2:
+            sc.pp.pca(adata_filtered, n_comps=n_comps)
+            pc = adata_filtered.obsm['X_pca']
+            filtered_sample_names = adata_filtered.obs.index.tolist()
+            filtered_groups_pca = [groups[sample_names.index(s)] for s in filtered_sample_names]
+            unique_groups_pca = sorted(set(filtered_groups_pca))
+            group_color_map_pca = {g: f'hsl({i*360//max(1,len(unique_groups_pca))},70%,50%)' for i, g in enumerate(unique_groups_pca)}
+
+            # 离群检测
+            if detect_outliers:
+                outlier_samples = _detect_outliers_mahal(pc, filtered_sample_names)
+
+            fig_pca = go.Figure()
+            for g in unique_groups_pca:
+                grp_idx = [i for i in range(n_after) if filtered_groups_pca[i] == g]
+                fig_pca.add_trace(go.Scattergl(
+                    x=pc[grp_idx, 0].tolist(), y=pc[grp_idx, 1].tolist(),
+                    mode='markers+text',
+                    text=[filtered_sample_names[i] for i in grp_idx],
+                    textposition='top center',
+                    marker=dict(size=8, color=group_color_map_pca[g]),
+                    name=g))
+            # 离群点高亮
+            if outlier_samples:
+                out_idx = [filtered_sample_names.index(s) for s in outlier_samples if s in filtered_sample_names]
+                if out_idx:
+                    fig_pca.add_trace(go.Scattergl(
+                        x=pc[out_idx, 0].tolist(), y=pc[out_idx, 1].tolist(),
+                        mode='markers',
+                        marker=dict(size=14, color='red', symbol='x', line=dict(width=2, color='darkred')),
+                        name='离群样本'))
+            fig_pca.update_layout(title='质控后样本 PCA', xaxis_title='PC1', yaxis_title='PC2',
+                                 plot_bgcolor='white', width=600, height=500)
+            fpath = os.path.join(plots_dir, 'bulk_qc_pca.json')
+            with open(fpath, 'w') as f: f.write(fig_pca.to_json(engine="json"))
+            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': '样本 PCA'})
 
         # PCA 方差解释 elbow 图
         pca_var = np.var(adata_filtered.obsm['X_pca'], axis=0)
