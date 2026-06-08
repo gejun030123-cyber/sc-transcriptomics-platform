@@ -169,15 +169,54 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         with open(fpath, 'w') as f: f.write(fig.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': '文库大小对比'})
 
-        if method == 'deseq2':
+        if method in ('deseq2', 'tmm') and 'size_factor' in adata.obs.columns:
             fig_sf = go.Figure()
             fig_sf.add_trace(go.Bar(x=adata.obs.index.tolist(), y=adata.obs['size_factor'].values,
                                    marker_color='#1a237e'))
-            fig_sf.update_layout(title='DESeq2 Size Factors', yaxis_title='Size Factor',
+            fig_sf.update_layout(title=f'{method.upper()} Size Factors', yaxis_title='Size Factor',
                                 plot_bgcolor='white', width=600, height=300)
             fpath = os.path.join(plots_dir, 'bulk_norm_sizefactors.json')
             with open(fpath, 'w') as f: f.write(fig_sf.to_json(engine="json"))
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': 'Size Factors'})
+
+        # 标准化前后箱线图对比
+        sample_labels = adata.obs.index.tolist()
+        fig_box = make_subplots(rows=1, cols=2, subplot_titles=['标准化前 (log2 raw)', '标准化后'])
+        for i in range(adata.n_obs):
+            fig_box.add_trace(go.Box(y=np.log2(raw_counts[i] + 1), name=sample_labels[i],
+                                     showlegend=False, marker_color='#e53935'), row=1, col=1)
+            fig_box.add_trace(go.Box(y=adata.X[i].tolist(), name=sample_labels[i],
+                                     showlegend=False, marker_color='#4caf50'), row=1, col=2)
+        fig_box.update_layout(height=400, width=800, title='标准化前后表达分布对比')
+        fpath = os.path.join(plots_dir, 'bulk_norm_boxplot_compare.json')
+        with open(fpath, 'w') as f: f.write(fig_box.to_json(engine="json"))
+        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': '表达分布对比'})
+
+        # PCA 前后对比
+        n_pcs = min(10, adata.n_obs - 1)
+        if n_pcs >= 2:
+            fig_pca = make_subplots(rows=1, cols=2, subplot_titles=['原始数据 PCA', '标准化后 PCA'])
+            # 原始数据 PCA
+            adata_raw_pca = sc.AnnData(X=np.log2(raw_counts + 1), obs=adata.obs.copy())
+            sc.pp.scale(adata_raw_pca, max_value=10)
+            sc.pp.pca(adata_raw_pca, n_comps=n_pcs)
+            pc_raw = adata_raw_pca.obsm['X_pca']
+            fig_pca.add_trace(go.Scattergl(x=pc_raw[:, 0].tolist(), y=pc_raw[:, 1].tolist(),
+                mode='markers+text', text=sample_labels, textposition='top center',
+                marker=dict(size=8, color='#e53935'), showlegend=False), row=1, col=1)
+            # 标准化后 PCA
+            adata_norm_pca = sc.AnnData(X=adata.X.copy(), obs=adata.obs.copy())
+            sc.pp.scale(adata_norm_pca, max_value=10)
+            sc.pp.pca(adata_norm_pca, n_comps=n_pcs)
+            pc_norm = adata_norm_pca.obsm['X_pca']
+            fig_pca.add_trace(go.Scattergl(x=pc_norm[:, 0].tolist(), y=pc_norm[:, 1].tolist(),
+                mode='markers+text', text=sample_labels, textposition='top center',
+                marker=dict(size=8, color='#4caf50'), showlegend=False), row=1, col=2)
+            fig_pca.update_layout(height=400, width=900, title='标准化前后 PCA 对比',
+                                  plot_bgcolor='white')
+            fpath = os.path.join(plots_dir, 'bulk_norm_pca_compare.json')
+            with open(fpath, 'w') as f: f.write(fig_pca.to_json(engine="json"))
+            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': 'PCA 前后对比'})
 
         self.progress(85, "保存结果...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')
@@ -192,8 +231,11 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             'summary': {
                 'method': method,
                 'n_samples': adata.n_obs,
-                'n_genes': adata.n_vars,
+                'n_genes_before_filter': n_genes_before,
+                'n_genes_after_filter': adata.n_vars,
+                'genes_filtered': n_genes_before - adata.n_vars,
                 'median_size_factor': round(float(adata.obs['size_factor'].median()), 3) if 'size_factor' in adata.obs.columns else None,
+                'is_log_transformed': adata.uns.get('normalization', {}).get('is_log_transformed', True),
             }
         }
 
