@@ -15,6 +15,7 @@ def task_detail(pid, task_id):
         return redirect(url_for('main.index'))
     files = ResultFile.get_by_task(task_id)
     plotly_files = [f for f in files if f.file_type == 'plotly_json']
+    image_files = [f for f in files if f.file_type in ('png', 'svg', 'jpg', 'jpeg')]
     csv_files = [f for f in files if f.file_type == 'csv']
     result_data = {}
     try:
@@ -33,7 +34,7 @@ def task_detail(pid, task_id):
         pass
 
     return render_template('analysis_result.html', project=p, task=t,
-                          plotly_files=plotly_files, csv_files=csv_files,
+                          plotly_files=plotly_files, image_files=image_files, csv_files=csv_files,
                           result_data=result_data,
                           module_display=MODULE_DISPLAY_MAP.get(t.module_name, t.module_name),
                           status_cn=STATUS_MAP.get(t.status, t.status),

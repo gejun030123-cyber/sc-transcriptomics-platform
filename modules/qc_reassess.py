@@ -63,7 +63,7 @@ class QCReassessAnalysis(BaseAnalysis):
             })
 
         stats_df = pd.DataFrame(cluster_stats)
-        csv_path = os.path.join(results_dir, 'qc_reassess_clusters.csv')
+        csv_path = os.path.join(results_dir, 'low_quality_clusters.csv')
         stats_df.to_csv(csv_path, index=False)
         result_files.append({'file_path': csv_path, 'file_type': 'csv', 'category': 'table', 'label': '簇 QC 统计'})
 
@@ -84,12 +84,43 @@ class QCReassessAnalysis(BaseAnalysis):
             with open(fpath, 'w') as f: f.write(json.dumps(fig))
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': 'MT% UMAP'})
 
-        # UMAP with cluster highlighting
+        # UMAP with cluster highlighting (low-quality clusters in red)
         if 'X_umap' in adata.obsm:
-            fig = umap_scatter(adata, cluster_key, title=f'Clusters ({cluster_key})')
+            umap_coords = adata.obsm['X_umap']
+            low_quality_set = set(stats_df[stats_df['low_quality']]['cluster'].tolist())
+            cluster_labels = adata.obs[cluster_key].astype(str)
+            unique_clusters = sorted(cluster_labels.unique())
+
+            fig = go.Figure()
+            for cl in unique_clusters:
+                mask = cluster_labels == cl
+                is_low = cl in low_quality_set
+                fig.add_trace(go.Scattergl(
+                    x=umap_coords[mask, 0], y=umap_coords[mask, 1],
+                    mode='markers',
+                    marker=dict(size=4, opacity=0.3 if is_low else 0.7),
+                    name=f'{cl}' + (' (low quality)' if is_low else ''),
+                ))
+
+            # Overlay low-quality clusters with red highlight
+            if low_quality_set:
+                low_mask = cluster_labels.isin(low_quality_set)
+                fig.add_trace(go.Scattergl(
+                    x=umap_coords[low_mask, 0], y=umap_coords[low_mask, 1],
+                    mode='markers',
+                    marker=dict(size=6, color='rgba(255,0,0,0.4)', line=dict(width=1, color='red')),
+                    name='Low Quality Highlight',
+                    showlegend=True,
+                ))
+
+            fig.update_layout(
+                title=f'Clusters ({cluster_key}) — Low Quality Highlighted',
+                xaxis_title='UMAP1', yaxis_title='UMAP2',
+                plot_bgcolor='white', width=700, height=500,
+            )
             fpath = os.path.join(plots_dir, 'qc_reassess_clusters_umap.json')
-            with open(fpath, 'w') as f: f.write(json.dumps(fig))
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': '聚类 UMAP'})
+            with open(fpath, 'w') as f: f.write(fig.to_json(engine="json"))
+            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': '聚类 UMAP（低质量簇高亮）'})
 
         self.progress(90, "保存输出...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')

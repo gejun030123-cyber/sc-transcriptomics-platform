@@ -256,6 +256,41 @@ def column_values():
         return jsonify({'values': []})
 
 
+@api_bp.route('/projects/<pid>/deg-comparisons')
+def deg_comparisons(pid):
+    results_dir = os.path.join(Config.DATA_DIR, 'projects', pid, 'results')
+    if not os.path.isdir(results_dir):
+        return jsonify({'comparisons': []})
+
+    csv_files = sorted([f for f in os.listdir(results_dir)
+                        if f.startswith('bulk_deg_results_') and f.endswith('.csv')])
+
+    # 从 ResultFile 表提取真实比较名（如 "moclel vs hmc3"）
+    label_map = {}
+    try:
+        from models import AnalysisTask, ResultFile
+        for t in AnalysisTask.get_by_project(pid):
+            if t.module_name != 'bulk_deg':
+                continue
+            for rf in ResultFile.get_by_task(t.id):
+                fname = os.path.basename(rf.file_path)
+                if fname in csv_files and rf.label and 'vs' in rf.label:
+                    # 从 "差异表达基因列表 (moclel vs hmc3)" 提取 "moclel vs hmc3"
+                    lbl = rf.label
+                    if '(' in lbl and ')' in lbl:
+                        lbl = lbl.split('(')[-1].rstrip(')')
+                    label_map[fname] = lbl
+    except Exception:
+        pass
+
+    comparisons = []
+    for f in csv_files:
+        key = f.replace('bulk_deg_', '').replace('.csv', '')
+        comparisons.append({'key': key, 'label': label_map.get(f, key)})
+
+    return jsonify({'comparisons': comparisons})
+
+
 @api_bp.route('/data-info')
 def data_info():
     """返回输入文件的基本数据信息（样本数、基因数、样本名、注释列）"""

@@ -207,6 +207,9 @@ PARAM_SCHEMAS = {
          'help': '格式：GroupA-vs-GroupB。在每个时间点对两组做 Welch t-test，生成时序差异热图。需同时填写分组列名。'},
     ],
     'bulk_deg_integration': [
+        {'key': 'selected_comparisons', 'label': '选择比较（留空=全部）', 'type': 'multiselect',
+         'api': '/api/projects/{pid}/deg-comparisons', 'default': '',
+         'help': '勾选要参与整合分析的比较结果。不勾选则使用全部比较。'},
         {'key': 'min_comparisons', 'label': '最小比较数', 'type': 'number', 'default': 2, 'step': 1,
          'help': '基因至少在 N 个比较中显著才纳入一致性分析。建议 2-3。'},
         {'key': 'consistency_n', 'label': 'Top N 一致性基因', 'type': 'number', 'default': 50, 'step': 5,

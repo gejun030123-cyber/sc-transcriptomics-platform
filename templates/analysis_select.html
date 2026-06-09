@@ -112,6 +112,10 @@
                     {% elif param.type == 'checkbox' %}
                     <input type="checkbox" name="{{ param.key }}" class="form-check-input"
                            {% if param.default %}checked{% endif %}>
+                    {% elif param.type == 'multiselect' %}
+                    <div class="multiselect-group border rounded p-2" data-key="{{ param.key }}" data-api="{{ param.api }}" style="max-height:180px;overflow-y:auto;">
+                        <span class="text-muted small multiselect-loading">加载中...</span>
+                    </div>
                     {% elif param.type == 'textarea' %}
                     <textarea name="{{ param.key }}" class="form-control" id="param-{{ param.key }}"
                               rows="3" placeholder="{{ param.help }}">{{ param.default }}</textarea>
@@ -215,10 +219,20 @@ function collectCurrentParams() {
         const name = el.name;
         if (!name || name === 'input_path') return;
         if (el.type === 'checkbox') {
+            if (el.closest('.multiselect-group')) {
+                // multiselect checkboxes are handled below
+                return;
+            }
             params[name] = el.checked;
         } else {
             params[name] = el.value;
         }
+    });
+    // collect multiselect groups
+    document.querySelectorAll('.multiselect-group').forEach(group => {
+        const key = group.dataset.key;
+        const checked = Array.from(group.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+        params[key] = checked.join(',');
     });
     return params;
 }
@@ -226,6 +240,15 @@ function collectCurrentParams() {
 function applyPresetToForm(presetParams) {
     if (!presetParams) return;
     Object.entries(presetParams).forEach(([key, value]) => {
+        // check multiselect group first
+        const group = document.querySelector(`.multiselect-group[data-key="${key}"]`);
+        if (group) {
+            const vals = typeof value === 'string' ? value.split(',') : (Array.isArray(value) ? value : []);
+            group.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                cb.checked = vals.includes(cb.value);
+            });
+            return;
+        }
         const el = document.querySelector(`[name="${key}"]`);
         if (!el) return;
         if (el.type === 'checkbox') {
@@ -300,6 +323,42 @@ document.getElementById('btn-confirm-save').addEventListener('click', async () =
 });
 
 loadPresets();
+
+// === Multiselect 动态加载 ===
+document.querySelectorAll('.multiselect-group').forEach(async (group) => {
+    const api = group.dataset.api;
+    const key = group.dataset.key;
+    if (!api) return;
+    try {
+        const resp = await fetch(api.replace('{pid}', PROJECT_ID));
+        const data = await resp.json();
+        const items = data.comparisons || data.values || data.items || [];
+        const loading = group.querySelector('.multiselect-loading');
+        if (loading) loading.remove();
+        if (items.length === 0) {
+            group.innerHTML = '<span class="text-muted small">未找到比较结果，请先运行 bulk_deg</span>';
+            return;
+        }
+        items.forEach(item => {
+            const val = typeof item === 'string' ? item : item.key;
+            const lbl = typeof item === 'string' ? item : (item.label || item.key);
+            const label = document.createElement('label');
+            label.className = 'd-block small mb-1';
+            label.style.cursor = 'pointer';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.value = val;
+            cb.className = 'form-check-input me-1';
+            cb.name = key;
+            label.appendChild(cb);
+            label.appendChild(document.createTextNode(lbl));
+            group.appendChild(label);
+        });
+    } catch (e) {
+        const loading = group.querySelector('.multiselect-loading');
+        if (loading) loading.textContent = '加载失败';
+    }
+});
 
 // 表单提交时注入 _visualization 配置
 document.querySelector('.param-form').addEventListener('submit', function() {

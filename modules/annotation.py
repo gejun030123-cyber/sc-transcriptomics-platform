@@ -31,9 +31,25 @@ DEFAULT_IMMUNE_MARKERS = {
     'pDC': ['GZMB', 'IL3RA', 'COBLL1', 'TCF4'],
 }
 
+DEFAULT_BLOOD_MARKERS = {
+    'HSC': ['CD34', 'CD38', 'KIT', 'THY1', 'CRHBP'],
+    'Erythroid': ['HBA1', 'HBA2', 'HBB', 'GYPA', 'SLC4A1'],
+    'Megakaryocyte': ['PF4', 'GP9', 'ITGA2B', 'VWF', 'GP1BA'],
+    'Monocyte': ['CD14', 'LYZ', 'S100A8', 'S100A9', 'VCAN'],
+    'Neutrophil': ['FCGR3B', 'CSF3R', 'CXCR2', 'S100A12', 'MPO'],
+    'Eosinophil': ['SIGLEC8', 'IL5RA', 'CCR3', 'EPX', 'PRG2'],
+    'Basophil': ['HDC', 'MS4A2', 'KIT', 'FCER1A', 'CPA3'],
+    'B cell': ['CD79A', 'MS4A1', 'CD19', 'PAX5', 'CD79B'],
+    'T cell': ['CD3D', 'CD3E', 'CD2', 'TRAC', 'CD3G'],
+    'NK cell': ['NKG7', 'GNLY', 'KLRD1', 'NCAM1', 'PRF1'],
+    'Dendritic cell': ['FCER1A', 'CD1C', 'CLEC10A', 'ITGAX', 'HLA-DRA'],
+    'pDC': ['GZMB', 'IL3RA', 'COBLL1', 'TCF4', 'IRF7'],
+}
+
 MARKER_SETS = {
     'TME': DEFAULT_TME_MARKERS,
     'Immune': DEFAULT_IMMUNE_MARKERS,
+    'Blood': DEFAULT_BLOOD_MARKERS,
 }
 
 class AnnotationAnalysis(BaseAnalysis):
@@ -67,8 +83,9 @@ class AnnotationAnalysis(BaseAnalysis):
 
         if custom_markers_str:
             # Parse custom markers: "CellType1:GENE1,GENE2;CellType2:GENE3,GENE4"
+            # Also supports newline-separated format
             markers = {}
-            for ct_genes in custom_markers_str.split(';'):
+            for ct_genes in custom_markers_str.replace('\n', ';').split(';'):
                 ct_genes = ct_genes.strip()
                 if ':' in ct_genes:
                     ct, genes_str = ct_genes.split(':', 1)

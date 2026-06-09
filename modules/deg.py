@@ -78,11 +78,20 @@ class DEGAnalysis(BaseAnalysis):
         # DEG Dotplot
         if self.params.get('show_dotplot', True):
             try:
-                top_genes_list = []
-                for g in groups:
-                    group_df = sc.get.rank_genes_groups_df(adata, group=g)
-                    top_genes_list.extend(group_df.head(5)['names'].tolist())
-                top_genes_list = list(dict.fromkeys(top_genes_list))[:30]
+                custom_dotplot_str = self.params.get('custom_dotplot_genes', '').strip()
+                if custom_dotplot_str:
+                    top_genes_list = [g.strip() for g in custom_dotplot_str.replace('\n', ',').split(',') if g.strip()]
+                    not_found = [g for g in top_genes_list if g not in adata.var_names]
+                    top_genes_list = [g for g in top_genes_list if g in adata.var_names]
+                    dotplot_label = '自定义基因 Dotplot'
+                else:
+                    top_genes_list = []
+                    not_found = []
+                    for g in groups:
+                        group_df = sc.get.rank_genes_groups_df(adata, group=g)
+                        top_genes_list.extend(group_df.head(5)['names'].tolist())
+                    top_genes_list = list(dict.fromkeys(top_genes_list))[:30]
+                    dotplot_label = 'DEG Dotplot'
 
                 if top_genes_list:
                     sc.tl.dendrogram(adata, groupby=groupby)
@@ -97,7 +106,7 @@ class DEGAnalysis(BaseAnalysis):
                     fpath = os.path.join(plots_dir, 'deg_dotplot.json')
                     with open(fpath, 'w') as f:
                         json.dump({'data': [{'type': 'image', 'source': f'data:image/png;base64,{img_b64}', 'xref': 'paper', 'yref': 'paper', 'x': 0, 'y': 1, 'sizex': 1, 'sizey': 1, 'sizing': 'stretch'}], 'layout': {'width': 900, 'height': 500, 'title': 'DEG Dotplot'}}, f)
-                    result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'dotplot', 'label': 'DEG Dotplot'})
+                    result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'dotplot', 'label': dotplot_label})
             except Exception:
                 pass
 
@@ -138,5 +147,6 @@ class DEGAnalysis(BaseAnalysis):
                 'groups': list(groups),
                 'method': method,
                 'total_deg_genes': len(deg_data),
+                'custom_dotplot_genes': self.params.get('custom_dotplot_genes', '').strip() or None,
             }
         }

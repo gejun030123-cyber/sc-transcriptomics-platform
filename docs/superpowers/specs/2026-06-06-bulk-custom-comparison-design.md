@@ -175,21 +175,82 @@ BH FDR 校正 → q-value 矩阵
 
 ## 第 5 部分：routes/analysis.py 参数更新
 
-在 `PARAM_SCHEMAS` 中为以上 4 个模块添加新参数定义（见各部分参数表）。
+在 `PARAM_SCHEMAS` 中为 4 个模块添加新参数定义。
 
-新增 `textarea` 类型支持：在模板渲染时使用 `<textarea>` 替代 `<input>`。
+### bulk_deg 新增参数
+
+在 `PARAM_SCHEMAS['bulk_deg']` 列表末尾（`plot_genes` 参数之后）追加：
+
+```python
+        {'key': 'comparisons', 'label': '多组比较（可选）', 'type': 'text', 'default': '',
+         'help': '多个比较用分号分隔，格式：A-vs-B;C-vs-D。填写后实验组/对照组参数被忽略。示例：DrugA-vs-Control;DrugB-vs-Control;DrugA-vs-DrugB'},
+        {'key': 'custom_groups', 'label': '自定义合并组（可选）', 'type': 'textarea', 'default': '',
+         'help': '每行一个定义，格式：新组名=原组1+原组2。示例：High=Treated_1h+Treated_3h。定义后可在多组比较中使用新组名。'},
+```
+
+### bulk_enrichment 新增参数
+
+已在 Task 2 中完成（`split_direction` checkbox + `custom_genes` textarea）。
+
+### bulk_heatmap 新增参数
+
+已在 Task 1 中完成（`custom_genes` textarea）。
+
+### bulk_timecourse 新增参数
+
+在 `PARAM_SCHEMAS['bulk_timecourse']` 列表末尾（`fdr_threshold` 参数之后）追加：
+
+```python
+        {'key': 'pairwise_groups', 'label': '分组配对比较（可选）', 'type': 'text', 'default': '',
+         'help': '格式：GroupA-vs-GroupB。在每个时间点对两组做 Welch t-test，生成时序差异热图。需同时填写分组列名。'},
+```
+
+### textarea 类型处理
+
+前端需要将 `type == 'textarea'` 的参数渲染为 `<textarea>` 元素（见第 6 部分）。`PARAM_SCHEMAS` 中无需额外配置，类型字段 `'textarea'` 即可驱动模板渲染。
+
+### 参数类型汇总
+
+| 参数 | 模块 | type | 说明 |
+|------|------|------|------|
+| `comparisons` | bulk_deg | `text` | 单行文本，分号分隔 |
+| `custom_groups` | bulk_deg | `textarea` | 多行文本，每行一个定义 |
+| `custom_genes` | bulk_enrichment | `textarea` | 多行文本，逗号或换行分隔 |
+| `custom_genes` | bulk_heatmap | `textarea` | 同上 |
+| `pairwise_groups` | bulk_timecourse | `text` | 单行文本，格式 `A-vs-B` |
 
 ---
 
 ## 第 6 部分：templates/analysis_select.html 增强
 
-在参数渲染循环中，对 `type == 'textarea'` 的参数使用：
+### textarea 渲染
+
+在参数渲染循环中，`checkbox` 块之后、`number` 块之前，插入 textarea 分支：
 
 ```html
 {% elif param.type == 'textarea' %}
-<textarea class="form-control" id="param-{{ param.key }}" name="{{ param.key }}"
+<textarea name="{{ param.key }}" class="form-control" id="param-{{ param.key }}"
           rows="3" placeholder="{{ param.help }}">{{ param.default }}</textarea>
 ```
+
+### 渲染优先级
+
+模板中的类型判断顺序（从上到下）：
+
+1. `dynamic_select` — 依赖其他参数的动态下拉
+2. `select` — 静态下拉
+3. `checkbox` — 复选框
+4. `textarea` — **新增**，多行文本区域
+5. `number` — 数字输入
+6. 默认 `<input type="text">` — 单行文本
+
+### 表单提交处理
+
+textarea 的值以字符串形式提交，后端模块自行解析（按换行/逗号分割）。前端无需额外 JavaScript 处理。
+
+### 样式
+
+使用 Bootstrap 5 的 `form-control` 类，`rows="3"` 提供合理的默认高度。`placeholder` 直接显示参数的 `help` 文本，提示用户输入格式。
 
 ---
 
@@ -216,6 +277,33 @@ BH FDR 校正 → q-value 矩阵
 
 ---
 
+## 错误处理策略
+
+| 场景 | 处理方式 |
+|------|----------|
+| `comparisons` 中的组名在 obs 中不存在 | 跳过该比较，在 summary 中报告 `skipped_comparisons` |
+| `custom_groups` 中的原组名不存在 | 保留原值，不创建映射（静默忽略不存在的成员） |
+| `custom_genes` 中所有基因均不在 var_names 中 | 抛出 `ValueError`，提示检查基因名 |
+| `pairwise_groups` 格式不正确（缺少 `-vs-`） | 跳过 pairwise 分析，在 summary 中提示格式错误 |
+| `split_direction` 开启但 regulation 列缺失 | 回退到标准 ORA（不拆分方向） |
+| 某个时间点样本数 < 2 | 跳过该时间点的 pairwise 比较 |
+
+---
+
+## 实施状态
+
+| 任务 | 模块 | 状态 | 提交 |
+|------|------|------|------|
+| 1 | bulk_heatmap（custom_genes） | ✅ 已完成 | `881c818` |
+| 2 | bulk_enrichment（split_direction + custom_genes） | ✅ 已完成 | `f23c95d` |
+| 3 | bulk_deg（comparisons + custom_groups） | ✅ 已完成 | — |
+| 4 | bulk_timecourse（pairwise_groups） | ✅ 已完成 | — |
+| 5 | routes/analysis.py + templates 更新 | ✅ 已完成 | — |
+
+> **说明**: Task 5 中，textarea 模板渲染已完成；bulk_deg 和 bulk_timecourse 的 PARAM_SCHEMAS 已在本次实现中完成（与 sc 模块一起更新）。
+
+---
+
 ## 实施顺序
 
 | 顺序 | 模块 | 预计时间 | 依赖 |
@@ -227,3 +315,57 @@ BH FDR 校正 → q-value 矩阵
 | 5 | routes/analysis.py + templates 更新 | 20min | 1-4 |
 
 Task 1-4 可并行实现。
+
+---
+
+## 测试与验收
+
+### 验收标准
+
+**bulk_deg 多组比较：**
+- 输入 `comparisons=DrugA-vs-Control;DrugB-vs-Control` 生成 2 组独立的火山图和 CSV
+- 合并 CSV `bulk_deg_all_comparisons.csv` 包含 `comparison` 列
+- `comparisons` 为空时，group1/group2 单次比较行为不变
+
+**bulk_deg 自定义合并组：**
+- 输入 `custom_groups=High=Treated_1h+Treated_3h` 后 obs._custom_group 列正确映射
+- comparisons 中可引用新组名 `High`
+- 未在 custom_groups 中列出的样本保留原始分组值
+
+**bulk_enrichment split_direction：**
+- 开启后生成 `enrichment_ora_up_bubble.json` 和 `enrichment_ora_down_bubble.json`
+- 合并 CSV 包含 `direction` 列（Up/Down）
+- regulation 列缺失时回退到标准 ORA
+
+**bulk_timecourse pairwise_groups：**
+- `pairwise_groups=Treated-vs-Control` 在每个时间点执行 Welch t-test
+- 生成 `timecourse_pairwise_results.csv` 和热图 JSON
+- BH FDR 校正应用于每个时间点独立
+
+**textarea 渲染：**
+- 访问 bulk_deg 分析页面，`comparisons` 和 `custom_groups` 参数正确渲染为 `<textarea>` 和 `<input type="text">`
+- 访问 bulk_enrichment 分析页面，`custom_genes` 参数正确渲染为 `<textarea>`
+
+### 验证命令
+
+```bash
+# 验证所有模块可导入
+python -c "from modules.bulk_deg import BulkDEGAnalysis; from modules.bulk_timecourse import BulkTimecourseAnalysis; print('OK')"
+
+# 验证 PARAM_SCHEMAS 完整性
+python -c "
+from routes.analysis import PARAM_SCHEMAS
+assert 'comparisons' in [p['key'] for p in PARAM_SCHEMAS['bulk_deg']]
+assert 'custom_groups' in [p['key'] for p in PARAM_SCHEMAS['bulk_deg']]
+assert 'pairwise_groups' in [p['key'] for p in PARAM_SCHEMAS['bulk_timecourse']]
+print('All params OK')
+"
+
+# 验证辅助函数
+python -c "
+from modules.bulk_deg import _parse_comparisons, _parse_custom_groups
+assert _parse_comparisons('A-vs-B;C-vs-D') == [('A','B'), ('C','D')]
+assert _parse_custom_groups('High=Treated_1h+Treated_3h\nLow=Ctrl') == {'High': ['Treated_1h', 'Treated_3h'], 'Low': ['Ctrl']}
+print('Helper functions OK')
+"
+```
