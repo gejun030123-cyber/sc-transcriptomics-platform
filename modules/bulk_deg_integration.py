@@ -66,7 +66,10 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
 
         min_comparisons = int(self.params.get('min_comparisons', 2))
         # 当比较数少时自动降低阈值，避免交集过窄
+        original_min = min_comparisons
         min_comparisons = min(min_comparisons, max(1, len(deg_files) - 1))
+        if min_comparisons != original_min:
+            self.progress(-1, f"警告: min_comparisons 从 {original_min} 自动调整为 {min_comparisons}（比较数不足）")
         consistency_n = int(self.params.get('consistency_n', 50))
         fc_threshold = float(self.params.get('fc_threshold', 2.0))
         pval_threshold = float(self.params.get('pval_threshold', 0.05))
@@ -131,6 +134,11 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
                     score = float(sig_signs[0] * np.mean(sig_neg_log_p))
                 else:
                     score = 0.0
+                exclude_mixed = self.params.get('exclude_mixed', False)
+                if isinstance(exclude_mixed, str):
+                    exclude_mixed = exclude_mixed.lower() in ('true', '1', 'yes', 'on')
+                if exclude_mixed and score == 0:
+                    continue
                 consistency_scores.append({
                     'gene': g, 'consistency_score': round(score, 4),
                     'n_significant': sig_count,
@@ -169,9 +177,13 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
                 isect = sig_sets[combo[0]].copy()
                 for c in combo[1:]:
                     isect &= sig_sets[c]
-                # 排除在其他比较中也显著的基因（标准 Upset 语义：仅属于该组合）
-                for o in all_comp_set - combo_set:
-                    isect -= sig_sets[o]
+                # Upset 严格模式：排除在其他比较中也显著的基因
+                upset_strict = self.params.get('upset_strict', True)
+                if isinstance(upset_strict, str):
+                    upset_strict = upset_strict.lower() in ('true', '1', 'yes', 'on')
+                if upset_strict:
+                    for o in all_comp_set - combo_set:
+                        isect -= sig_sets[o]
                 if isect:
                     intersection_data.append({'sets': ' ∩ '.join(combo), 'count': len(isect), 'n_sets': len(combo)})
         intersection_data.sort(key=lambda x: x['count'], reverse=True)
@@ -189,9 +201,9 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
             with open(fpath, 'w') as f: f.write(fig_upset.to_json(engine="json"))
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': 'Upset 交集图'})
 
-        # 2b. Venn 图（仅 2 个比较时生成）
+        # 2b. Venn 图（2 或 3 个比较时生成）
         self.progress(62, "生成 Venn 图...")
-        if len(comp_names) == 2:
+        if len(comp_names) in (2, 3):
             only_sets = {}
             for c in comp_names:
                 only = sig_sets[c].copy()
@@ -203,29 +215,56 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
             import matplotlib
             matplotlib.use('Agg')
             import matplotlib.pyplot as plt
-            from matplotlib.patches import Circle
 
-            fig_venn, ax = plt.subplots(1, 1, figsize=(6, 4))
-            c0, c1 = comp_names
-            x0, x1, r, y0 = -0.6, 0.6, 1.0, 0
-            ax.add_patch(Circle((x0, y0), r, fc='#e53935', alpha=0.35, ec='black', lw=1.5))
-            ax.add_patch(Circle((x1, y0), r, fc='#1565c0', alpha=0.35, ec='black', lw=1.5))
-            isect_01 = sig_sets[c0] & sig_sets[c1]
-            ax.text(x0 - 0.5, y0, str(len(only_sets[c0])), ha='center', va='center', fontsize=14, fontweight='bold')
-            ax.text(x1 + 0.5, y0, str(len(only_sets[c1])), ha='center', va='center', fontsize=14, fontweight='bold')
-            ax.text(0, y0, str(len(isect_01)), ha='center', va='center', fontsize=14, fontweight='bold')
-            ax.text(x0 - 0.5, y0 - 0.35, c0, ha='center', va='center', fontsize=9, color='#c62828')
-            ax.text(x1 + 0.5, y0 - 0.35, c1, ha='center', va='center', fontsize=9, color='#0d47a1')
-            ax.set_title(f'Venn: {c0} vs {c1}', fontsize=13)
-            ax.set_xlim(-2.2, 2.2)
-            ax.set_ylim(-1.5, 1.5)
-            ax.set_aspect('equal')
-            ax.axis('off')
-            plt.tight_layout()
-            fpath = os.path.join(plots_dir, 'deg_integration_venn.png')
-            fig_venn.savefig(fpath, dpi=150, bbox_inches='tight', facecolor='white')
-            plt.close(fig_venn)
-            result_files.append({'file_path': fpath, 'file_type': 'png', 'category': 'venn', 'label': 'Venn 图'})
+            try:
+                from matplotlib_venn import venn2, venn3
+                has_venn_lib = True
+            except ImportError:
+                has_venn_lib = False
+
+            if has_venn_lib:
+                fig_venn, ax = plt.subplots(1, 1, figsize=(6, 5))
+                if len(comp_names) == 2:
+                    c0, c1 = comp_names
+                    subsets = (
+                        len(only_sets[c0]),
+                        len(only_sets[c1]),
+                        len(sig_sets[c0] & sig_sets[c1]),
+                    )
+                    v = venn2(subsets, set_labels=comp_names, ax=ax)
+                    colors = ['#e53935', '#1565c0']
+                    for i, patch_id in enumerate(['10', '01']):
+                        patch = v.get_patch_by_id(patch_id)
+                        if patch:
+                            patch.set_color(colors[i])
+                            patch.set_alpha(0.35)
+                else:
+                    c0, c1, c2 = comp_names
+                    subsets = (
+                        len(only_sets[c0]),
+                        len(only_sets[c1]),
+                        len(sig_sets[c0] & sig_sets[c1]),
+                        len(only_sets[c2]),
+                        len(sig_sets[c0] & sig_sets[c2]),
+                        len(sig_sets[c1] & sig_sets[c2]),
+                        len(sig_sets[c0] & sig_sets[c1] & sig_sets[c2]),
+                    )
+                    v = venn3(subsets, set_labels=comp_names, ax=ax)
+                    colors = ['#e53935', '#1565c0', '#4caf50']
+                    for i, patch_id in enumerate(['100', '010', '001']):
+                        patch = v.get_patch_by_id(patch_id)
+                        if patch:
+                            patch.set_color(colors[i])
+                            patch.set_alpha(0.35)
+
+                ax.set_title(f'Venn: {" vs ".join(comp_names)}', fontsize=13)
+                plt.tight_layout()
+                fpath = os.path.join(plots_dir, 'deg_integration_venn.png')
+                fig_venn.savefig(fpath, dpi=150, bbox_inches='tight', facecolor='white')
+                plt.close(fig_venn)
+                result_files.append({'file_path': fpath, 'file_type': 'png', 'category': 'venn', 'label': 'Venn 图'})
+            else:
+                self.progress(-1, "警告: matplotlib_venn 未安装，跳过 Venn 图生成")
 
         # 3. 方向一致性热图
         self.progress(70, "生成方向一致性热图...")

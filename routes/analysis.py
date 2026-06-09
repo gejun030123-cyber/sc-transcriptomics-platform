@@ -308,6 +308,10 @@ PARAM_SCHEMAS = {
          'help': '差异基因判定的 FC 阈值（与 bulk_deg 保持一致）。'},
         {'key': 'pval_threshold', 'label': 'padj 显著性阈值', 'type': 'number', 'default': 0.05, 'step': 0.01,
          'help': '差异基因判定的 padj 阈值（与 bulk_deg 保持一致）。'},
+        {'key': 'upset_strict', 'label': 'Upset 严格模式', 'type': 'checkbox', 'default': True,
+         'help': '严格模式：仅显示"仅属于该组合"的基因。关闭则显示"至少属于该组合"的基因。'},
+        {'key': 'exclude_mixed', 'label': '排除方向不一致基因', 'type': 'checkbox', 'default': False,
+         'help': '一致性评分中排除方向不一致（Mixed）的基因。'},
         {'key': 'filter_expression', 'label': '筛选表达式（可选）', 'type': 'textarea', 'default': '',
          'help': '通过集合逻辑表达式筛选目标基因集。支持 AND/OR/NOT/XOR 运算符和 ALL/ANY/ONLY 简写。'
                  '示例：ALL:up | hmc3-vs-ctrl:up AND rapa-vs-ctrl:down | ONLY[hmc3-vs-ctrl]:up'},
