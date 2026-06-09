@@ -83,3 +83,19 @@ def bar_plot(x, y, xlabel='', ylabel='', title=''):
     fig.update_layout(title=title, xaxis_title=xlabel, yaxis_title=ylabel,
                      plot_bgcolor='white', width=600, height=400)
     return json.loads(fig.to_json())
+
+def compute_gene_variability(data, metric='var'):
+    """计算每个基因的变异度量。data: (samples, genes)"""
+    if metric == 'var':
+        return np.var(data, axis=0)
+    elif metric == 'mad':
+        median = np.median(data, axis=0)
+        return np.median(np.abs(data - median), axis=0)
+    elif metric == 'cv':
+        mean = np.mean(data, axis=0)
+        std = np.std(data, axis=0)
+        return std / (np.abs(mean) + 1e-10)
+    elif metric == 'range':
+        return np.max(data, axis=0) - np.min(data, axis=0)
+    else:
+        raise ValueError(f"未知变异度量: {metric}，支持: var/mad/cv/range")
