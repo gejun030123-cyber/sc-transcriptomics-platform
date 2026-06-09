@@ -323,9 +323,25 @@ class BulkHeatmapAnalysis(BaseAnalysis):
         if groupby and groupby in adata.obs.columns and groupby not in annot_cols:
             annot_cols.insert(0, groupby)
 
+        # 自定义注释条配色
+        annotation_palette_str = self.params.get('annotation_palette', '').strip()
+        custom_palette = {}
+        if annotation_palette_str:
+            for pair in annotation_palette_str.split(','):
+                if '=' in pair:
+                    k, v = pair.split('=', 1)
+                    custom_palette[k.strip()] = v.strip()
+
         if annot_cols:
             annot_data, _ = build_annotation_bar(adata.obs, annot_cols,
                                                  sample_order=sample_order, palette=DEFAULT_PALETTE)
+            # 应用自定义配色
+            if custom_palette:
+                for col_name_c, col_info_c in annot_data.items():
+                    for group_c, color_c in custom_palette.items():
+                        if group_c in col_info_c['color_map']:
+                            col_info_c['color_map'][group_c] = color_c
+                    col_info_c['colors'] = [col_info_c['color_map'][v] for v in col_info_c['groups']]
             for col_name, col_info in annot_data.items():
                 color_indices = [col_info['unique'].index(g) for g in col_info['groups']]
                 fig_annot = go.Figure()
@@ -348,6 +364,40 @@ class BulkHeatmapAnalysis(BaseAnalysis):
                 )
                 save_plotly_json(fig_annot, plots_dir, f'bulk_heatmap_annotation_{col_name}.json',
                                 result_files, category='annotation', label=f'{col_name} 注释条')
+
+        # 基因维度注释条
+        gene_annot_cols_str = self.params.get('gene_annotation_columns', '').strip()
+        gene_annot_cols = [c.strip() for c in gene_annot_cols_str.split(',') if c.strip()]
+        if gene_annot_cols:
+            for gcol in gene_annot_cols:
+                if gcol not in adata.var.columns:
+                    continue
+                # Get gene values in the display order (excluding gap markers)
+                display_genes = [g for g in gene_ordered if g != '---']
+                gene_values = []
+                for g in display_genes:
+                    if g in adata.var.index:
+                        gene_values.append(str(adata.var.loc[g, gcol]))
+                    else:
+                        gene_values.append('NA')
+                uniq = sorted(set(gene_values))
+                g_color_map = {gv: DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)] for i, gv in enumerate(uniq)}
+                color_indices = [uniq.index(v) for v in gene_values]
+                fig_ga = go.Figure()
+                n_g = len(uniq)
+                g_cs = [[0, list(g_color_map.values())[0]]] if n_g <= 1 else \
+                       [[i / (n_g - 1), g_color_map[gv]] for i, gv in enumerate(uniq)]
+                fig_ga.add_trace(go.Heatmap(
+                    z=[color_indices], x=gene_values, y=[gcol],
+                    colorscale=g_cs, showscale=False,
+                    text=[gene_values], hovertemplate='%{x}: %{text}<extra></extra>'
+                ))
+                fig_ga.update_layout(
+                    height=60, width=max(600, len(gene_values) * 12 + 200),
+                    margin=dict(l=0, r=0, t=5, b=0)
+                )
+                save_plotly_json(fig_ga, plots_dir, f'bulk_heatmap_gene_annot_{gcol}.json',
+                                result_files, category='annotation', label=f'{gcol} 基因注释条')
 
         self.progress(85, "生成样本相关性热图...")
         corr_matrix = np.corrcoef(norm_data)
