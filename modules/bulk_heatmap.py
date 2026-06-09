@@ -162,12 +162,22 @@ class BulkHeatmapAnalysis(BaseAnalysis):
         clip_str = self.params.get('clip_range', '-3,3').strip()
         clip_range = None
         if clip_str:
-            parts = [float(x.strip()) for x in clip_str.split(',') if x.strip()]
-            if len(parts) == 2:
-                clip_range = (parts[0], parts[1])
+            parts = [x.strip() for x in clip_str.split(',') if x.strip()]
+            if len(parts) != 2:
+                raise ValueError(f"clip_range 格式错误: '{clip_str}'，应为 'min,max'，如 '-3,3'")
+            try:
+                clip_range = (float(parts[0]), float(parts[1]))
+            except ValueError:
+                raise ValueError(f"clip_range 数值解析失败: '{clip_str}'")
 
-        # pseudocount: 对原始计数加偏移后 log2 转换
-        if pseudocount != 1 and 'normalization' not in adata.uns:
+        # log2 转换
+        log_transform = self.params.get('log_transform', 'auto')
+        do_log = False
+        if log_transform == 'yes':
+            do_log = True
+        elif log_transform == 'auto':
+            do_log = 'normalization' not in adata.uns
+        if do_log:
             heat_data = np.log2(heat_data + pseudocount)
 
         heat_z = transform_heatmap_data(
