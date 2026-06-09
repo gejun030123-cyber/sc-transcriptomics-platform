@@ -31,8 +31,9 @@ class BulkPCAAnalysis(BaseAnalysis):
         dimred_method = self.params.get('dimred_method', 'pca')
 
         self.progress(20, "标准化数据...")
-        sc.pp.normalize_total(adata, target_sum=1e6)
-        sc.pp.log1p(adata)
+        if 'normalization' not in adata.uns:
+            sc.pp.normalize_total(adata, target_sum=1e6)
+            sc.pp.log1p(adata)
         sc.pp.scale(adata, max_value=10)
 
         self.progress(40, "运行 PCA...")

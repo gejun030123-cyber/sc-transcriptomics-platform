@@ -27,6 +27,7 @@ BULK_MODULE_LIST = [
     {'name': 'bulk_heatmap', 'display': '热图分析', 'desc': 'Top 差异基因热图、样本相关性热图'},
     {'name': 'bulk_enrichment', 'display': '通路富集', 'desc': 'GO/KEGG/WikiPathways 通路富集分析（ORA / GSEA）'},
     {'name': 'bulk_timecourse', 'display': '时序分析', 'desc': '多时间点差异基因检测 + 轨迹聚类'},
+    {'name': 'bulk_deg_integration', 'display': '多组差异整合', 'desc': '多组比较结果整合：Upset 图、一致性评分、logFC 矩阵分析'},
 ]
 
 MODULE_LIST = SC_MODULE_LIST + BULK_MODULE_LIST
@@ -84,10 +85,10 @@ PARAM_SCHEMAS = {
         {'key': 'method', 'label': '注释方法', 'type': 'select', 'options': ['auto_marker', 'manual'], 'default': 'auto_marker', 'help': '注释方法。auto_marker：使用内置 TME marker 基因自动打分。manual：手动指定 marker 基因。'},
         {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于分组的聚类列名。通常为 leiden 或 leiden_0.8 等。'},
         {'key': 'resolution', 'label': 'Leiden 分辨率', 'type': 'text', 'default': '0.8', 'help': '对应的 Leiden 分辨率，用于定位正确的聚类列。'},
-        {'key': 'marker_set', 'label': 'Marker 基因集', 'type': 'select', 'options': ['TME', 'Immune'], 'default': 'TME',
-         'help': 'TME：肿瘤微环境 marker（上皮、CAF、内皮、免疫细胞等）。Immune：免疫细胞 marker（T、B、NK、髓系等）。'},
-        {'key': 'custom_markers', 'label': '自定义 Marker（可选）', 'type': 'text', 'default': '',
-         'help': '格式：CellType1:GENE1,GENE2;CellType2:GENE3,GENE4。留空则使用上方选择的预设基因集。'},
+        {'key': 'marker_set', 'label': 'Marker 基因集', 'type': 'select', 'options': ['TME', 'Immune', 'Blood'], 'default': 'TME',
+         'help': 'TME：肿瘤微环境 marker（上皮、CAF、内皮、免疫细胞等）。Immune：免疫细胞 marker（T、B、NK、髓系等）。Blood：血液细胞 marker（HSC、红系、巨核、粒系等）。'},
+        {'key': 'custom_markers', 'label': '自定义 Marker（可选）', 'type': 'textarea', 'default': '',
+         'help': '每行一个细胞类型，格式：CellType:GENE1,GENE2。示例：\nT_cell:CD3D,CD3E,CD2\nB_cell:CD19,MS4A1,CD79A\nMacrophage:CD68,CD163,MSR1'},
     ],
     'deg': [
         {'key': 'groupby', 'label': '分组依据', 'type': 'text', 'default': '', 'help': '差异分析的分组依据列名。如 celltype、leiden、condition 等。留空则自动使用 leiden。'},
@@ -98,33 +99,70 @@ PARAM_SCHEMAS = {
          'help': '是否生成 Top 差异基因的 dotplot 可视化。'},
         {'key': 'plot_genes_umap', 'label': 'UMAP 展示基因（逗号分隔）', 'type': 'text', 'default': '',
          'help': '指定要在 UMAP 上展示表达分布的基因名，多个用逗号分隔。留空则不生成。'},
+        {'key': 'custom_dotplot_genes', 'label': '自定义 Dotplot 基因（可选）', 'type': 'textarea', 'default': '',
+         'help': '手动输入基因名，逗号或换行分隔。填写后 Dotplot 使用此列表而非自动 Top N DEG。'},
     ],
     'trajectory': [
         {'key': 'method', 'label': '轨迹方法', 'type': 'select', 'options': ['diffusion_map', 'slingshot'], 'default': 'diffusion_map', 'help': '轨迹推断方法。diffusion_map：基于扩散图的拟时序，适合连续过渡。slingshot：基于 MST 的轨迹，适合分支结构。'},
         {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于轨迹推断的聚类列名。'},
+        {'key': 'plot_genes', 'label': '拟时序基因表达（可选）', 'type': 'textarea', 'default': '',
+         'help': '手动输入基因名，逗号或换行分隔。生成这些基因沿拟时序的表达曲线图。最多 10 个基因。'},
     ],
     'proportion': [
         {'key': 'groupby', 'label': '分组依据', 'type': 'text', 'default': 'celltype', 'help': '统计比例的细胞类型列名。通常为 celltype 或 leiden。'},
         {'key': 'batch_key', 'label': '批次列名', 'type': 'text', 'default': 'batch', 'help': '用于比较的分组列名。如 batch、condition、treatment 等。'},
+        {'key': 'compare_groups', 'label': '指定比较组（可选）', 'type': 'text', 'default': '',
+         'help': '格式：GroupA-vs-GroupB，多个比较用分号分隔（如 A-vs-B;C-vs-D）。仅比较指定组的细胞比例差异。留空则比较所有组。'},
     ],
     'bulk_qc': [
         {'key': 'min_counts', 'label': '最小文库 reads 数', 'type': 'number', 'default': 100000, 'help': '最小文库 reads 数。低于此值的样本被过滤。人类/小鼠 RNA-seq 通常要求 ≥100000，小样本可降至 50000。'},
         {'key': 'min_genes', 'label': '最小检测基因数', 'type': 'number', 'default': 5000, 'help': '每个样本检测到的最小基因数。低于此值的样本可能质量差。通常 5000-8000。'},
         {'key': 'max_mt_pct', 'label': '最大线粒体基因比例 (%)', 'type': 'number', 'default': 20.0, 'step': 0.1, 'help': '最大线粒体基因比例（%）。高于此值的样本可能降解严重。RNA-seq 通常 15-20%。'},
+        {'key': 'max_ribo_pct', 'label': '最大核糖体基因比例 (%)', 'type': 'number', 'default': 40.0, 'step': 0.1, 'help': '最大核糖体基因比例（%）。RPL/RPS 基因比例过高提示 rRNA 污染。PolyA 建库通常 < 5-10%，rRNA 去除建库可至 40-50%。'},
+        {'key': 'min_gini', 'label': '最小文库复杂度 (Gini)', 'type': 'number', 'default': 0, 'step': 0.01, 'help': '最小 Gini 系数（0 = 不过滤）。Gini > 0.8 提示文库复杂度低（PCR 过度扩增）。'},
+        {'key': 'min_sample_expr', 'label': '基因最低表达样本数', 'type': 'number', 'default': 0, 'step': 1, 'help': '基因在至少 N 个样本中 CPM > 1 才保留。0 = 不过滤。建议设为样本总数的 10-20%。'},
+        {'key': 'group_column', 'label': '分组列名（可选）', 'type': 'text', 'default': '', 'help': '样本分组列名（adata.obs 中的列）。留空则自动从样本名推断（取第一个分隔符前的前缀）。填写后启用组内/组间距离分析和分组着色图。'},
+        {'key': 'detect_outliers', 'label': '检测离群样本', 'type': 'checkbox', 'default': True, 'help': '基于 PCA 马氏距离检测离群样本。仅在 summary 中告警，不自动剔除。'},
+        {'key': 'filter_strategy', 'label': '过滤策略', 'type': 'select', 'options': ['conservative', 'standard', 'custom'], 'default': 'standard', 'help': 'conservative：宽松阈值（适合小样本）；standard：推荐阈值；custom：自定义所有阈值。'},
     ],
     'bulk_normalize': [
-        {'key': 'method', 'label': '标准化方法', 'type': 'select', 'options': ['deseq2', 'cpm', 'log2_quantile'], 'default': 'deseq2', 'help': '标准化方法。DESeq2：中位比率法，适用于差异分析前标准化，RNA-seq 金标准。CPM：每百万计数，简单但不考虑组成偏差。log2_quantile：分位数标准化，适合样本间可比性要求高的场景。'},
+        {'key': 'method', 'label': '标准化方法', 'type': 'select', 'options': ['deseq2', 'tmm', 'cpm', 'vst', 'rlog', 'log2_quantile'], 'default': 'deseq2',
+         'help': '标准化方法。差异分析：DESeq2（中位比率法，金标准）或 TMM（edgeR 方法，组成偏差大时更优）。可视化/高维：VST（方差稳定）或 rlog（小样本更稳定）。简单归一：CPM（每百万计数）或 log2 分位数。'},
+        {'key': 'min_expr_value', 'label': '最小表达阈值 (CPM)', 'type': 'number', 'default': 1, 'step': 0.1,
+         'help': '基因表达量需达到此 CPM 阈值才算有效表达。默认 1。'},
+        {'key': 'min_expr_samples', 'label': '最小表达样本数', 'type': 'number', 'default': 3, 'step': 1,
+         'help': '基因在至少 N 个样本中达到最小表达阈值才保留。0 = 不过滤。建议设为最小组的样本数。'},
+        {'key': 'max_zero_pct', 'label': '最大零值比例 (%)', 'type': 'number', 'default': 0, 'step': 1,
+         'help': '基因在超过此比例的样本中为零则被过滤。0 = 不过滤。建议 50-70%。'},
     ],
     'bulk_deg': [
         {'key': 'groupby', 'label': '分组列名', 'type': 'text', 'default': '', 'help': '分组列名。adata.obs 中用于区分实验组和对照组的列。如 condition、treatment、group。'},
         {'key': 'group1', 'label': '实验组', 'type': 'dynamic_select', 'depends_on': 'groupby', 'default': '', 'help': '实验组名称。将与对照组比较计算差异基因。'},
         {'key': 'group2', 'label': '对照组', 'type': 'dynamic_select', 'depends_on': 'groupby', 'default': '', 'help': '对照组名称。rest 表示以所有其他样本为对照。'},
-        {'key': 'method', 'label': '统计方法', 'type': 'select', 'options': ['t-test', 'mann-whitney', 'deseq2'], 'default': 't-test', 'help': '统计方法。t-test：参数检验，适合正态分布数据，速度快。Mann-Whitney：非参数检验，不假设正态分布，更稳健。DESeq2：基于负二项分布的差异分析，RNA-seq 金标准，需要原始计数。'},
+        {'key': 'method', 'label': '统计方法', 'type': 'select', 'options': ['t-test', 'mann-whitney', 'deseq2', 'edger', 'limma'], 'default': 't-test', 'help': '统计方法。t-test：参数检验，适合正态分布数据，速度快。Mann-Whitney：非参数检验，不假设正态分布，更稳健。DESeq2：基于负二项分布的差异分析，RNA-seq 金标准，需要原始计数。edgeR：基于负二项分布模型和经验贝叶斯方法，适合多组比较和复杂实验设计。limma-voom：基于线性模型和经验贝叶斯收缩，适合复杂实验设计，稳健且灵敏。'},
         {'key': 'fc_threshold', 'label': 'Fold Change 阈值', 'type': 'number', 'default': 2.0, 'step': 0.1, 'help': 'Fold Change 阈值。log2FC > log2(fc) 为上调，< -log2(fc) 为下调。常用值：1.5（宽松）、2.0（标准）、4.0（严格）。'},
         {'key': 'pval_threshold', 'label': 'padj 显著性阈值', 'type': 'number', 'default': 0.05, 'step': 0.01, 'help': '调整后 p-value 显著性阈值。0.05 为标准，0.01 为严格，0.1 为宽松探索性分析。'},
         {'key': 'top_n', 'label': 'Top N 差异基因数', 'type': 'number', 'default': 20, 'help': '结果中展示的 Top N 差异基因数。用于火山图标注和 Top 基因 CSV 导出。'},
         {'key': 'base_mean_filter', 'label': '最低平均表达量', 'type': 'number', 'default': 1, 'step': 0.5, 'help': '过滤低表达基因。BaseMean 低于此值的基因不参与分析和绘图。建议 1-10。'},
         {'key': 'plot_genes', 'label': '额外展示基因（逗号分隔，可选）', 'type': 'text', 'default': '', 'help': '指定要额外绘制箱线图的基因名，多个用逗号分隔。Top 差异基因会自动生成箱线图，此字段用于补充其他感兴趣的基因。'},
+        {'key': 'comparisons', 'label': '多组比较（可选）', 'type': 'text', 'default': '',
+         'help': '多个比较用分号分隔，格式：A-vs-B;C-vs-D。填写后实验组/对照组参数被忽略。示例：DrugA-vs-Control;DrugB-vs-Control;DrugA-vs-DrugB'},
+        {'key': 'custom_groups', 'label': '自定义合并组（可选）', 'type': 'textarea', 'default': '',
+         'help': '每行一个定义，格式：新组名=原组1+原组2。示例：High=Treated_1h+Treated_3h。定义后可在多组比较中使用新组名。'},
+        {'key': 'test_type', 'label': '检验类型', 'type': 'select', 'options': ['pairwise', 'lrt'], 'default': 'pairwise',
+         'help': 'pairwise：两两比较（默认）。lrt：似然比检验（仅 edger），一次性检验所有组间是否有差异。'},
+        {'key': 'auto_comparisons', 'label': '自动生成比较', 'type': 'select', 'options': ['manual', 'all_pairwise', 'vs_reference'], 'default': 'manual',
+         'help': 'manual：手动输入比较。all_pairwise：自动生成所有两两配对。vs_reference：所有组 vs 参考组。'},
+        {'key': 'reference_group', 'label': '参考组（可选）', 'type': 'dynamic_select', 'depends_on': 'groupby', 'default': '',
+         'help': '指定参考组。确保 logFC 方向一致（正值=该组>参考组）。'},
+        {'key': 'cooks_filter', 'label': "Cook's 距离过滤", 'type': 'checkbox', 'default': True,
+         'help': "剔除 Cook's 距离过大的异常高表达基因。DESeq2 和 edgeR 支持。"},
+        {'key': 'independent_filter', 'label': '独立过滤', 'type': 'checkbox', 'default': True,
+         'help': '自动去除低表达基因，提升检测效力。DESeq2 支持。'},
+        {'key': 'padj_method', 'label': 'p 值校正方法', 'type': 'select', 'options': ['fdr_bh', 'bonferroni', 'holm', 'fdr_by'], 'default': 'fdr_bh',
+         'help': '多重检验校正方法。BH（Benjamini-Hochberg）：最常用。Bonferroni：最严格。Holm：逐步校正。BY：依赖性校正。'},
+        {'key': 'regulation_filter', 'label': '差异方向', 'type': 'select', 'options': ['both', 'up', 'down'], 'default': 'both',
+         'help': 'both：双向差异基因。up：仅输出上调基因。down：仅输出下调基因。'},
     ],
     'bulk_pca': [
         {'key': 'n_comps', 'label': 'PCA 主成分数量', 'type': 'number', 'default': 10, 'help': 'PCA 主成分数量。通常 5-10 即可。样本数少时自动降至 n_samples-1。'},
@@ -135,6 +173,7 @@ PARAM_SCHEMAS = {
         {'key': 'heatmap_type', 'label': '热图类型', 'type': 'select', 'options': ['top_var', 'deg'], 'default': 'top_var', 'help': '热图类型。top_var：显示最高变异的基因。deg：显示差异表达基因（需先运行 DEG 分析）。'},
         {'key': 'top_n', 'label': '显示基因数', 'type': 'number', 'default': 50, 'help': '热图中显示的基因数量。通常 30-100。过多会导致热图难以阅读。'},
         {'key': 'groupby', 'label': '样本分组列名（可选）', 'type': 'text', 'default': '', 'help': '样本分组列名，用于在热图旁添加分组注释条。留空则不添加。'},
+        {'key': 'custom_genes', 'label': '自定义基因列表（可选）', 'type': 'textarea', 'default': '', 'help': '手动输入基因名，逗号或换行分隔。填写后忽略热图类型和基因数参数，直接用此列表绘制热图。'},
     ],
     'bulk_enrichment': [
         {'key': 'method', 'label': '富集方法', 'type': 'select', 'options': ['ORA', 'GSEA'], 'default': 'ORA',
@@ -150,6 +189,8 @@ PARAM_SCHEMAS = {
          'help': '可视化中显示的 Top N 显著通路数。'},
         {'key': 'input_source', 'label': 'DEG 结果文件路径', 'type': 'text', 'default': '',
          'help': '来自已完成的 DEG 分析的 CSV 结果文件路径。包含 gene 和 regulation/log2FC 列。'},
+        {'key': 'split_direction', 'label': '分开分析上调/下调基因', 'type': 'checkbox', 'default': False, 'help': '开启后将 DEG 结果按 Up/Down 拆分，分别做 ORA 富集分析，生成独立的气泡图。'},
+        {'key': 'custom_genes', 'label': '自定义基因列表（可选）', 'type': 'textarea', 'default': '', 'help': '手动输入基因名，逗号或换行分隔。填写后忽略 DEG 结果文件，直接用此列表做 ORA。'},
     ],
     'bulk_timecourse': [
         {'key': 'time_column', 'label': '时间列名', 'type': 'text', 'default': 'minute',
@@ -162,6 +203,21 @@ PARAM_SCHEMAS = {
          'help': '模糊 c-means 聚类数。通常 4-8 可覆盖主要时间表达模式。需满足：显著时序基因数 >= 聚类数。'},
         {'key': 'fdr_threshold', 'label': 'FDR 阈值', 'type': 'number', 'default': 0.05, 'step': 0.01,
          'help': 'BH 校正后的 FDR 显著性阈值。0.05 为标准，0.01 为严格。'},
+        {'key': 'pairwise_groups', 'label': '分组配对比较（可选）', 'type': 'text', 'default': '',
+         'help': '格式：GroupA-vs-GroupB。在每个时间点对两组做 Welch t-test，生成时序差异热图。需同时填写分组列名。'},
+    ],
+    'bulk_deg_integration': [
+        {'key': 'selected_comparisons', 'label': '选择比较（留空=全部）', 'type': 'multiselect',
+         'api': '/api/projects/{pid}/deg-comparisons', 'default': '',
+         'help': '勾选要参与整合分析的比较结果。不勾选则使用全部比较。'},
+        {'key': 'min_comparisons', 'label': '最小比较数', 'type': 'number', 'default': 2, 'step': 1,
+         'help': '基因至少在 N 个比较中显著才纳入一致性分析。建议 2-3。'},
+        {'key': 'consistency_n', 'label': 'Top N 一致性基因', 'type': 'number', 'default': 50, 'step': 5,
+         'help': '一致性评分最高的 Top N 基因用于热图和排名展示。'},
+        {'key': 'fc_threshold', 'label': 'Fold Change 阈值', 'type': 'number', 'default': 2.0, 'step': 0.1,
+         'help': '差异基因判定的 FC 阈值（与 bulk_deg 保持一致）。'},
+        {'key': 'pval_threshold', 'label': 'padj 显著性阈值', 'type': 'number', 'default': 0.05, 'step': 0.01,
+         'help': '差异基因判定的 padj 阈值（与 bulk_deg 保持一致）。'},
     ],
 }
 
@@ -223,6 +279,19 @@ def analyze(pid, module_name):
         if not input_path:
             flash('请选择输入数据', 'danger')
             return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
+        # 注入 _visualization 和 _filters 到 params
+        viz_json = request.form.get('_visualization', '')
+        filters_json = request.form.get('_filters', '')
+        if viz_json:
+            try:
+                params['_visualization'] = json.loads(viz_json)
+            except json.JSONDecodeError:
+                pass
+        if filters_json:
+            try:
+                params['_filters'] = json.loads(filters_json)
+            except json.JSONDecodeError:
+                pass
         task = AnalysisTask(project_id=pid, module_name=module_name,
                            params_json=json.dumps(params))
         task.save()

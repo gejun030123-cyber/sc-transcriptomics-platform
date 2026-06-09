@@ -75,6 +75,20 @@
 </div>
 {% endif %}
 
+{% if image_files %}
+<h5 class="mb-3">图表</h5>
+<div class="row">
+    {% for f in image_files %}
+    <div class="col-md-6 mb-4">
+        <div class="card p-3">
+            <h6 class="mb-2">{{ f.label }}</h6>
+            <img src="/projects/{{ project.id }}/results/file/{{ f.id }}" class="img-fluid rounded" alt="{{ f.label }}">
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
 {% if csv_files %}
 <h5 class="mb-3">数据表格</h5>
 <div class="card p-3 mb-4">

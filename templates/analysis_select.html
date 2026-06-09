@@ -15,14 +15,22 @@
             <h6 class="mb-2">
                 {% if module.name.startswith('bulk_') %}Bulk RNA-seq 流程{% else %}单细胞分析流程{% endif %}
             </h6>
-            {% for m in all_modules %}
-            <a href="/projects/{{ project.id }}/analyze/{{ m.name }}"
-               class="sidebar-module d-block text-decoration-none small {% if m.name == module.name %}active{% endif %}">
-                {{ m.display }}
-                {% set completed = completed_tasks|selectattr('module_name', 'equalto', m.name)|list %}
-                {% if completed %}<span class="float-end text-success">&#10003;</span>{% endif %}
-            </a>
-            {% endfor %}
+            <div id="module-list" class="module-drag-list">
+                {% for m in all_modules %}
+                <div class="module-item d-flex align-items-center py-1 {% if m.name == module.name %}active{% endif %}"
+                     data-module="{{ m.name }}" draggable="true">
+                    <span class="drag-handle me-2" style="cursor:grab; color:#999;">☰</span>
+                    <a href="/projects/{{ project.id }}/analyze/{{ m.name }}"
+                       class="text-decoration-none small flex-grow-1">{{ m.display }}</a>
+                    {% set completed = completed_tasks|selectattr('module_name', 'equalto', m.name)|list %}
+                    {% if completed %}<span class="text-success small">&#10003;</span>{% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            <div class="mt-2 border-top pt-2">
+                <button type="button" class="btn btn-outline-secondary btn-sm w-100" id="btn-save-pipeline"
+                        data-bs-toggle="modal" data-bs-target="#savePipelineModal">保存为流程模板</button>
+            </div>
         </div>
     </div>
 
@@ -32,6 +40,19 @@
             <p class="text-muted">{{ module.desc }}</p>
 
             <form method="post" class="param-form">
+                <!-- 预设工具栏 -->
+                <div class="d-flex gap-2 mb-3 align-items-center" id="preset-toolbar">
+                    <div class="dropdown">
+                        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button"
+                                data-bs-toggle="dropdown" id="btn-load-preset">加载预设</button>
+                        <ul class="dropdown-menu" id="preset-list">
+                            <li><span class="dropdown-item text-muted small">加载中...</span></li>
+                        </ul>
+                    </div>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-save-preset"
+                            data-bs-toggle="modal" data-bs-target="#savePresetModal">保存预设</button>
+                </div>
+
                 <div class="mb-3">
                     <label class="form-label">输入数据</label>
                     <select name="input_path" class="form-select" required>
@@ -91,6 +112,13 @@
                     {% elif param.type == 'checkbox' %}
                     <input type="checkbox" name="{{ param.key }}" class="form-check-input"
                            {% if param.default %}checked{% endif %}>
+                    {% elif param.type == 'multiselect' %}
+                    <div class="multiselect-group border rounded p-2" data-key="{{ param.key }}" data-api="{{ param.api }}" style="max-height:180px;overflow-y:auto;">
+                        <span class="text-muted small multiselect-loading">加载中...</span>
+                    </div>
+                    {% elif param.type == 'textarea' %}
+                    <textarea name="{{ param.key }}" class="form-control" id="param-{{ param.key }}"
+                              rows="3" placeholder="{{ param.help }}">{{ param.default }}</textarea>
                     {% elif param.type == 'number' %}
                     <input type="number" name="{{ param.key }}" class="form-control"
                            value="{{ param.default }}" step="{{ param.step|default(1) }}">
@@ -110,10 +138,242 @@
         </div>
     </div>
 </div>
+
+<!-- 保存预设模态框 -->
+<div class="modal fade" id="savePresetModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">保存参数预设</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">预设名称</label>
+                    <input type="text" class="form-control" id="preset-name" placeholder="如: PBMC 标准 QC 参数">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">描述（可选）</label>
+                    <input type="text" class="form-control" id="preset-desc" placeholder="简要说明用途">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">保存范围</label>
+                    <select class="form-select" id="preset-scope">
+                        <option value="project">当前项目</option>
+                        <option value="global">全局（所有项目可用）</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="btn-confirm-save">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 保存流程模板模态框 -->
+<div class="modal fade" id="savePipelineModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">保存流程模板</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">模板名称</label>
+                    <input type="text" class="form-control" id="pipeline-name" placeholder="如: 标准单细胞流程">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">描述（可选）</label>
+                    <input type="text" class="form-control" id="pipeline-desc">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="btn-confirm-pipeline-save">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
+<style>
+.module-drag-list .module-item { padding: 4px 8px; border-radius: 4px; transition: background 0.15s; }
+.module-drag-list .module-item:hover { background: #f0f0f0; }
+.module-drag-list .module-item.active { background: #e7f1ff; font-weight: 600; }
+.module-drag-list .module-item.dragging { opacity: 0.4; }
+.module-drag-list .module-item.drag-over { border-top: 2px solid #0d6efd; }
+</style>
 <script>
+// === 预设系统 ===
+const PROJECT_ID = '{{ project.id }}';
+const MODULE_NAME = '{{ module.name }}';
+const ANALYSIS_TYPE = MODULE_NAME.startsWith('bulk_') ? 'bulk' : 'sc';
+
+function collectCurrentParams() {
+    const params = {};
+    document.querySelectorAll('.param-form input, .param-form select, .param-form textarea').forEach(el => {
+        const name = el.name;
+        if (!name || name === 'input_path') return;
+        if (el.type === 'checkbox') {
+            if (el.closest('.multiselect-group')) {
+                // multiselect checkboxes are handled below
+                return;
+            }
+            params[name] = el.checked;
+        } else {
+            params[name] = el.value;
+        }
+    });
+    // collect multiselect groups
+    document.querySelectorAll('.multiselect-group').forEach(group => {
+        const key = group.dataset.key;
+        const checked = Array.from(group.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+        params[key] = checked.join(',');
+    });
+    return params;
+}
+
+function applyPresetToForm(presetParams) {
+    if (!presetParams) return;
+    Object.entries(presetParams).forEach(([key, value]) => {
+        // check multiselect group first
+        const group = document.querySelector(`.multiselect-group[data-key="${key}"]`);
+        if (group) {
+            const vals = typeof value === 'string' ? value.split(',') : (Array.isArray(value) ? value : []);
+            group.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                cb.checked = vals.includes(cb.value);
+            });
+            return;
+        }
+        const el = document.querySelector(`[name="${key}"]`);
+        if (!el) return;
+        if (el.type === 'checkbox') {
+            el.checked = !!value;
+        } else {
+            el.value = value;
+        }
+    });
+}
+
+async function loadPresets() {
+    try {
+        const resp = await fetch(`/api/presets?project_id=${PROJECT_ID}&type=${ANALYSIS_TYPE}`);
+        const data = await resp.json();
+        const list = document.getElementById('preset-list');
+        list.innerHTML = '';
+        if (!data.presets || data.presets.length === 0) {
+            list.innerHTML = '<li><span class="dropdown-item text-muted small">暂无预设</span></li>';
+            return;
+        }
+        data.presets.forEach(p => {
+            const li = document.createElement('li');
+            const scopeLabel = p.scope === 'global' ? ' [全局]' : '';
+            li.innerHTML = `<a class="dropdown-item" href="#" data-preset-id="${p.id}"
+                              data-scope="${p.scope}">${p.name}${scopeLabel}<br>
+                              <small class="text-muted">${p.description || ''}</small></a>`;
+            li.querySelector('a').addEventListener('click', async (e) => {
+                e.preventDefault();
+                const pid = e.currentTarget.dataset.presetId;
+                const r = await fetch(`/api/presets/${pid}?project_id=${PROJECT_ID}`);
+                const d = await r.json();
+                if (d.preset && d.preset.params) {
+                    applyPresetToForm(d.preset.params[MODULE_NAME] || {});
+                }
+            });
+            list.appendChild(li);
+        });
+    } catch (e) {
+        console.error('加载预设失败:', e);
+    }
+}
+
+document.getElementById('btn-confirm-save').addEventListener('click', async () => {
+    const name = document.getElementById('preset-name').value.trim();
+    if (!name) { alert('请输入预设名称'); return; }
+    const desc = document.getElementById('preset-desc').value.trim();
+    const scope = document.getElementById('preset-scope').value;
+    const params = collectCurrentParams();
+    const body = {
+        name, description: desc, scope, analysis_type: ANALYSIS_TYPE,
+        project_id: PROJECT_ID,
+        params: { [MODULE_NAME]: params },
+    };
+    try {
+        const resp = await fetch('/api/presets', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            bootstrap.Modal.getInstance(document.getElementById('savePresetModal')).hide();
+            document.getElementById('preset-name').value = '';
+            document.getElementById('preset-desc').value = '';
+            loadPresets();
+        } else {
+            alert(data.error || '保存失败');
+        }
+    } catch (e) {
+        alert('保存失败: ' + e.message);
+    }
+});
+
+loadPresets();
+
+// === Multiselect 动态加载 ===
+document.querySelectorAll('.multiselect-group').forEach(async (group) => {
+    const api = group.dataset.api;
+    const key = group.dataset.key;
+    if (!api) return;
+    try {
+        const resp = await fetch(api.replace('{pid}', PROJECT_ID));
+        const data = await resp.json();
+        const items = data.comparisons || data.values || data.items || [];
+        const loading = group.querySelector('.multiselect-loading');
+        if (loading) loading.remove();
+        if (items.length === 0) {
+            group.innerHTML = '<span class="text-muted small">未找到比较结果，请先运行 bulk_deg</span>';
+            return;
+        }
+        items.forEach(item => {
+            const val = typeof item === 'string' ? item : item.key;
+            const lbl = typeof item === 'string' ? item : (item.label || item.key);
+            const label = document.createElement('label');
+            label.className = 'd-block small mb-1';
+            label.style.cursor = 'pointer';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.value = val;
+            cb.className = 'form-check-input me-1';
+            cb.name = key;
+            label.appendChild(cb);
+            label.appendChild(document.createTextNode(lbl));
+            group.appendChild(label);
+        });
+    } catch (e) {
+        const loading = group.querySelector('.multiselect-loading');
+        if (loading) loading.textContent = '加载失败';
+    }
+});
+
+// 表单提交时注入 _visualization 配置
+document.querySelector('.param-form').addEventListener('submit', function() {
+    let vizHidden = this.querySelector('input[name="_visualization"]');
+    if (!vizHidden) {
+        vizHidden = document.createElement('input');
+        vizHidden.type = 'hidden';
+        vizHidden.name = '_visualization';
+        this.appendChild(vizHidden);
+    }
+    if (!vizHidden.value) {
+        vizHidden.value = JSON.stringify({});
+    }
+});
+
 const inputSelect = document.querySelector('select[name="input_path"]');
 const dynamicSelects = document.querySelectorAll('.dynamic-select');
 const groupbyFields = document.querySelectorAll('.groupby-field');
@@ -391,5 +651,68 @@ if (form) {
 if (inputSelect && inputSelect.value) {
     suggestGroupbyColumns();
 }
+
+// === 模块拖拽排序 ===
+(function() {
+    const list = document.getElementById('module-list');
+    if (!list) return;
+    let dragItem = null;
+    list.querySelectorAll('.module-item').forEach(item => {
+        item.addEventListener('dragstart', (e) => {
+            dragItem = item;
+            item.classList.add('dragging');
+            e.dataTransfer.effectAllowed = 'move';
+        });
+        item.addEventListener('dragend', () => {
+            if (dragItem) dragItem.classList.remove('dragging');
+            list.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+            dragItem = null;
+        });
+        item.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            if (item !== dragItem) item.classList.add('drag-over');
+        });
+        item.addEventListener('dragleave', () => { item.classList.remove('drag-over'); });
+        item.addEventListener('drop', (e) => {
+            e.preventDefault();
+            item.classList.remove('drag-over');
+            if (dragItem && dragItem !== item) {
+                const allItems = [...list.querySelectorAll('.module-item')];
+                const fromIdx = allItems.indexOf(dragItem);
+                const toIdx = allItems.indexOf(item);
+                if (fromIdx < toIdx) { item.after(dragItem); }
+                else { item.before(dragItem); }
+            }
+        });
+    });
+})();
+
+document.getElementById('btn-confirm-pipeline-save').addEventListener('click', async () => {
+    const name = document.getElementById('pipeline-name').value.trim();
+    if (!name) { alert('请输入模板名称'); return; }
+    const desc = document.getElementById('pipeline-desc').value.trim();
+    const modules = [...document.querySelectorAll('#module-list .module-item')].map(el => el.dataset.module);
+    const body = {
+        name, description: desc,
+        analysis_type: ANALYSIS_TYPE,
+        project_id: PROJECT_ID,
+        scope: 'project',
+        pipeline: { modules, skip_validation: false },
+        params: collectCurrentParams(),
+    };
+    try {
+        const resp = await fetch('/api/presets', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        if (resp.ok) {
+            bootstrap.Modal.getInstance(document.getElementById('savePipelineModal')).hide();
+            document.getElementById('pipeline-name').value = '';
+            document.getElementById('pipeline-desc').value = '';
+        }
+    } catch (e) { alert('保存失败: ' + e.message); }
+});
 </script>
 {% endblock %}

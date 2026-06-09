@@ -53,6 +53,39 @@ class TrajectoryAnalysis(BaseAnalysis):
             with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'diffusion_map', 'label': 'Diffusion Map'})
 
+        # Gene expression along pseudotime
+        plot_genes_str = self.params.get('plot_genes', '').strip()
+        if plot_genes_str and 'dpt_pseudotime' in adata.obs.columns:
+            import numpy as np
+            gene_list = [g.strip() for g in plot_genes_str.replace('\n', ',').split(',') if g.strip()]
+            gene_list = [g for g in gene_list if g in adata.var_names][:10]
+
+            if gene_list:
+                self.progress(75, f"Plotting {len(gene_list)} genes along pseudotime...")
+                pt = adata.obs['dpt_pseudotime'].values
+                sort_idx = np.argsort(pt)
+                pt_sorted = pt[sort_idx]
+                window = max(adata.n_obs // 50, 10)
+
+                fig = go.Figure()
+                for gene in gene_list:
+                    expr = adata[:, gene].X.toarray().flatten() if hasattr(adata[:, gene].X, 'toarray') else adata[:, gene].X.flatten()
+                    expr_sorted = expr[sort_idx]
+                    # Rolling mean
+                    kernel = np.ones(window) / window
+                    smoothed = np.convolve(expr_sorted, kernel, mode='valid')
+                    pt_smooth = pt_sorted[window // 2: window // 2 + len(smoothed)]
+                    fig.add_trace(go.Scattergl(x=pt_smooth, y=smoothed, mode='lines', name=gene))
+
+                fig.update_layout(
+                    title='Gene Expression Along Pseudotime',
+                    xaxis_title='Pseudotime', yaxis_title='Expression',
+                    plot_bgcolor='white', width=700, height=400
+                )
+                fpath = os.path.join(plots_dir, 'trajectory_gene_expression.json')
+                with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
+                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'gene_expression', 'label': '基因拟时序表达'})
+
         self.progress(85, "Saving output...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')
         os.makedirs(intermediate_dir, exist_ok=True)

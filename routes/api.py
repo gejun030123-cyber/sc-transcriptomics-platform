@@ -3,12 +3,49 @@ import os
 import shutil
 import struct
 import base64
+import uuid
 import psutil
 from flask import Blueprint, jsonify, request, send_file
 from models import AnalysisTask, Project, ResultFile
 from config import Config
 
 api_bp = Blueprint('api', __name__)
+
+
+PRESETS_GLOBAL_DIR = os.path.join(Config.DATA_DIR, 'presets', '_global')
+
+
+def _get_project_presets_dir(project_id):
+    return os.path.join(Config.DATA_DIR, 'projects', project_id, 'presets')
+
+
+def _ensure_dir(path):
+    os.makedirs(path, exist_ok=True)
+
+
+def _load_preset(filepath):
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        data['_filepath'] = filepath
+        data['_id'] = os.path.splitext(os.path.basename(filepath))[0]
+        return data
+    except (json.JSONDecodeError, IOError):
+        return None
+
+
+def _list_presets_in_dir(directory, scope):
+    if not os.path.isdir(directory):
+        return []
+    presets = []
+    for fname in sorted(os.listdir(directory)):
+        if not fname.endswith('.json'):
+            continue
+        p = _load_preset(os.path.join(directory, fname))
+        if p:
+            p['_scope'] = scope
+            presets.append(p)
+    return presets
 
 
 def _decode_plotly_binary(obj):
@@ -219,6 +256,41 @@ def column_values():
         return jsonify({'values': []})
 
 
+@api_bp.route('/projects/<pid>/deg-comparisons')
+def deg_comparisons(pid):
+    results_dir = os.path.join(Config.DATA_DIR, 'projects', pid, 'results')
+    if not os.path.isdir(results_dir):
+        return jsonify({'comparisons': []})
+
+    csv_files = sorted([f for f in os.listdir(results_dir)
+                        if f.startswith('bulk_deg_results_') and f.endswith('.csv')])
+
+    # 从 ResultFile 表提取真实比较名（如 "moclel vs hmc3"）
+    label_map = {}
+    try:
+        from models import AnalysisTask, ResultFile
+        for t in AnalysisTask.get_by_project(pid):
+            if t.module_name != 'bulk_deg':
+                continue
+            for rf in ResultFile.get_by_task(t.id):
+                fname = os.path.basename(rf.file_path)
+                if fname in csv_files and rf.label and 'vs' in rf.label:
+                    # 从 "差异表达基因列表 (moclel vs hmc3)" 提取 "moclel vs hmc3"
+                    lbl = rf.label
+                    if '(' in lbl and ')' in lbl:
+                        lbl = lbl.split('(')[-1].rstrip(')')
+                    label_map[fname] = lbl
+    except Exception:
+        pass
+
+    comparisons = []
+    for f in csv_files:
+        key = f.replace('bulk_deg_', '').replace('.csv', '')
+        comparisons.append({'key': key, 'label': label_map.get(f, key)})
+
+    return jsonify({'comparisons': comparisons})
+
+
 @api_bp.route('/data-info')
 def data_info():
     """返回输入文件的基本数据信息（样本数、基因数、样本名、注释列）"""
@@ -228,7 +300,8 @@ def data_info():
     try:
         from modules.io_utils import read_expression_matrix
         adata = read_expression_matrix(file_path)
-        qc_columns = {'total_counts', 'n_genes_by_counts', 'pct_counts_mt', 'size_factor', 'total_counts_mt'}
+        qc_columns = {'total_counts', 'n_genes_by_counts', 'pct_counts_mt', 'size_factor',
+                       'total_counts_mt', 'total_counts_ribo', 'pct_counts_ribo', '_auto_group'}
         obs_cols = [c for c in adata.obs.columns if c not in qc_columns]
         return jsonify({
             'n_obs': adata.n_obs,
@@ -249,13 +322,24 @@ def obs_columns():
     try:
         from modules.io_utils import read_expression_matrix
         import re
+        import pandas as pd
         adata = read_expression_matrix(file_path)
-        qc_columns = {'total_counts', 'n_genes_by_counts', 'pct_counts_mt', 'size_factor', 'total_counts_mt'}
+        qc_columns = {'total_counts', 'n_genes_by_counts', 'pct_counts_mt', 'size_factor',
+                       'total_counts_mt', 'total_counts_ribo', 'pct_counts_ribo', '_auto_group'}
         cols = [c for c in adata.obs.columns if c not in qc_columns]
+
+        # 检测可能的时间列：数值型且唯一值 < 20
+        time_candidates = []
+        for c in adata.obs.columns:
+            if c in qc_columns:
+                continue
+            col_data = adata.obs[c]
+            if pd.api.types.is_numeric_dtype(col_data) and col_data.nunique() < 20:
+                time_candidates.append(c)
 
         # 如果 obs 有注释列，直接返回
         if cols:
-            return jsonify({'columns': cols, 'sample_groups': {}})
+            return jsonify({'columns': cols, 'sample_groups': {}, 'time_candidates': time_candidates})
 
         # 如果 obs 没有注释列，尝试从样本名中提取分组前缀
         sample_groups = {}
@@ -281,9 +365,9 @@ def obs_columns():
                     'mapping': mapping
                 }
 
-        return jsonify({'columns': cols, 'sample_groups': sample_groups})
+        return jsonify({'columns': cols, 'sample_groups': sample_groups, 'time_candidates': time_candidates})
     except Exception:
-        return jsonify({'columns': [], 'sample_groups': {}})
+        return jsonify({'columns': [], 'sample_groups': {}, 'time_candidates': []})
 
 
 @api_bp.route('/data-info-full')
@@ -365,3 +449,87 @@ def data_info_full():
     except Exception as e:
         import traceback
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
+
+@api_bp.route('/presets')
+def list_presets():
+    project_id = request.args.get('project_id', '')
+    filter_type = request.args.get('type', '')
+    presets = []
+    _ensure_dir(PRESETS_GLOBAL_DIR)
+    presets.extend(_list_presets_in_dir(PRESETS_GLOBAL_DIR, 'global'))
+    if project_id:
+        proj_dir = _get_project_presets_dir(project_id)
+        presets.extend(_list_presets_in_dir(proj_dir, 'project'))
+    if filter_type:
+        presets = [p for p in presets if p.get('analysis_type') == filter_type]
+    result = []
+    for p in presets:
+        result.append({
+            'id': p['_id'],
+            'name': p.get('name', ''),
+            'description': p.get('description', ''),
+            'analysis_type': p.get('analysis_type', ''),
+            'scope': p['_scope'],
+        })
+    return jsonify({'presets': result})
+
+
+@api_bp.route('/presets/<preset_id>')
+def get_preset(preset_id):
+    project_id = request.args.get('project_id', '')
+    if project_id:
+        fpath = os.path.join(_get_project_presets_dir(project_id), f'{preset_id}.json')
+        p = _load_preset(fpath)
+        if p:
+            return jsonify({'preset': p})
+    fpath = os.path.join(PRESETS_GLOBAL_DIR, f'{preset_id}.json')
+    p = _load_preset(fpath)
+    if p:
+        return jsonify({'preset': p})
+    return jsonify({'error': '预设不存在'}), 404
+
+
+@api_bp.route('/presets', methods=['POST'])
+def save_preset():
+    data = request.get_json()
+    if not data or not data.get('name'):
+        return jsonify({'error': '预设名称不能为空'}), 400
+    preset_id = str(uuid.uuid4())[:8]
+    preset = {
+        'name': data['name'],
+        'description': data.get('description', ''),
+        'analysis_type': data.get('analysis_type', ''),
+        'params': data.get('params', {}),
+        'pipeline': data.get('pipeline', {}),
+        'filters': data.get('filters', {}),
+        'visualization': data.get('visualization', {}),
+    }
+    scope = data.get('scope', 'project')
+    project_id = data.get('project_id', '')
+    if scope == 'global':
+        target_dir = PRESETS_GLOBAL_DIR
+    else:
+        if not project_id:
+            return jsonify({'error': '项目级预设需要 project_id'}), 400
+        target_dir = _get_project_presets_dir(project_id)
+    _ensure_dir(target_dir)
+    fpath = os.path.join(target_dir, f'{preset_id}.json')
+    with open(fpath, 'w', encoding='utf-8') as f:
+        json.dump(preset, f, ensure_ascii=False, indent=2)
+    return jsonify({'id': preset_id, 'message': '预设已保存'})
+
+
+@api_bp.route('/presets/<preset_id>', methods=['DELETE'])
+def delete_preset(preset_id):
+    project_id = request.args.get('project_id', '')
+    if project_id:
+        fpath = os.path.join(_get_project_presets_dir(project_id), f'{preset_id}.json')
+        if os.path.isfile(fpath):
+            os.remove(fpath)
+            return jsonify({'message': '预设已删除'})
+    fpath = os.path.join(PRESETS_GLOBAL_DIR, f'{preset_id}.json')
+    if os.path.isfile(fpath):
+        os.remove(fpath)
+        return jsonify({'message': '预设已删除'})
+    return jsonify({'error': '预设不存在'}), 404

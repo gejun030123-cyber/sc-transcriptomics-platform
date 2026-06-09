@@ -347,6 +347,142 @@ class BulkTimecourseAnalysis(BaseAnalysis):
                     f.write(fig_heat.to_json(engine="json"))
                 result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': '基因x时间热图'})
 
+        # Pairwise group comparison per timepoint
+        pairwise_groups_str = self.params.get('pairwise_groups', '').strip()
+        n_pairwise_sig = 0
+        if pairwise_groups_str and group_column and group_column in adata.obs.columns:
+            pw_pair = None
+            if '-vs-' in pairwise_groups_str:
+                parts = pairwise_groups_str.split('-vs-')
+                if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                    pw_pair = (parts[0].strip(), parts[1].strip())
+
+            if pw_pair:
+                self.progress(80, f"配对比较: {pw_pair[0]} vs {pw_pair[1]}...")
+                pw_a, pw_b = pw_pair
+                groups_series = adata.obs[group_column].astype(str)
+                pairwise_rows = []
+
+                for t in time_unique:
+                    t_mask = time_vals == t
+                    a_mask = t_mask & (groups_series == pw_a)
+                    b_mask = t_mask & (groups_series == pw_b)
+                    a_idx = np.where(a_mask)[0]
+                    b_idx = np.where(b_mask)[0]
+
+                    if len(a_idx) < 2 or len(b_idx) < 2:
+                        continue
+
+                    for gi in range(n_genes):
+                        vals_a = lognorm[a_idx, gi]
+                        vals_b = lognorm[b_idx, gi]
+                        try:
+                            tstat, pval = stats.ttest_ind(vals_a, vals_b, equal_var=False)
+                        except Exception:
+                            tstat, pval = 0.0, 1.0
+                        mean_a = vals_a.mean()
+                        mean_b = vals_b.mean()
+                        l2fc = np.log2((mean_b + 1) / (mean_a + 1))
+                        pairwise_rows.append({
+                            'gene': gene_names[gi],
+                            'time': t,
+                            'tstat': round(float(tstat), 4),
+                            'pvalue': float(pval),
+                            'log2FC': round(float(l2fc), 4),
+                            'mean_a': round(float(mean_a), 4),
+                            'mean_b': round(float(mean_b), 4),
+                        })
+
+                if pairwise_rows:
+                    pw_df = pd.DataFrame(pairwise_rows)
+
+                    # Per-timepoint BH FDR correction
+                    for t in time_unique:
+                        t_mask = pw_df['time'] == t
+                        if t_mask.sum() > 0:
+                            try:
+                                _, qvals, _, _ = multipletests(
+                                    pw_df.loc[t_mask, 'pvalue'].values, method='fdr_bh')
+                                pw_df.loc[t_mask, 'qvalue'] = qvals
+                            except Exception:
+                                pw_df.loc[t_mask, 'qvalue'] = pw_df.loc[t_mask, 'pvalue']
+
+                    pw_df = pw_df.sort_values('qvalue')
+
+                    safe_name = f'{pw_a}_vs_{pw_b}'.replace(' ', '_')
+                    pw_csv = os.path.join(results_dir, f'timecourse_pairwise_{safe_name}.csv')
+                    pw_df.to_csv(pw_csv, index=False)
+                    result_files.append({
+                        'file_path': pw_csv, 'file_type': 'csv',
+                        'category': 'table',
+                        'label': f'配对比较结果 ({pw_a} vs {pw_b})'
+                    })
+
+                    # Heatmap: -log10(qvalue)
+                    sig_pw = pw_df[pw_df['qvalue'] < fdr_threshold]
+                    pw_genes_ordered = sig_pw['gene'].unique().tolist()
+                    if not pw_genes_ordered:
+                        pw_genes_ordered = pw_df.groupby('gene')['qvalue'].min().nsmallest(50).index.tolist()
+
+                    time_list = sorted(pw_df['time'].unique())
+                    gene_subset = pw_genes_ordered[:200]
+                    pw_pivot = pw_df[pw_df['gene'].isin(gene_subset)].pivot_table(
+                        index='gene', columns='time', values='qvalue', fill_value=1.0)
+                    pw_pivot = pw_pivot.reindex(index=gene_subset, columns=time_list, fill_value=1.0)
+
+                    neg_log_q = -np.log10(pw_pivot.values + 1e-300)
+                    fig_pw = go.Figure(data=go.Heatmap(
+                        z=neg_log_q,
+                        x=[str(t) for t in time_list],
+                        y=pw_pivot.index.tolist(),
+                        colorscale='YlOrRd',
+                        colorbar=dict(title='-log10(q)')
+                    ))
+                    fig_pw.update_layout(
+                        title=f'Pairwise -log10(q): {pw_a} vs {pw_b}',
+                        xaxis_title=time_column, yaxis_title='Gene',
+                        width=800, height=max(500, len(gene_subset) * 12 + 100),
+                        yaxis=dict(tickfont=dict(size=7))
+                    )
+                    fpath = os.path.join(plots_dir, f'timecourse_pairwise_{safe_name}_heatmap.json')
+                    with open(fpath, 'w') as f:
+                        f.write(fig_pw.to_json(engine="json"))
+                    result_files.append({
+                        'file_path': fpath, 'file_type': 'plotly_json',
+                        'category': 'heatmap',
+                        'label': f'配对比较热图 ({pw_a} vs {pw_b})'
+                    })
+
+                    # Heatmap: log2FC
+                    pw_pivot_fc = pw_df[pw_df['gene'].isin(gene_subset)].pivot_table(
+                        index='gene', columns='time', values='log2FC', fill_value=0.0)
+                    pw_pivot_fc = pw_pivot_fc.reindex(index=gene_subset, columns=time_list, fill_value=0.0)
+
+                    fig_pw_fc = go.Figure(data=go.Heatmap(
+                        z=pw_pivot_fc.values,
+                        x=[str(t) for t in time_list],
+                        y=pw_pivot_fc.index.tolist(),
+                        colorscale='RdBu_r', zmid=0,
+                        colorbar=dict(title='log2FC')
+                    ))
+                    fig_pw_fc.update_layout(
+                        title=f'Pairwise log2FC: {pw_a} vs {pw_b}',
+                        xaxis_title=time_column, yaxis_title='Gene',
+                        width=800, height=max(500, len(gene_subset) * 12 + 100),
+                        yaxis=dict(tickfont=dict(size=7))
+                    )
+                    fpath = os.path.join(plots_dir, f'timecourse_pairwise_{safe_name}_log2fc.json')
+                    with open(fpath, 'w') as f:
+                        f.write(fig_pw_fc.to_json(engine="json"))
+                    result_files.append({
+                        'file_path': fpath, 'file_type': 'plotly_json',
+                        'category': 'heatmap',
+                        'label': f'配对比较 log2FC ({pw_a} vs {pw_b})'
+                    })
+
+                    n_pairwise_sig = int((pw_df['qvalue'] < fdr_threshold).sum())
+                    del pw_df, pairwise_rows
+
         # Interaction test (if group_column specified)
         self.progress(85, "交互效应分析...")
         interaction_csv = None
@@ -402,5 +538,6 @@ class BulkTimecourseAnalysis(BaseAnalysis):
                 'n_timepoints': len(unique_times),
                 'n_clusters': n_clusters if do_cluster else 0,
                 'has_interaction': interaction_csv is not None,
+                'n_pairwise_sig': n_pairwise_sig,
             }
         }

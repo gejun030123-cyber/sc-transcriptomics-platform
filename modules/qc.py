@@ -43,6 +43,9 @@ class QCAnalysis(BaseAnalysis):
         adata = remap_var_names(adata)
         adata.layers["counts"] = adata.X.copy()
 
+        # 应用自定义过滤规则
+        adata = self.apply_filters(adata, 'qc')
+
         # ── 1. 标记基因集 ─────────────────────────────────────────────────
         self.progress(10, "Flagging MT/ribo/hb genes...")
         if 'gene_name' in adata.var.columns:
