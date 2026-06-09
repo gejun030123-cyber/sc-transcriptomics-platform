@@ -137,3 +137,26 @@ def transform_heatmap_data(data, row_scaling='zscore', pseudocount=1,
         data = np.clip(data, clip_range[0], clip_range[1])
 
     return data
+
+
+def cluster_heatmap(data, method='ward', metric='euclidean'):
+    """层次聚类，返回排序后的行索引列表。data: (n_samples, n_features)"""
+    from scipy.cluster.hierarchy import linkage, dendrogram
+    from scipy.spatial.distance import pdist
+
+    if data.shape[0] <= 1:
+        return list(range(data.shape[0]))
+
+    if metric == 'pearson':
+        dist = pdist(data, metric=lambda u, v: 1 - np.corrcoef(u, v)[0, 1])
+    elif metric == 'spearman':
+        from scipy.stats import spearmanr
+        dist = pdist(data, metric=lambda u, v: 1 - spearmanr(u, v).correlation)
+    elif metric == 'cosine':
+        dist = pdist(data, metric='cosine')
+    else:
+        dist = pdist(data, metric='euclidean')
+
+    link = linkage(dist, method=method)
+    dendro = dendrogram(link, no_plot=True)
+    return dendro['leaves']

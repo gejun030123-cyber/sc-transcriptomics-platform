@@ -3,7 +3,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
 import pytest
-from modules.visualization import compute_gene_variability, transform_heatmap_data
+from modules.visualization import compute_gene_variability, transform_heatmap_data, cluster_heatmap
 
 
 class TestComputeGeneVariability:
@@ -97,3 +97,44 @@ class TestTransformHeatmapData:
     def test_no_clip(self, sample_data):
         result = transform_heatmap_data(sample_data.copy(), row_scaling='zscore', clip_range=None)
         assert np.any(np.abs(result) > 0)
+
+
+class TestClusterHeatmap:
+    @pytest.fixture
+    def cluster_data(self):
+        return np.array([
+            [1, 1, -1, -1],
+            [1, 1, -1, -1],
+            [1, 1, -1, -1],
+            [-1, -1, 1, 1],
+            [-1, -1, 1, 1],
+            [-1, -1, 1, 1],
+        ], dtype=float)
+
+    def test_euclidean_ward(self, cluster_data):
+        order = cluster_heatmap(cluster_data, method='ward', metric='euclidean')
+        assert len(order) == 6
+        assert set(order) == {0, 1, 2, 3, 4, 5}
+        a_positions = [order.index(i) for i in [0, 1, 2]]
+        b_positions = [order.index(i) for i in [3, 4, 5]]
+        assert max(a_positions) - min(a_positions) <= 2
+        assert max(b_positions) - min(b_positions) <= 2
+
+    def test_pearson_metric(self, cluster_data):
+        order = cluster_heatmap(cluster_data, method='complete', metric='pearson')
+        assert len(order) == 6
+        assert set(order) == {0, 1, 2, 3, 4, 5}
+
+    def test_cosine_metric(self, cluster_data):
+        order = cluster_heatmap(cluster_data, method='average', metric='cosine')
+        assert len(order) == 6
+
+    def test_single_sample(self):
+        data = np.array([[1, 2, 3]])
+        order = cluster_heatmap(data)
+        assert order == [0]
+
+    def test_two_samples(self):
+        data = np.array([[1, 2], [3, 4]])
+        order = cluster_heatmap(data)
+        assert len(order) == 2
