@@ -107,19 +107,32 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         else:
             regulation.append('NS')
 
-    # Group means
+    # Group means — aligned to result.index (handles drop_duplicates_index reordering)
     mask1_arr = np.array([s in group1_samples for s in adata.obs.index])
     mask2_arr = np.array([s in group2_samples for s in adata.obs.index])
-    mean1 = counts[mask1_arr].mean(axis=0)
-    mean2 = counts[mask2_arr].mean(axis=0)
+    orig_var_names = list(adata.var_names)
+    var_id_to_col = {str(g): j for j, g in enumerate(orig_var_names)}
+    col_indices = np.array([var_id_to_col[gid] for gid in gene_ids_list if gid in var_id_to_col])
+    if len(col_indices) == n_genes:
+        mean1 = counts[mask1_arr][:, col_indices].mean(axis=0)
+        mean2 = counts[mask2_arr][:, col_indices].mean(axis=0)
+    else:
+        # Fallback: compute per-gene (handles partial overlap)
+        mean1 = np.zeros(n_genes)
+        mean2 = np.zeros(n_genes)
+        for i, gid in enumerate(gene_ids_list):
+            j = var_id_to_col.get(gid)
+            if j is not None:
+                mean1[i] = counts[mask1_arr, j].mean()
+                mean2[i] = counts[mask2_arr, j].mean()
 
     deg_df = pd.DataFrame({
         'gene': gene_names,
         'log2FC': np.round(log2fc, 4),
         'pvalue': pvalues,
         'padj': padj,
-        'mean_group1': np.round(mean1[:n_genes] if len(mean1) >= n_genes else mean1, 2),
-        'mean_group2': np.round(mean2[:n_genes] if len(mean2) >= n_genes else mean2, 2),
+        'mean_group1': np.round(mean1, 2),
+        'mean_group2': np.round(mean2, 2),
         'regulation': regulation
     })
     deg_df = deg_df.sort_values('padj')
@@ -168,8 +181,8 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'volcano',
                          'label': f'火山图 ({group1} vs {group2})'})
 
-    # MA plot
-    avg_expr = (mean1[:n_genes] + mean2[:n_genes]) / 2 if len(mean1) >= n_genes else (mean1 + mean2) / 2
+    # MA plot — mean1/mean2 already aligned to result.index (length == n_genes)
+    avg_expr = (mean1 + mean2) / 2
     fig_ma = go.Figure()
     for reg in ['NS', 'Up', 'Down']:
         idx = [i for i in range(n_genes) if regulation[i] == reg]
@@ -192,7 +205,7 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'ma',
                          'label': f'MA 图 ({group1} vs {group2})'})
 
-    # Save individual CSV
+    # Save individual CSV (保存过滤前的完整结果)
     csv_path = os.path.join(results_dir, f'bulk_deg_results{file_suffix}.csv')
     deg_df.to_csv(csv_path, index=False)
     result_files.append({'file_path': csv_path, 'file_type': 'csv', 'category': 'table',
@@ -204,15 +217,15 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     result_files.append({'file_path': top_csv, 'file_type': 'csv', 'category': 'table',
                          'label': f'Top {top_n} 差异基因 ({group1} vs {group2})'})
 
-    # 差异方向过滤
+    # n_up/n_down 基于完整结果计算（在方向过滤前）
+    n_up = int((deg_df['regulation'] == 'Up').sum())
+    n_down = int((deg_df['regulation'] == 'Down').sum())
+
+    # 差异方向过滤（仅影响返回的 deg_df，CSV 已保存完整结果）
     if regulation_filter == 'up':
         deg_df = deg_df[deg_df['regulation'] == 'Up'].copy()
     elif regulation_filter == 'down':
         deg_df = deg_df[deg_df['regulation'] == 'Down'].copy()
-
-    # 从过滤后的 deg_df 计算 n_up/n_down
-    n_up = int((deg_df['regulation'] == 'Up').sum())
-    n_down = int((deg_df['regulation'] == 'Down').sum())
 
     return deg_df, result_files, n_up, n_down
 
@@ -395,22 +408,22 @@ class BulkDEGAnalysis(BaseAnalysis):
         lrt_n_sig = 0
         if test_type == 'lrt':
             if method != 'edger':
-                self.progress(10, f"LRT 仅支持 edger 方法，当前方法 {method} 将使用 pairwise 检验")
+                self.progress(27, f"LRT 仅支持 edger 方法，当前方法 {method} 将使用 pairwise 检验")
                 test_type = 'pairwise'
             else:
                 try:
                     import inmoose
-                    self.progress(10, "运行 LRT 多组检验...")
+                    self.progress(27, "运行 LRT 多组检验...")
                     lrt_result, lrt_csv, lrt_n_sig = _run_lrt_test(
                         adata, counts, groupby, method, pval_threshold,
                         gene_id_to_name, results_dir, padj_method=padj_method
                     )
                     lrt_files.append({'file_path': lrt_csv, 'file_type': 'csv', 'category': 'table', 'label': f'LRT 多组检验结果 ({lrt_n_sig} 个显著基因)'})
                 except ImportError:
-                    self.progress(10, "inmoose 未安装，跳过 LRT 检验")
+                    self.progress(27, "inmoose 未安装，跳过 LRT 检验")
                     test_type = 'pairwise'
                 except Exception as e:
-                    self.progress(10, f"LRT 检验失败: {e}，回退到 pairwise")
+                    self.progress(27, f"LRT 检验失败: {e}，回退到 pairwise")
                     test_type = 'pairwise'
 
         if comparison_pairs:
@@ -612,7 +625,18 @@ class BulkDEGAnalysis(BaseAnalysis):
         import plotly.graph_objects as go
 
         boxplot_n = min(5, int(self.params.get('top_n', 20)))
-        name_to_id = {v: k for k, v in gene_id_to_name.items()} if gene_id_to_name else {}
+        # 构建双向映射：gene_name → gene_id（处理重名取首个）
+        name_to_id = {}
+        if gene_id_to_name:
+            for gid, gname in gene_id_to_name.items():
+                if gname not in name_to_id:
+                    name_to_id[gname] = gid
+        # 补充 adata.var['gene_name'] 映射（当 gene_id_to_name 不完整时）
+        if 'gene_name' in adata.var.columns:
+            for gid, gname in zip(adata.var_names, adata.var['gene_name']):
+                gname_str = str(gname).strip()
+                if gname_str and gname_str not in name_to_id:
+                    name_to_id[gname_str] = str(gid)
 
         plot_gene_list = []
         plot_genes_str = self.params.get('plot_genes', '').strip()
@@ -627,7 +651,8 @@ class BulkDEGAnalysis(BaseAnalysis):
         if plot_gene_list:
             self.progress(82, f"生成 {len(plot_gene_list)} 个基因箱线图...")
         for pg in plot_gene_list:
-            pg_id = name_to_id.get(pg, pg)
+            # 依次尝试：直接匹配 var_names → name_to_id 映射
+            pg_id = pg if pg in adata.var_names else name_to_id.get(pg, pg)
             if pg_id in adata.var_names:
                 fig_box = go.Figure()
                 for grp_name, samples in [(group1, group1_samples), (group2, group2_samples)]:

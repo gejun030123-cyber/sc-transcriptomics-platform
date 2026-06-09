@@ -5,10 +5,36 @@ import pandas as pd
 from modules.base import BaseAnalysis
 
 
+def _load_comparison_labels(project_dir):
+    """Load filename→label mapping from ResultFile table (same logic as deg-comparisons API)."""
+    label_map = {}
+    try:
+        from models import AnalysisTask, ResultFile
+        results_dir = os.path.join(project_dir, 'results')
+        csv_files = set(f for f in os.listdir(results_dir)
+                        if f.startswith('bulk_deg_results_') and f.endswith('.csv'))
+        pid = os.path.basename(project_dir)
+        for t in AnalysisTask.get_by_project(pid):
+            if t.module_name != 'bulk_deg':
+                continue
+            for rf in ResultFile.get_by_task(t.id):
+                fname = os.path.basename(rf.file_path)
+                if fname in csv_files and rf.label and 'vs' in rf.label:
+                    lbl = rf.label
+                    if '(' in lbl and ')' in lbl:
+                        lbl = lbl.split('(')[-1].rstrip(')')
+                    # Normalize: "moclel vs hmc3" → "moclel-vs-hmc3"
+                    lbl = lbl.replace(' vs ', '-vs-').strip()
+                    label_map[fname] = lbl
+    except Exception:
+        pass
+    return label_map
+
+
 class BulkDEGIntegrationAnalysis(BaseAnalysis):
     MODULE_NAME = "bulk_deg_integration"
     DISPLAY_NAME = "多组差异整合分析"
-    DESCRIPTION = "多组比较结果整合：Upset 图、一致性评分、logFC 矩阵分析"
+    DESCRIPTION = "多组比较结果整合：Upset 图、一致性评分、logFC 矩阵分析、表达式筛选"
     INPUT_REQUIRES = []
 
     def validate_input(self, adata):
@@ -41,21 +67,29 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
         fc_threshold = float(self.params.get('fc_threshold', 2.0))
         pval_threshold = float(self.params.get('pval_threshold', 0.05))
 
+        # 加载比较名映射（修复：使用真实比较名而非文件名）
+        self.progress(10, "加载比较名映射...")
+        label_map = _load_comparison_labels(self.project_dir)
+
         # 解析每个比较结果
         self.progress(15, f"解析 {len(deg_files)} 个比较结果...")
         comparisons = {}
+        name_key_map = {}  # key(文件名派生) → 真实比较名
         for f in deg_files:
             df = pd.read_csv(os.path.join(results_dir, f))
             if 'gene' not in df.columns or 'log2FC' not in df.columns:
                 continue
-            name = f.replace('bulk_deg_', '').replace('.csv', '')
-            comparisons[name] = df
+            file_key = f.replace('bulk_deg_', '').replace('.csv', '')
+            # 优先使用真实比较名，否则回退到文件名
+            real_name = label_map.get(f, file_key)
+            comparisons[real_name] = df
+            name_key_map[file_key] = real_name
 
         if len(comparisons) < 2:
             return {'output_adata': input_path, 'result_files': [],
                     'summary': {'error': f'仅找到 {len(comparisons)} 个比较结果，需要至少 2 个'}}
 
-        # 构建矩阵
+        # 构建矩阵（列名使用真实比较名）
         self.progress(25, "构建 logFC/padj 矩阵...")
         all_genes = set()
         for df in comparisons.values():
@@ -258,6 +292,13 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
             with open(fpath, 'w') as f: f.write(fig_top.to_json(engine="json"))
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': 'Top 一致性基因'})
 
+        # ===== 表达式筛选器 =====
+        filter_expression = self.params.get('filter_expression', '').strip()
+        if filter_expression:
+            result_files = self._run_filter(
+                filter_expression, comp_names, logfc_matrix, padj_matrix,
+                pval_threshold, log2fc_thresh, plots_dir, results_dir, result_files)
+
         # 输出 h5ad（原样传递）
         self.progress(95, "保存输出...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')
@@ -274,19 +315,158 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
         n_up_consistent = int((consistency_df['direction'] == 'Up').sum()) if n_consistent > 0 else 0
         n_down_consistent = int((consistency_df['direction'] == 'Down').sum()) if n_consistent > 0 else 0
 
+        summary = {
+            'n_comparisons': len(comparisons),
+            'comparisons': comp_names,
+            'total_genes': len(all_genes),
+            'n_consistent_genes': n_consistent,
+            'n_up_consistent': n_up_consistent,
+            'n_down_consistent': n_down_consistent,
+            'min_comparisons_threshold': min_comparisons,
+            'fc_threshold': fc_threshold,
+            'pval_threshold': pval_threshold,
+        }
+
         self.progress(100, "完成")
         return {
             'output_adata': output_path,
             'result_files': result_files,
-            'summary': {
-                'n_comparisons': len(comparisons),
-                'comparisons': comp_names,
-                'total_genes': len(all_genes),
-                'n_consistent_genes': n_consistent,
-                'n_up_consistent': n_up_consistent,
-                'n_down_consistent': n_down_consistent,
-                'min_comparisons_threshold': min_comparisons,
-                'fc_threshold': fc_threshold,
-                'pval_threshold': pval_threshold,
-            }
+            'summary': summary,
         }
+
+    def _run_filter(self, filter_expression, comp_names, logfc_matrix, padj_matrix,
+                    pval_threshold, log2fc_thresh, plots_dir, results_dir, result_files):
+        """Execute expression filter and generate result files."""
+        from modules.expression_parser import validate, evaluate, ParseError
+
+        self.progress(91, "解析筛选表达式...")
+        ast, err, warnings = validate(filter_expression, comp_names)
+        if err:
+            self.progress(-1, f"表达式错误: {err}")
+            return result_files
+        for w in warnings:
+            self.progress(-1, f"警告: {w}")
+
+        # Build gene index for evaluation
+        gene_sets = {}
+        for c in comp_names:
+            sig_mask = (padj_matrix[c] < pval_threshold) & (abs(logfc_matrix[c]) >= log2fc_thresh)
+            gene_sets[c] = set(logfc_matrix.index[sig_mask])
+
+        try:
+            filtered_genes = evaluate(ast, comp_names, gene_sets,
+                                      padj_matrix, logfc_matrix,
+                                      pval_threshold, log2fc_thresh)
+        except ParseError as e:
+            self.progress(-1, f"表达式求值错误: {e}")
+            return result_files
+
+        if not filtered_genes:
+            self.progress(-1, "筛选结果为空，无基因满足条件")
+            return result_files
+
+        filtered_genes = sorted(filtered_genes)
+        self.progress(92, f"筛选完成：{len(filtered_genes)} 个基因")
+
+        # 1. Filter result CSV
+        rows = []
+        for g in filtered_genes:
+            row = {'gene': g}
+            satisfies = []
+            for c in comp_names:
+                p = padj_matrix.loc[g, c]
+                fc = logfc_matrix.loc[g, c]
+                abs_fc = abs(fc)
+                sig = p < pval_threshold and abs_fc >= log2fc_thresh
+                direction = 'up' if sig and fc > 0 else 'down' if sig and fc < 0 else 'ns'
+                row[f'log2FC_{c}'] = round(float(fc), 4)
+                row[f'padj_{c}'] = round(float(p), 6)
+                row[f'direction_{c}'] = direction
+                if sig:
+                    satisfies.append(f"{c}:{direction}")
+            row['satisfies'] = '; '.join(satisfies)
+            rows.append(row)
+
+        filter_csv = os.path.join(results_dir, 'deg_filter_results.csv')
+        pd.DataFrame(rows).to_csv(filter_csv, index=False)
+        result_files.append({
+            'file_path': filter_csv, 'file_type': 'csv',
+            'category': 'table', 'label': f'筛选结果 ({len(filtered_genes)} 基因)'
+        })
+
+        # 2. Filter UpSet plot (which atoms the genes satisfy)
+        self.progress(93, "生成筛选 UpSet 图...")
+        import plotly.graph_objects as go
+        from itertools import combinations as iter_combos
+
+        atom_sets = {}
+        for c in comp_names:
+            atom_sets[c] = set(g for g in filtered_genes
+                               if padj_matrix.loc[g, c] < pval_threshold
+                               and abs(logfc_matrix.loc[g, c]) >= log2fc_thresh)
+
+        filter_upset_data = []
+        all_c = set(comp_names)
+        for r in range(1, len(comp_names) + 1):
+            for combo in iter_combos(comp_names, r):
+                combo_set = set(combo)
+                isect = filtered_genes.copy() if r == len(comp_names) else atom_sets[combo[0]].copy()
+                if r < len(comp_names):
+                    for c in combo[1:]:
+                        isect &= atom_sets[c]
+                isect = {g for g in isect if all(g in atom_sets[c] for c in combo)}
+                for o in all_c - combo_set:
+                    isect -= atom_sets[o]
+                if isect:
+                    filter_upset_data.append({
+                        'sets': ' ∩ '.join(combo), 'count': len(isect), 'n_sets': len(combo)
+                    })
+
+        filter_upset_data.sort(key=lambda x: x['count'], reverse=True)
+        if filter_upset_data:
+            top20 = filter_upset_data[:20]
+            fig_fu = go.Figure(go.Bar(
+                x=[d['sets'] for d in top20],
+                y=[d['count'] for d in top20],
+                marker_color='#1a237e'))
+            fig_fu.update_layout(title='筛选基因交集模式',
+                                 xaxis_title='比较组合', yaxis_title='基因数',
+                                 height=400, width=max(600, len(top20)*40+200))
+            fpath = os.path.join(plots_dir, 'deg_filter_upset.json')
+            with open(fpath, 'w') as f: f.write(fig_fu.to_json(engine="json"))
+            result_files.append({
+                'file_path': fpath, 'file_type': 'plotly_json',
+                'category': 'bar', 'label': '筛选基因 Upset 图'
+            })
+
+        # 3. Filter logFC heatmap
+        self.progress(94, "生成筛选基因 logFC 热图...")
+        show_n = min(len(filtered_genes), 80)
+        show_genes = filtered_genes[:show_n]
+        logfc_sub = logfc_matrix.reindex(show_genes).clip(-5, 5)
+        fig_fheat = go.Figure(data=go.Heatmap(
+            z=logfc_sub.values.tolist(), x=comp_names, y=show_genes,
+            colorscale='RdBu_r', zmid=0, colorbar=dict(title='log2FC')))
+        fig_fheat.update_layout(title='筛选基因 logFC 矩阵',
+                                height=max(400, len(show_genes)*14+100),
+                                width=max(500, len(comp_names)*80+200))
+        fpath = os.path.join(plots_dir, 'deg_filter_logfc_heatmap.json')
+        with open(fpath, 'w') as f: f.write(fig_fheat.to_json(engine="json"))
+        result_files.append({
+            'file_path': fpath, 'file_type': 'plotly_json',
+            'category': 'heatmap', 'label': '筛选基因 logFC 热图'
+        })
+
+        # 4. Expression parse tree visualization
+        self.progress(95, "生成表达式解析树...")
+        tree_data = ast.to_dict()
+        import json
+        fpath = os.path.join(plots_dir, 'deg_filter_expression_tree.json')
+        with open(fpath, 'w') as f:
+            json.dump(tree_data, f, ensure_ascii=False)
+        result_files.append({
+            'file_path': fpath, 'file_type': 'json',
+            'category': 'tree', 'label': '表达式解析树'
+        })
+
+        return result_files

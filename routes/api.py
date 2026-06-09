@@ -291,6 +291,107 @@ def deg_comparisons(pid):
     return jsonify({'comparisons': comparisons})
 
 
+@api_bp.route('/projects/<pid>/validate-filter-expression', methods=['POST'])
+def validate_filter_expression(pid):
+    """验证筛选表达式并返回匹配基因数"""
+    from modules.expression_parser import validate, evaluate, ParseError
+    import numpy as np
+
+    data = request.get_json(silent=True) or {}
+    expr = data.get('expression', '').strip()
+    selected = data.get('selected_comparisons', [])
+
+    if not expr:
+        return jsonify({'valid': False, 'error': '表达式为空'})
+
+    results_dir = os.path.join(Config.DATA_DIR, 'projects', pid, 'results')
+    if not os.path.isdir(results_dir):
+        return jsonify({'valid': False, 'error': '无 DEG 结果文件，请先运行 bulk_deg'})
+
+    # Load comparison labels (same logic as deg_comparisons)
+    csv_files = sorted([f for f in os.listdir(results_dir)
+                        if f.startswith('bulk_deg_results_') and f.endswith('.csv')])
+    if selected:
+        csv_files = [f for f in csv_files
+                     if f.replace('bulk_deg_', '').replace('.csv', '') in set(selected)]
+
+    label_map = {}
+    try:
+        from models import AnalysisTask, ResultFile
+        all_csv = set(f for f in os.listdir(results_dir)
+                      if f.startswith('bulk_deg_results_') and f.endswith('.csv'))
+        for t in AnalysisTask.get_by_project(pid):
+            if t.module_name != 'bulk_deg':
+                continue
+            for rf in ResultFile.get_by_task(t.id):
+                fname = os.path.basename(rf.file_path)
+                if fname in all_csv and rf.label and 'vs' in rf.label:
+                    lbl = rf.label
+                    if '(' in lbl and ')' in lbl:
+                        lbl = lbl.split('(')[-1].rstrip(')')
+                    label_map[fname] = lbl.replace(' vs ', '-vs-').strip()
+    except Exception:
+        pass
+
+    # Build matrices
+    import pandas as pd
+    comparisons = {}
+    for f in csv_files:
+        df = pd.read_csv(os.path.join(results_dir, f))
+        if 'gene' not in df.columns or 'log2FC' not in df.columns:
+            continue
+        real_name = label_map.get(f, f.replace('bulk_deg_', '').replace('.csv', ''))
+        comparisons[real_name] = df
+
+    if len(comparisons) < 1:
+        return jsonify({'valid': False, 'error': '未找到有效的比较结果'})
+
+    all_genes = set()
+    for df in comparisons.values():
+        all_genes.update(df['gene'].tolist())
+    all_genes = sorted(all_genes)
+    comp_names = sorted(comparisons.keys())
+
+    fc_threshold = float(data.get('fc_threshold', 2.0))
+    pval_threshold = float(data.get('pval_threshold', 0.05))
+    log2fc_thresh = np.log2(fc_threshold)
+
+    padj_matrix = pd.DataFrame(1.0, index=all_genes, columns=comp_names)
+    logfc_matrix = pd.DataFrame(0.0, index=all_genes, columns=comp_names)
+    all_genes_idx = pd.Index(all_genes)
+    for name, df in comparisons.items():
+        df_idx = df.set_index('gene')
+        common = all_genes_idx.intersection(df_idx.index)
+        if len(common) > 0:
+            logfc_matrix.loc[common, name] = df_idx.loc[common, 'log2FC']
+            padj_matrix.loc[common, name] = df_idx.loc[common, 'padj']
+
+    # Validate expression
+    ast, err, warnings = validate(expr, comp_names)
+    if err:
+        return jsonify({'valid': False, 'error': err})
+
+    # Build gene sets and evaluate
+    gene_sets = {}
+    for c in comp_names:
+        sig_mask = (padj_matrix[c] < pval_threshold) & (abs(logfc_matrix[c]) >= log2fc_thresh)
+        gene_sets[c] = set(logfc_matrix.index[sig_mask])
+
+    try:
+        filtered = evaluate(ast, comp_names, gene_sets, padj_matrix, logfc_matrix,
+                            pval_threshold, log2fc_thresh)
+    except ParseError as e:
+        return jsonify({'valid': False, 'error': str(e)})
+
+    return jsonify({
+        'valid': True,
+        'gene_count': len(filtered),
+        'comparisons_used': comp_names,
+        'warnings': warnings,
+        'parse_tree': ast.to_dict(),
+    })
+
+
 @api_bp.route('/data-info')
 def data_info():
     """返回输入文件的基本数据信息（样本数、基因数、样本名、注释列）"""

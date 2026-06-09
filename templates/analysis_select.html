@@ -119,6 +119,23 @@
                     {% elif param.type == 'textarea' %}
                     <textarea name="{{ param.key }}" class="form-control" id="param-{{ param.key }}"
                               rows="3" placeholder="{{ param.help }}">{{ param.default }}</textarea>
+                    {% if param.key == 'filter_expression' %}
+                    <div class="mt-2" id="filter-expr-toolbar">
+                        <div class="d-flex flex-wrap gap-1 mb-2">
+                            <span class="text-muted small me-1 align-self-center">快捷模板：</span>
+                            <button type="button" class="btn btn-outline-secondary btn-sm filter-tpl" data-expr="ALL:up">ALL:up</button>
+                            <button type="button" class="btn btn-outline-secondary btn-sm filter-tpl" data-expr="ALL:down">ALL:down</button>
+                            <button type="button" class="btn btn-outline-secondary btn-sm filter-tpl" data-expr="ANY:up">ANY:up</button>
+                            <button type="button" class="btn btn-outline-secondary btn-sm filter-tpl" data-expr="ANY:down">ANY:down</button>
+                        </div>
+                        <div class="d-flex gap-2 align-items-start">
+                            <button type="button" class="btn btn-outline-primary btn-sm" id="btn-validate-filter">
+                                验证表达式
+                            </button>
+                            <div id="filter-validate-result" class="small flex-grow-1" style="line-height:1.8;"></div>
+                        </div>
+                    </div>
+                    {% endif %}
                     {% elif param.type == 'number' %}
                     <input type="number" name="{{ param.key }}" class="form-control"
                            value="{{ param.default }}" step="{{ param.step|default(1) }}">
@@ -714,5 +731,80 @@ document.getElementById('btn-confirm-pipeline-save').addEventListener('click', a
         }
     } catch (e) { alert('保存失败: ' + e.message); }
 });
+
+// === 筛选表达式验证 ===
+(function() {
+    const ta = document.getElementById('param-filter_expression');
+    const btn = document.getElementById('btn-validate-filter');
+    const result = document.getElementById('filter-validate-result');
+    if (!ta || !btn || !result) return;
+
+    // 模板按钮
+    document.querySelectorAll('.filter-tpl').forEach(b => {
+        b.addEventListener('click', () => {
+            const expr = b.dataset.expr;
+            if (ta.value.trim()) {
+                ta.value = ta.value.trim() + ' AND ' + expr;
+            } else {
+                ta.value = expr;
+            }
+            ta.dispatchEvent(new Event('input'));
+        });
+    });
+
+    // 获取当前阈值参数
+    function getThresholds() {
+        const fc = document.querySelector('[name="fc_threshold"]');
+        const pv = document.querySelector('[name="pval_threshold"]');
+        return {
+            fc_threshold: fc ? parseFloat(fc.value) || 2.0 : 2.0,
+            pval_threshold: pv ? parseFloat(pv.value) || 0.05 : 0.05,
+        };
+    }
+
+    // 获取已选比较
+    function getSelectedComparisons() {
+        const checks = document.querySelectorAll('.multiselect-group[data-key="selected_comparisons"] input[type="checkbox"]:checked');
+        return Array.from(checks).map(c => c.value);
+    }
+
+    btn.addEventListener('click', async () => {
+        const expr = ta.value.trim();
+        if (!expr) {
+            result.innerHTML = '<span class="text-danger">请输入表达式</span>';
+            return;
+        }
+        btn.disabled = true;
+        btn.textContent = '验证中...';
+        result.innerHTML = '<span class="text-muted">正在验证...</span>';
+        try {
+            const resp = await fetch(`/api/projects/${PROJECT_ID}/validate-filter-expression`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    expression: expr,
+                    selected_comparisons: getSelectedComparisons(),
+                    ...getThresholds()
+                }),
+            });
+            const data = await resp.json();
+            if (data.valid) {
+                const gc = data.gene_count;
+                const color = gc > 0 ? 'text-success' : 'text-warning';
+                result.innerHTML = `<span class="${color}">✓ 匹配 <b>${gc}</b> 个基因</span>`;
+                if (data.warnings && data.warnings.length) {
+                    result.innerHTML += `<br><span class="text-warning">${data.warnings.join('<br>')}</span>`;
+                }
+            } else {
+                result.innerHTML = `<span class="text-danger">✗ ${data.error}</span>`;
+            }
+        } catch (e) {
+            result.innerHTML = `<span class="text-danger">请求失败: ${e.message}</span>`;
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '验证表达式';
+        }
+    });
+})();
 </script>
 {% endblock %}
