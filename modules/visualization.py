@@ -99,3 +99,41 @@ def compute_gene_variability(data, metric='var'):
         return np.max(data, axis=0) - np.min(data, axis=0)
     else:
         raise ValueError(f"未知变异度量: {metric}，支持: var/mad/cv/range")
+
+
+def transform_heatmap_data(data, row_scaling='zscore', pseudocount=1,
+                           winsorize='none', clip_range=(-3, 3), missing_value='ignore'):
+    """对热图数据进行标准化和变换。data: (samples, genes)"""
+    # 1. 缺失值处理
+    if missing_value == 'mean_fill':
+        col_means = np.nanmean(data, axis=0)
+        for j in range(data.shape[1]):
+            mask = np.isnan(data[:, j])
+            if mask.any():
+                data[mask, j] = col_means[j]
+    elif missing_value == 'zero_fill':
+        data = np.nan_to_num(data, nan=0.0)
+
+    # 2. Winsorize
+    if winsorize != 'none':
+        if winsorize == 'custom':
+            pct = 0.01
+        else:
+            pct = float(winsorize.replace('pct', '')) / 100
+        from scipy.stats.mstats import winsorize as sp_winsorize
+        data = sp_winsorize(data, limits=[pct, pct], axis=0).data if hasattr(
+            sp_winsorize(data, limits=[pct, pct], axis=0), 'data') else data
+
+    # 3. 行标准化
+    if row_scaling == 'zscore':
+        mean = np.mean(data, axis=0)
+        std = np.std(data, axis=0) + 1e-10
+        data = (data - mean) / std
+    elif row_scaling == 'center':
+        data = data - np.mean(data, axis=0)
+
+    # 4. 截断
+    if clip_range is not None:
+        data = np.clip(data, clip_range[0], clip_range[1])
+
+    return data
