@@ -103,7 +103,7 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
 
         logfc_matrix = pd.DataFrame(0.0, index=all_genes, columns=comp_names)
         padj_matrix = pd.DataFrame(1.0, index=all_genes, columns=comp_names)
-        regulation_matrix = pd.DataFrame(0.0, index=all_genes, columns=comp_names)
+        regulation_matrix = pd.DataFrame(0, index=all_genes, columns=comp_names, dtype=int)
 
         all_genes_idx = pd.Index(all_genes)
         reg_map = {'Up': 1, 'Down': -1}
@@ -414,7 +414,7 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
         for r in range(1, len(comp_names) + 1):
             for combo in iter_combos(comp_names, r):
                 combo_set = set(combo)
-                isect = filtered_genes.copy() if r == len(comp_names) else atom_sets[combo[0]].copy()
+                isect = set(filtered_genes) if r == len(comp_names) else atom_sets[combo[0]].copy()
                 if r < len(comp_names):
                     for c in combo[1:]:
                         isect &= atom_sets[c]

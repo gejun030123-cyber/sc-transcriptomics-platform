@@ -121,8 +121,8 @@ def transform_heatmap_data(data, row_scaling='zscore', pseudocount=1,
         else:
             pct = float(winsorize.replace('pct', '')) / 100
         from scipy.stats.mstats import winsorize as sp_winsorize
-        data = sp_winsorize(data, limits=[pct, pct], axis=0).data if hasattr(
-            sp_winsorize(data, limits=[pct, pct], axis=0), 'data') else data
+        winsorized = sp_winsorize(data, limits=[pct, pct], axis=0)
+        data = winsorized.data if hasattr(winsorized, 'data') else np.array(winsorized)
 
     # 3. 行标准化
     if row_scaling == 'zscore':
