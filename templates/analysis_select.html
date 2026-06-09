@@ -127,6 +127,7 @@
                             <button type="button" class="btn btn-outline-secondary btn-sm filter-tpl" data-expr="ALL:down">ALL:down</button>
                             <button type="button" class="btn btn-outline-secondary btn-sm filter-tpl" data-expr="ANY:up">ANY:up</button>
                             <button type="button" class="btn btn-outline-secondary btn-sm filter-tpl" data-expr="ANY:down">ANY:down</button>
+                            <button type="button" class="btn btn-outline-info btn-sm" id="filter-tpl-only">ONLY[comp]:up</button>
                         </div>
                         <div class="d-flex gap-2 align-items-start">
                             <button type="button" class="btn btn-outline-primary btn-sm" id="btn-validate-filter">
@@ -751,6 +752,27 @@ document.getElementById('btn-confirm-pipeline-save').addEventListener('click', a
             ta.dispatchEvent(new Event('input'));
         });
     });
+
+    // ONLY template button
+    const btnOnly = document.getElementById('filter-tpl-only');
+    if (btnOnly) {
+        btnOnly.addEventListener('click', () => {
+            // Get available comparisons from the multiselect
+            const checks = document.querySelectorAll('.multiselect-group[data-key="selected_comparisons"] input[type="checkbox"]');
+            const comps = Array.from(checks).map(c => c.value).filter(v => v);
+            const available = comps.length > 0 ? comps.join(', ') : '（请先运行 bulk_deg 并选择比较）';
+            const comp = prompt(`输入比较名（可用: ${available}）：`);
+            if (comp && comp.trim()) {
+                const expr = `ONLY[${comp.trim()}]:up`;
+                if (ta.value.trim()) {
+                    ta.value = ta.value.trim() + ' AND ' + expr;
+                } else {
+                    ta.value = expr;
+                }
+                ta.dispatchEvent(new Event('input'));
+            }
+        });
+    }
 
     // 获取当前阈值参数
     function getThresholds() {

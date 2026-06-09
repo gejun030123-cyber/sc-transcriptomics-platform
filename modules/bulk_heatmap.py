@@ -400,26 +400,47 @@ class BulkHeatmapAnalysis(BaseAnalysis):
                                 result_files, category='annotation', label=f'{gcol} 基因注释条')
 
         self.progress(85, "生成样本相关性热图...")
-        corr_matrix = np.corrcoef(norm_data)
-        fig_corr = go.Figure()
-        fig_corr.add_trace(go.Heatmap(
+        corr_method = self.params.get('corr_method', 'pearson')
+        corr_colorscale = self.params.get('corr_colorscale', 'Blues')
+
+        if corr_method == 'spearman':
+            from scipy.stats import spearmanr as sp_spearmanr
+            corr_result = sp_spearmanr(norm_data, axis=1)
+            corr_matrix = corr_result.correlation if hasattr(corr_result, 'correlation') else np.array([[1.0]])
+            if np.ndim(corr_matrix) == 0:
+                corr_matrix = np.array([[1.0]])
+        else:
+            corr_matrix = np.corrcoef(norm_data)
+
+        # 颜色范围：Blues 用 [0,1]，diverging 色图不设限
+        corr_zmin = 0 if corr_colorscale == 'Blues' else None
+        corr_zmax = 1 if corr_colorscale == 'Blues' else None
+        corr_zmid = 0 if corr_colorscale != 'Blues' else None
+
+        corr_kwargs = dict(
             z=corr_matrix.tolist(),
-            x=sample_labels,
-            y=sample_labels,
-            colorscale='Blues',
-            zmin=0, zmax=1,
-            colorbar=dict(title='Pearson r'),
+            x=sample_labels, y=sample_labels,
+            colorscale=corr_colorscale,
+            colorbar=dict(title=f'{corr_method.capitalize()} r'),
             hovertemplate='%{y} vs %{x}<br>r = %{z:.3f}<extra></extra>'
-        ))
+        )
+        if corr_zmin is not None:
+            corr_kwargs['zmin'] = corr_zmin
+        if corr_zmax is not None:
+            corr_kwargs['zmax'] = corr_zmax
+        if corr_zmid is not None:
+            corr_kwargs['zmid'] = corr_zmid
+
+        fig_corr = go.Figure()
+        fig_corr.add_trace(go.Heatmap(**corr_kwargs))
         fig_corr.update_layout(
-            title='样本相关性热图 (Pearson)',
+            title=f'样本相关性热图 ({corr_method.capitalize()})',
             height=max(400, adata.n_obs * 30 + 100),
             width=max(400, adata.n_obs * 30 + 100),
             plot_bgcolor='white'
         )
-        fpath = os.path.join(plots_dir, 'bulk_corr_heatmap.json')
-        with open(fpath, 'w') as f: f.write(fig_corr.to_json(engine="json"))
-        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': '样本相关性热图'})
+        save_plotly_json(fig_corr, plots_dir, 'bulk_corr_heatmap.json', result_files,
+                        category='heatmap', label='样本相关性热图')
 
         self.progress(95, "保存结果...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')
