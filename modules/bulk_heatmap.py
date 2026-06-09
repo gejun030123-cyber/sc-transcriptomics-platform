@@ -47,8 +47,19 @@ class BulkHeatmapAnalysis(BaseAnalysis):
 
         self.progress(40, "选择基因...")
 
+        # 向后兼容：从旧参数映射到新参数
+        gene_import_source = self.params.get('gene_import_source', '')
+        if not gene_import_source:
+            if self.params.get('custom_genes', '').strip():
+                gene_import_source = 'manual'
+            else:
+                gene_import_source = self.params.get('heatmap_type', 'top_var')
+
+        top_n = int(self.params.get('top_n', 50))
         custom_genes_str = self.params.get('custom_genes', '').strip()
-        if custom_genes_str:
+        var_metric = self.params.get('var_metric', 'var')
+
+        if gene_import_source == 'manual' or (custom_genes_str and gene_import_source not in ('deg', 'expression_filter')):
             gene_list = [g.strip() for g in custom_genes_str.replace('\n', ',').split(',') if g.strip()]
             var_names_list = list(adata.var_names)
             top_idx = [var_names_list.index(g) for g in gene_list if g in var_names_list]
@@ -58,16 +69,87 @@ class BulkHeatmapAnalysis(BaseAnalysis):
             title = f'自定义基因热图 ({len(top_idx)} genes)'
             if not_found:
                 title += f'，{len(not_found)} 个未找到'
-        elif hm_type == 'top_var' or hm_type not in ('deg',):
-            gene_var = np.var(norm_data, axis=0)
-            top_idx = np.argsort(gene_var)[::-1][:top_n]
-            title = f'Top {top_n} 高变异基因热图'
-        elif hm_type == 'deg' and os.path.exists(os.path.join(self.project_dir, 'results', 'bulk_deg_results.csv')):
-            deg_df = pd.read_csv(os.path.join(self.project_dir, 'results', 'bulk_deg_results.csv'))
-            deg_sig = deg_df[deg_df['regulation'] != 'NS'].head(top_n)
-            gene_list = set(deg_sig['gene'].tolist())
-            top_idx = [i for i, g in enumerate(adata.var_names) if g in gene_list][:top_n]
-            title = f'Top {top_n} 差异基因热图'
+
+        elif gene_import_source == 'deg':
+            deg_direction = self.params.get('deg_direction', 'both')
+            deg_sortby = self.params.get('deg_sortby', 'padj')
+            results_dir = os.path.join(self.project_dir, 'results')
+            deg_files = sorted([f for f in os.listdir(results_dir)
+                                if f.startswith('bulk_deg_results') and f.endswith('.csv')
+                                and 'merged' not in f and 'all_comparisons' not in f
+                                and 'lrt' not in f and 'top_genes' not in f])
+            if not deg_files:
+                raise ValueError("未找到 DEG 结果文件，请先运行 bulk_deg")
+            deg_df = pd.read_csv(os.path.join(results_dir, deg_files[0]))
+            if deg_direction == 'up':
+                deg_df = deg_df[deg_df['regulation'] == 'Up']
+            elif deg_direction == 'down':
+                deg_df = deg_df[deg_df['regulation'] == 'Down']
+            else:
+                deg_df = deg_df[deg_df['regulation'] != 'NS']
+            if deg_sortby == 'padj':
+                deg_df = deg_df.sort_values('padj')
+            elif deg_sortby == 'abs_logfc':
+                deg_df = deg_df.sort_values('log2FC', key=abs, ascending=False)
+            elif deg_sortby == 'logfc':
+                deg_df = deg_df.sort_values('log2FC', ascending=False)
+            gene_list = deg_df['gene'].head(top_n).tolist()
+            top_idx = [i for i, g in enumerate(adata.var_names) if g in set(gene_list)]
+            title = f'Top {len(top_idx)} 差异基因热图 ({deg_direction})'
+
+        elif gene_import_source == 'expression_filter':
+            from modules.expression_parser import validate, evaluate
+            filter_expr = self.params.get('filter_expression', '').strip()
+            if not filter_expr:
+                raise ValueError("expression_filter 模式需要填写筛选表达式")
+            results_dir = os.path.join(self.project_dir, 'results')
+            deg_files = sorted([f for f in os.listdir(results_dir)
+                                if f.startswith('bulk_deg_results') and f.endswith('.csv')
+                                and 'merged' not in f and 'all_comparisons' not in f
+                                and 'lrt' not in f and 'top_genes' not in f])
+            if not deg_files:
+                raise ValueError("未找到 DEG 结果文件，请先运行 bulk_deg")
+            comparisons = {}
+            for f in deg_files:
+                df = pd.read_csv(os.path.join(results_dir, f))
+                if 'gene' in df.columns and 'log2FC' in df.columns:
+                    name = f.replace('bulk_deg_', '').replace('.csv', '')
+                    comparisons[name] = df
+            comp_names = sorted(comparisons.keys())
+            all_genes_union = set()
+            for df in comparisons.values():
+                all_genes_union.update(df['gene'].tolist())
+            all_genes_union = sorted(all_genes_union)
+            logfc_m = pd.DataFrame(0.0, index=all_genes_union, columns=comp_names)
+            padj_m = pd.DataFrame(1.0, index=all_genes_union, columns=comp_names)
+            for name, df in comparisons.items():
+                df_idx = df.set_index('gene')
+                common = pd.Index(all_genes_union).intersection(df_idx.index)
+                if len(common) > 0:
+                    logfc_m.loc[common, name] = df_idx.loc[common, 'log2FC']
+                    padj_m.loc[common, name] = df_idx.loc[common, 'padj']
+            fc_thresh = float(self.params.get('fc_threshold', 2.0))
+            pv_thresh = float(self.params.get('pval_threshold', 0.05))
+            log2fc_t = np.log2(fc_thresh)
+            gene_sets = {}
+            for c in comp_names:
+                sig = (padj_m[c] < pv_thresh) & (abs(logfc_m[c]) >= log2fc_t)
+                gene_sets[c] = set(logfc_m.index[sig])
+            ast, err, _ = validate(filter_expr, comp_names)
+            if err:
+                raise ValueError(f"表达式错误: {err}")
+            filtered = evaluate(ast, comp_names, gene_sets, padj_m, logfc_m, pv_thresh, log2fc_t)
+            filtered = sorted(filtered)[:top_n]
+            top_idx = [i for i, g in enumerate(adata.var_names) if g in set(filtered)]
+            title = f'筛选基因热图 ({len(top_idx)} genes)'
+
+        else:
+            # top_var: 按变异度量选择
+            from modules.visualization import compute_gene_variability
+            gene_scores = compute_gene_variability(norm_data, metric=var_metric)
+            top_idx = np.argsort(gene_scores)[::-1][:top_n]
+            metric_names = {'var': '方差', 'mad': 'MAD', 'cv': '变异系数', 'range': '极差'}
+            title = f'Top {top_n} 高变异基因热图 ({metric_names.get(var_metric, var_metric)})'
 
         heat_data = norm_data[:, top_idx]
         gene_labels = [adata.var_names[i] for i in top_idx]
