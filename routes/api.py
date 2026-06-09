@@ -263,7 +263,9 @@ def deg_comparisons(pid):
         return jsonify({'comparisons': []})
 
     csv_files = sorted([f for f in os.listdir(results_dir)
-                        if f.startswith('bulk_deg_results_') and f.endswith('.csv')])
+                        if f.startswith('bulk_deg_results') and f.endswith('.csv')
+                        and 'merged' not in f and 'all_comparisons' not in f
+                        and 'lrt' not in f and 'top_genes' not in f])
 
     # 从 ResultFile 表提取真实比较名（如 "moclel vs hmc3"）
     label_map = {}
@@ -310,7 +312,9 @@ def validate_filter_expression(pid):
 
     # Load comparison labels (same logic as deg_comparisons)
     csv_files = sorted([f for f in os.listdir(results_dir)
-                        if f.startswith('bulk_deg_results_') and f.endswith('.csv')])
+                        if f.startswith('bulk_deg_results') and f.endswith('.csv')
+                        and 'merged' not in f and 'all_comparisons' not in f
+                        and 'lrt' not in f and 'top_genes' not in f])
     if selected:
         csv_files = [f for f in csv_files
                      if f.replace('bulk_deg_', '').replace('.csv', '') in set(selected)]

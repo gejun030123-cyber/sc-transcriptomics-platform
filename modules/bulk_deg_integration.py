@@ -12,7 +12,9 @@ def _load_comparison_labels(project_dir):
         from models import AnalysisTask, ResultFile
         results_dir = os.path.join(project_dir, 'results')
         csv_files = set(f for f in os.listdir(results_dir)
-                        if f.startswith('bulk_deg_results_') and f.endswith('.csv'))
+                        if f.startswith('bulk_deg_results') and f.endswith('.csv')
+                        and 'merged' not in f and 'all_comparisons' not in f
+                        and 'lrt' not in f and 'top_genes' not in f)
         pid = os.path.basename(project_dir)
         for t in AnalysisTask.get_by_project(pid):
             if t.module_name != 'bulk_deg':
@@ -49,9 +51,11 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
             return {'output_adata': input_path, 'result_files': [],
                     'summary': {'error': 'results 目录不存在，请先运行 bulk_deg'}}
 
-        # 扫描 bulk_deg 输出的 DEG CSV 文件（仅完整比较结果）
+        # 扫描 bulk_deg 输出的 DEG CSV 文件（支持带后缀和无后缀两种格式）
         deg_files = sorted([f for f in os.listdir(results_dir)
-                     if f.startswith('bulk_deg_results_') and f.endswith('.csv')])
+                     if f.startswith('bulk_deg_results') and f.endswith('.csv')
+                     and 'merged' not in f and 'all_comparisons' not in f
+                     and 'lrt' not in f and 'top_genes' not in f])
 
         # 按用户选择过滤比较文件
         selected = self.params.get('selected_comparisons', '').strip()
