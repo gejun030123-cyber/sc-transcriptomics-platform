@@ -27,7 +27,7 @@
 | 数据标准化 | DESeq2 / TMM / CPM / VST / rlog / 分位数标准化 | scipy |
 | 差异表达分析 | t-test / Mann-Whitney / DESeq2 / edgeR / limma、LRT 检验、火山图、MA 图、基因箱线图 | omicverse, inmoose |
 | PCA / UMAP | 降维可视化、载荷图、肘部图 | scanpy, sklearn |
-| 热图分析 | Top 差异基因热图、样本相关性热图、分组注释条 | scipy |
+| 热图分析 | Top 变异/差异基因热图、多种变异度量(MAD/CV)、z-score/中心化、灵活聚类(pearson/cosine)、多样式配置、表达式筛选导入 | scipy |
 | 通路富集 | ORA / GSEA（GO/KEGG/WikiPathways/Reactome） | omicverse, gseapy |
 | 时序分析 | 多时间点差异基因（spline F-test）、模糊 c-means 轨迹聚类 | patsy, statsmodels |
 | 多比较整合 | UpSet / Venn 图、一致性评分、logFC 矩阵、方向热图、**表达式筛选器**（AND/OR/NOT/XOR 集合运算） | plotly, matplotlib |
