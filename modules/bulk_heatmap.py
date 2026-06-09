@@ -17,8 +17,6 @@ class BulkHeatmapAnalysis(BaseAnalysis):
     def run(self, input_path):
         import scanpy as sc
         import plotly.graph_objects as go
-        from scipy.cluster.hierarchy import linkage, dendrogram
-        from scipy.spatial.distance import pdist
 
         self.progress(5, "加载数据...")
         from modules.io_utils import read_expression_matrix
@@ -151,29 +149,52 @@ class BulkHeatmapAnalysis(BaseAnalysis):
             metric_names = {'var': '方差', 'mad': 'MAD', 'cv': '变异系数', 'range': '极差'}
             title = f'Top {top_n} 高变异基因热图 ({metric_names.get(var_metric, var_metric)})'
 
-        heat_data = norm_data[:, top_idx]
+        heat_data = norm_data[:, top_idx].copy()
         gene_labels = [adata.var_names[i] for i in top_idx]
         sample_labels = adata.obs.index.tolist()
 
-        z_mean = heat_data.mean(axis=0)
-        z_std = heat_data.std(axis=0) + 1e-10
-        heat_z = (heat_data - z_mean) / z_std
-        heat_z = np.clip(heat_z, -3, 3)
+        # 数据变换
+        from modules.visualization import transform_heatmap_data, cluster_heatmap
+        row_scaling = self.params.get('row_scaling', 'zscore')
+        pseudocount = float(self.params.get('pseudocount', 1))
+        winsorize_param = self.params.get('winsorize', 'none')
+        missing_value = self.params.get('missing_value', 'ignore')
+        clip_str = self.params.get('clip_range', '-3,3').strip()
+        clip_range = None
+        if clip_str:
+            parts = [float(x.strip()) for x in clip_str.split(',') if x.strip()]
+            if len(parts) == 2:
+                clip_range = (parts[0], parts[1])
 
-        self.progress(60, "聚类样本...")
-        if adata.n_obs > 2:
-            sample_dist = pdist(heat_z, metric='euclidean')
-            sample_link = linkage(sample_dist, method='ward')
-            dendro = dendrogram(sample_link, no_plot=True)
-            sample_order = dendro['leaves']
+        # pseudocount: 对原始计数加偏移后 log2 转换
+        if pseudocount != 1 and 'normalization' not in adata.uns:
+            heat_data = np.log2(heat_data + pseudocount)
+
+        heat_z = transform_heatmap_data(
+            heat_data, row_scaling=row_scaling,
+            winsorize=winsorize_param, clip_range=clip_range, missing_value=missing_value)
+
+        # 聚类
+        row_cluster = self.params.get('row_cluster', 'yes')
+        col_cluster = self.params.get('col_cluster', 'yes')
+        row_method = self.params.get('row_method', 'ward')
+        col_method = self.params.get('col_method', 'ward')
+        row_metric = self.params.get('row_metric', 'euclidean')
+        col_metric = self.params.get('col_metric', 'euclidean')
+
+        if col_cluster == 'yes' and adata.n_obs > 2:
+            sample_order = cluster_heatmap(heat_z, method=col_method, metric=col_metric)
+        elif col_cluster == 'group_order' and groupby and groupby in adata.obs.columns:
+            groups = adata.obs[groupby].astype(str)
+            group_order = sorted(groups.unique())
+            sample_order = []
+            for g in group_order:
+                sample_order.extend([i for i in range(len(groups)) if groups.iloc[i] == g])
         else:
             sample_order = list(range(adata.n_obs))
 
-        if len(top_idx) > 2:
-            gene_dist = pdist(heat_z.T, metric='euclidean')
-            gene_link = linkage(gene_dist, method='ward')
-            gene_dendro = dendrogram(gene_link, no_plot=True)
-            gene_order = gene_dendro['leaves']
+        if row_cluster == 'yes' and len(top_idx) > 2:
+            gene_order = cluster_heatmap(heat_z.T, method=row_method, metric=row_metric)
         else:
             gene_order = list(range(len(top_idx)))
 
@@ -182,69 +203,97 @@ class BulkHeatmapAnalysis(BaseAnalysis):
         gene_ordered = [gene_labels[i] for i in gene_order]
 
         self.progress(75, "生成热图...")
-        annotation_colors = None
-        colorbar_trace = None
-        if groupby and groupby in adata.obs.columns:
-            groups = [adata.obs[groupby].iloc[i] for i in sample_order]
-            unique_groups = sorted(set(str(g) for g in groups))
-            palette = ['#1a237e', '#e53935', '#4caf50', '#ff9800', '#9c27b0',
-                        '#00bcd4', '#795548', '#607d8b', '#f44336', '#3f51b5']
-            group_color_map = {g: palette[i % len(palette)] for i, g in enumerate(unique_groups)}
-            annotation_colors = [group_color_map[str(g)] for g in groups]
 
-        fig = go.Figure()
-        fig.add_trace(go.Heatmap(
+        # 视觉样式参数
+        colorscale = self.params.get('colorscale', 'RdBu_r')
+        reverse_color = self.params.get('reverse_color', False)
+        if reverse_color:
+            colorscale = colorscale + '_r' if not colorscale.endswith('_r') else colorscale[:-2]
+
+        zmin_str = self.params.get('zmin', 'auto').strip()
+        zmax_str = self.params.get('zmax', 'auto').strip()
+        zmin = float(zmin_str) if zmin_str and zmin_str != 'auto' else None
+        zmax = float(zmax_str) if zmax_str and zmax_str != 'auto' else None
+
+        show_gene_labels = self.params.get('show_gene_labels', 'all')
+        show_sample_labels = self.params.get('show_sample_labels', 'all')
+        gene_font_size = int(self.params.get('gene_font_size', 8))
+        sample_font_size = int(self.params.get('sample_font_size', 9))
+
+        heatmap_kwargs = dict(
             z=heat_ordered.tolist(),
             x=gene_ordered,
             y=sample_ordered,
-            colorscale='RdBu_r',
-            zmid=0,
-            colorbar=dict(title='Z-score'),
-            hovertemplate='样本: %{y}<br>基因: %{x}<br>Z-score: %{z:.2f}<extra></extra>'
-        ))
+            colorscale=colorscale,
+            colorbar=dict(title='Z-score' if row_scaling == 'zscore' else 'Value'),
+            hovertemplate='样本: %{y}<br>基因: %{x}<br>值: %{z:.2f}<extra></extra>'
+        )
+        if row_scaling in ('zscore', 'center') and zmin is None and zmax is None:
+            heatmap_kwargs['zmid'] = 0
+        if zmin is not None:
+            heatmap_kwargs['zmin'] = zmin
+        if zmax is not None:
+            heatmap_kwargs['zmax'] = zmax
 
-        annotations = []
-        if annotation_colors:
-            for i, color in enumerate(annotation_colors):
-                annotations.append(dict(
-                    x=-0.5, y=i, xref='x', yref='y',
-                    text='', showarrow=False,
-                    xanchor='right'
-                ))
+        fig = go.Figure()
+        fig.add_trace(go.Heatmap(**heatmap_kwargs))
+
+        xaxis_kwargs = dict(tickangle=45, tickfont=dict(size=gene_font_size))
+        yaxis_kwargs = dict(tickfont=dict(size=sample_font_size))
+        if show_gene_labels == 'top20':
+            show_n = min(20, len(gene_ordered))
+            xaxis_kwargs['tickvals'] = list(range(show_n))
+            xaxis_kwargs['ticktext'] = gene_ordered[:show_n]
+        elif show_gene_labels == 'none':
+            xaxis_kwargs['showticklabels'] = False
+        if show_sample_labels == 'none':
+            yaxis_kwargs['showticklabels'] = False
 
         fig.update_layout(
             title=title,
-            xaxis=dict(tickangle=45, tickfont=dict(size=8)),
-            yaxis=dict(tickfont=dict(size=9)),
-            height=max(400, adata.n_obs * 25 + 150),
-            width=max(600, len(top_idx) * 12 + 200),
+            xaxis=xaxis_kwargs,
+            yaxis=yaxis_kwargs,
+            height=max(400, len(sample_ordered) * 25 + 150),
+            width=max(600, len(gene_ordered) * 12 + 200),
             plot_bgcolor='white'
         )
 
-        fpath = os.path.join(plots_dir, 'bulk_heatmap.json')
-        with open(fpath, 'w') as f: f.write(fig.to_json(engine="json"))
-        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': title})
+        from modules.visualization import save_plotly_json
+        save_plotly_json(fig, plots_dir, 'bulk_heatmap.json', result_files,
+                        category='heatmap', label=title)
 
-        # 分组注释条
-        if annotation_colors:
-            color_indices = [unique_groups.index(str(groups[i])) for i in range(len(groups))]
-            fig_annot = go.Figure()
-            fig_annot.add_trace(go.Heatmap(
-                z=[[i] for i in color_indices],
-                y=sample_ordered,
-                x=['Group'],
-                colorscale=[[i / max(len(unique_groups) - 1, 1), palette[i % len(palette)]] for i in range(len(unique_groups))],
-                showscale=False,
-                text=[[unique_groups[i]] for i in color_indices],
-                hovertemplate='%{y}: %{text}<extra></extra>'
-            ))
-            fig_annot.update_layout(
-                height=max(400, adata.n_obs * 25 + 150), width=100,
-                margin=dict(l=0, r=0, t=30, b=40)
-            )
-            fpath_annot = os.path.join(plots_dir, 'bulk_heatmap_annotation.json')
-            with open(fpath_annot, 'w') as f: f.write(fig_annot.to_json(engine="json"))
-            result_files.append({'file_path': fpath_annot, 'file_type': 'plotly_json', 'category': 'annotation', 'label': '分组注释条'})
+        # 注释条（支持多列）
+        from modules.visualization import build_annotation_bar, DEFAULT_PALETTE
+        annot_cols_str = self.params.get('annotation_columns', '').strip()
+        annot_cols = [c.strip() for c in annot_cols_str.split(',') if c.strip()]
+        if groupby and groupby in adata.obs.columns and groupby not in annot_cols:
+            annot_cols.insert(0, groupby)
+
+        if annot_cols:
+            annot_data, _ = build_annotation_bar(adata.obs, annot_cols,
+                                                 sample_order=sample_order, palette=DEFAULT_PALETTE)
+            for col_name, col_info in annot_data.items():
+                color_indices = [col_info['unique'].index(g) for g in col_info['groups']]
+                fig_annot = go.Figure()
+                n_groups = len(col_info['unique'])
+                if n_groups <= 1:
+                    cs = [[0, list(col_info['color_map'].values())[0]]]
+                else:
+                    cs = [[i / (n_groups - 1), col_info['color_map'][g]]
+                          for i, g in enumerate(col_info['unique'])]
+                fig_annot.add_trace(go.Heatmap(
+                    z=[[i] for i in color_indices],
+                    y=sample_ordered, x=[col_name],
+                    colorscale=cs, showscale=False,
+                    text=[[col_info['groups'][j]] for j in range(len(col_info['groups']))],
+                    hovertemplate='%{y}: %{text}<extra></extra>'
+                ))
+                fig_annot.update_layout(
+                    height=max(400, len(sample_ordered) * 25 + 150), width=100,
+                    margin=dict(l=0, r=0, t=30, b=40)
+                )
+                save_plotly_json(fig_annot, plots_dir, f'bulk_heatmap_annotation_{col_name}.json',
+                                result_files, category='annotation', label=f'{col_name} 注释条')
 
         self.progress(85, "生成样本相关性热图...")
         corr_matrix = np.corrcoef(norm_data)
