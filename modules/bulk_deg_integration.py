@@ -205,6 +205,41 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
             with open(fpath, 'w') as f: f.write(fig_upset.to_json(engine="json"))
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': 'Upset 交集图'})
 
+        # 比较差异基因数统计表
+        count_rows = []
+        for c in comp_names:
+            n_up = int(((padj_matrix[c] < pval_threshold) & (logfc_matrix[c] >= log2fc_thresh)).sum())
+            n_down = int(((padj_matrix[c] < pval_threshold) & (logfc_matrix[c] <= -log2fc_thresh)).sum())
+            count_rows.append({'comparison': c, 'n_up': n_up, 'n_down': n_down, 'n_total': n_up + n_down})
+        count_df = pd.DataFrame(count_rows)
+        count_csv = os.path.join(results_dir, 'deg_integration_comparison_counts.csv')
+        count_df.to_csv(count_csv, index=False)
+        result_files.append({'file_path': count_csv, 'file_type': 'csv', 'category': 'table', 'label': '各比较差异基因数统计'})
+
+        # Jaccard 相似度矩阵
+        if len(comp_names) >= 2:
+            jaccard_matrix = pd.DataFrame(1.0, index=comp_names, columns=comp_names)
+            for i, c1 in enumerate(comp_names):
+                for j, c2 in enumerate(comp_names):
+                    if i < j:
+                        intersection = len(sig_sets[c1] & sig_sets[c2])
+                        union = len(sig_sets[c1] | sig_sets[c2])
+                        jval = intersection / union if union > 0 else 0.0
+                        jaccard_matrix.loc[c1, c2] = jval
+                        jaccard_matrix.loc[c2, c1] = jval
+            fig_jaccard = go.Figure(data=go.Heatmap(
+                z=jaccard_matrix.values.tolist(), x=comp_names, y=comp_names,
+                colorscale='Blues', zmin=0, zmax=1,
+                text=np.round(jaccard_matrix.values, 3).tolist(), texttemplate='%{text}',
+                colorbar=dict(title='Jaccard')))
+            fig_jaccard.update_layout(
+                title='差异基因 Jaccard 相似度',
+                width=max(400, len(comp_names)*80+200),
+                height=max(400, len(comp_names)*80+200))
+            fpath = os.path.join(plots_dir, 'deg_integration_jaccard.json')
+            with open(fpath, 'w') as f: f.write(fig_jaccard.to_json(engine="json"))
+            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': 'Jaccard 相似度'})
+
         # 2b. Venn 图（2 或 3 个比较时生成）
         self.progress(62, "生成 Venn 图...")
         if len(comp_names) in (2, 3):
