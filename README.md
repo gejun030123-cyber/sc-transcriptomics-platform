@@ -30,7 +30,7 @@
 | 热图分析 | Top 差异基因热图、样本相关性热图、分组注释条 | scipy |
 | 通路富集 | ORA / GSEA（GO/KEGG/WikiPathways/Reactome） | omicverse, gseapy |
 | 时序分析 | 多时间点差异基因（spline F-test）、模糊 c-means 轨迹聚类 | patsy, statsmodels |
-| 多比较整合 | UpSet / Venn 图、一致性评分、logFC 矩阵、方向热图 | plotly, matplotlib |
+| 多比较整合 | UpSet / Venn 图、一致性评分、logFC 矩阵、方向热图、**表达式筛选器**（AND/OR/NOT/XOR 集合运算） | plotly, matplotlib |
 
 ### 通用功能
 
@@ -84,6 +84,29 @@ python app.py
 数据质控 → 标准化 → 差异表达 → PCA/UMAP → 热图 → 通路富集 / 时序分析 / 多比较整合
 ```
 
+### 多比较整合表达式筛选语法
+
+多比较整合模块支持通过集合逻辑表达式从多个 DEG 结果中提取目标基因集：
+
+```
+# 交集：两种药物共同上调
+hmc3-vs-ctrl:up AND rapa-vs-ctrl:up
+
+# 差集：仅 hmc3 上调，rapa 无变化
+hmc3-vs-ctrl:up NOT rapa-vs-ctrl:up
+
+# 简写：所有比较共同上调
+ALL:up
+
+# 简写：仅指定比较上调
+ONLY[hmc3-vs-ctrl]:up
+
+# 阈值覆盖
+hmc3-vs-ctrl:up(padj<<0.01|logFC>2)
+```
+
+支持运算符：`AND`/`∩`、`OR`/`∪`、`NOT`/`-`、`XOR`/`△`，支持括号嵌套。
+
 ## 项目结构
 
 ```
@@ -121,10 +144,12 @@ python app.py
 │   ├── bulk_heatmap.py    # Bulk 热图
 │   ├── bulk_enrichment.py # 通路富集
 │   ├── bulk_timecourse.py # 时序分析
-│   └── bulk_deg_integration.py # 多比较整合
+│   ├── bulk_deg_integration.py # 多比较整合
+│   └── expression_parser.py # 筛选表达式解析器
 ├── tests/                 # 单元测试
 │   ├── test_bulk_qc_helpers.py
-│   └── test_normalize_helpers.py
+│   ├── test_normalize_helpers.py
+│   └── test_expression_parser.py
 ├── genesets/              # 通路基因集数据库
 │   ├── GO_Biological_Process_2021.txt
 │   ├── GO_Cellular_Component_2021.txt
