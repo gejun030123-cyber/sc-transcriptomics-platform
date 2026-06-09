@@ -76,6 +76,11 @@ class BulkHeatmapAnalysis(BaseAnalysis):
                                 if f.startswith('bulk_deg_results') and f.endswith('.csv')
                                 and 'merged' not in f and 'all_comparisons' not in f
                                 and 'lrt' not in f and 'top_genes' not in f])
+            deg_comparison = self.params.get('deg_comparison', '').strip()
+            if deg_comparison:
+                matched = [f for f in deg_files if deg_comparison in f.replace('bulk_deg_', '').replace('.csv', '')]
+                if matched:
+                    deg_files = matched[:1]
             if not deg_files:
                 raise ValueError("未找到 DEG 结果文件，请先运行 bulk_deg")
             deg_df = pd.read_csv(os.path.join(results_dir, deg_files[0]))
@@ -211,6 +216,45 @@ class BulkHeatmapAnalysis(BaseAnalysis):
         heat_ordered = heat_z[np.ix_(sample_order, gene_order)]
         sample_ordered = [sample_labels[i] for i in sample_order]
         gene_ordered = [gene_labels[i] for i in gene_order]
+
+        # 上调/下调分开排列
+        up_down_separate = self.params.get('up_down_separate', False)
+        if isinstance(up_down_separate, str):
+            up_down_separate = up_down_separate.lower() in ('true', '1', 'yes', 'on')
+
+        if up_down_separate and gene_import_source == 'deg':
+            results_dir_sep = os.path.join(self.project_dir, 'results')
+            sep_deg_files = sorted([f for f in os.listdir(results_dir_sep)
+                                    if f.startswith('bulk_deg_results') and f.endswith('.csv')
+                                    and 'merged' not in f and 'all_comparisons' not in f
+                                    and 'lrt' not in f and 'top_genes' not in f])
+            deg_comparison_sep = self.params.get('deg_comparison', '').strip()
+            if deg_comparison_sep:
+                sep_matched = [f for f in sep_deg_files if deg_comparison_sep in f.replace('bulk_deg_', '').replace('.csv', '')]
+                if sep_matched:
+                    sep_deg_files = sep_matched[:1]
+            if sep_deg_files:
+                sep_deg_df = pd.read_csv(os.path.join(results_dir_sep, sep_deg_files[0]))
+                gene_reg_map = dict(zip(sep_deg_df['gene'], sep_deg_df['regulation']))
+                up_genes = [g for g in gene_ordered if gene_reg_map.get(g) == 'Up']
+                down_genes = [g for g in gene_ordered if gene_reg_map.get(g) == 'Down']
+                other_genes = [g for g in gene_ordered if g not in up_genes and g not in down_genes]
+                if up_genes and down_genes:
+                    # Build reordered data with gap between up and down
+                    up_idx = [gene_labels.index(g) for g in up_genes]
+                    down_idx = [gene_labels.index(g) for g in down_genes]
+                    other_idx = [gene_labels.index(g) for g in other_genes]
+                    gap_col = np.full((heat_ordered.shape[0], 1), np.nan)
+                    parts = []
+                    if up_idx:
+                        parts.append(heat_ordered[:, up_idx])
+                    parts.append(gap_col)
+                    if down_idx:
+                        parts.append(heat_ordered[:, down_idx])
+                    if other_idx:
+                        parts.append(heat_ordered[:, other_idx])
+                    heat_ordered = np.hstack(parts)
+                    gene_ordered = up_genes + ['---'] + down_genes + other_genes
 
         self.progress(75, "生成热图...")
 
