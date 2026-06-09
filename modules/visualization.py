@@ -160,3 +160,51 @@ def cluster_heatmap(data, method='ward', metric='euclidean'):
     link = linkage(dist, method=method)
     dendro = dendrogram(link, no_plot=True)
     return dendro['leaves']
+
+
+DEFAULT_PALETTE = ['#1a237e', '#e53935', '#4caf50', '#ff9800', '#9c27b0',
+                   '#00bcd4', '#795548', '#607d8b', '#f44336', '#3f51b5']
+
+
+def build_annotation_bar(obs, columns, sample_order=None, palette=None):
+    """
+    为多个注释列生成颜色映射数据。
+
+    Returns:
+        fig_data: dict {col_name: {'colors': [...], 'groups': [...], 'unique': [...], 'color_map': {...}}}
+        unique_groups: dict {col_name: [unique_values]}
+    """
+    if palette is None:
+        palette = DEFAULT_PALETTE
+    if sample_order is None:
+        sample_order = list(range(len(obs)))
+
+    fig_data = {}
+    unique_groups = {}
+    for col in columns:
+        if col not in obs.columns:
+            continue
+        values = [str(obs[col].iloc[i]) for i in sample_order]
+        uniq = sorted(set(values))
+        color_map = {g: palette[i % len(palette)] for i, g in enumerate(uniq)}
+        fig_data[col] = {
+            'colors': [color_map[v] for v in values],
+            'groups': values,
+            'unique': uniq,
+            'color_map': color_map,
+        }
+        unique_groups[col] = uniq
+    return fig_data, unique_groups
+
+
+def save_plotly_json(fig, plots_dir, filename, result_files,
+                     file_type='plotly_json', category='heatmap', label=''):
+    """保存 Plotly 图表为 JSON 并追加到 result_files 列表。"""
+    import os
+    fpath = os.path.join(plots_dir, filename)
+    with open(fpath, 'w') as f:
+        f.write(fig.to_json(engine="json"))
+    result_files.append({
+        'file_path': fpath, 'file_type': file_type,
+        'category': category, 'label': label,
+    })

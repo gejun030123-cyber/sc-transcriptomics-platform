@@ -3,7 +3,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
 import pytest
-from modules.visualization import compute_gene_variability, transform_heatmap_data, cluster_heatmap
+import pandas as pd
+import tempfile
+import json
+from modules.visualization import (
+    compute_gene_variability, transform_heatmap_data, cluster_heatmap,
+    build_annotation_bar, save_plotly_json,
+)
 
 
 class TestComputeGeneVariability:
@@ -138,3 +144,55 @@ class TestClusterHeatmap:
         data = np.array([[1, 2], [3, 4]])
         order = cluster_heatmap(data)
         assert len(order) == 2
+
+
+class TestBuildAnnotationBar:
+    def test_single_column(self):
+        obs = pd.DataFrame({'group': ['A', 'A', 'B', 'B']}, index=['s1', 's2', 's3', 's4'])
+        fig_data, unique_groups = build_annotation_bar(obs, ['group'], sample_order=[0, 1, 2, 3])
+        assert 'group' in fig_data
+        assert len(unique_groups['group']) == 2
+
+    def test_multiple_columns(self):
+        obs = pd.DataFrame({
+            'group': ['A', 'A', 'B', 'B'],
+            'batch': ['b1', 'b2', 'b1', 'b2']
+        }, index=['s1', 's2', 's3', 's4'])
+        fig_data, unique_groups = build_annotation_bar(obs, ['group', 'batch'])
+        assert 'group' in fig_data
+        assert 'batch' in fig_data
+
+    def test_empty_columns(self):
+        obs = pd.DataFrame({'group': ['A', 'B']}, index=['s1', 's2'])
+        fig_data, unique_groups = build_annotation_bar(obs, [])
+        assert len(fig_data) == 0
+
+    def test_missing_column_skipped(self):
+        obs = pd.DataFrame({'group': ['A', 'B']}, index=['s1', 's2'])
+        fig_data, _ = build_annotation_bar(obs, ['group', 'nonexistent'])
+        assert 'group' in fig_data
+        assert 'nonexistent' not in fig_data
+
+
+class TestSavePlotlyJson:
+    def test_save_creates_file(self):
+        import plotly.graph_objects as go
+        fig = go.Figure(go.Heatmap(z=[[1, 2], [3, 4]]))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result_files = []
+            save_plotly_json(fig, tmpdir, 'test_heatmap.json', result_files,
+                            category='heatmap', label='测试热图')
+            assert os.path.exists(os.path.join(tmpdir, 'test_heatmap.json'))
+            assert len(result_files) == 1
+            assert result_files[0]['category'] == 'heatmap'
+            assert result_files[0]['label'] == '测试热图'
+
+    def test_save_valid_json(self):
+        import plotly.graph_objects as go
+        fig = go.Figure(go.Heatmap(z=[[1, 2], [3, 4]]))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result_files = []
+            save_plotly_json(fig, tmpdir, 'test.json', result_files)
+            with open(os.path.join(tmpdir, 'test.json')) as f:
+                data = json.load(f)
+            assert 'data' in data
