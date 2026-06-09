@@ -73,6 +73,8 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
         consistency_n = int(self.params.get('consistency_n', 50))
         fc_threshold = float(self.params.get('fc_threshold', 2.0))
         pval_threshold = float(self.params.get('pval_threshold', 0.05))
+        upset_top_n = int(self.params.get('upset_top_n', 20))
+        logfc_clip = float(self.params.get('logfc_clip_range', 5.0))
 
         # 加载比较名映射（修复：使用真实比较名而非文件名）
         self.progress(10, "加载比较名映射...")
@@ -147,6 +149,8 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
         consistency_df = pd.DataFrame(consistency_scores)
         if len(consistency_df) > 0:
             consistency_df = consistency_df.sort_values('consistency_score', ascending=False, key=abs)
+        else:
+            self.progress(-1, "警告: 无一致性基因通过阈值，请尝试放宽 fc_threshold 或 pval_threshold")
 
         # 输出目录
         plots_dir = os.path.join(self.project_dir, 'plots')
@@ -189,7 +193,7 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
         intersection_data.sort(key=lambda x: x['count'], reverse=True)
 
         if intersection_data:
-            top_intersections = intersection_data[:20]
+            top_intersections = intersection_data[:upset_top_n]
             fig_upset = go.Figure(go.Bar(
                 x=[d['sets'] for d in top_intersections],
                 y=[d['count'] for d in top_intersections],
@@ -290,7 +294,7 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
             top_genes_fc = consistency_df.head(consistency_n)['gene'].tolist()
             logfc_subset = logfc_matrix.reindex(top_genes_fc).dropna()
             if len(logfc_subset) > 0:
-                logfc_subset = logfc_subset.clip(-5, 5)
+                logfc_subset = logfc_subset.clip(-logfc_clip, logfc_clip)
                 fig_heat = go.Figure(data=go.Heatmap(
                     z=logfc_subset.values.tolist(), x=comp_names, y=logfc_subset.index.tolist(),
                     colorscale='RdBu_r', zmid=0, colorbar=dict(title='log2FC')))
@@ -437,6 +441,15 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
             'category': 'table', 'label': f'筛选结果 ({len(filtered_genes)} 基因)'
         })
 
+        # 5. 基因列表纯文本导出
+        gene_list_path = os.path.join(results_dir, 'deg_filter_gene_list.txt')
+        with open(gene_list_path, 'w') as f:
+            f.write('\n'.join(filtered_genes))
+        result_files.append({
+            'file_path': gene_list_path, 'file_type': 'txt',
+            'category': 'table', 'label': '筛选基因列表 (txt)'
+        })
+
         # 2. Filter UpSet plot (which atoms the genes satisfy)
         self.progress(93, "生成筛选 UpSet 图...")
         import plotly.graph_objects as go
@@ -484,9 +497,11 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
 
         # 3. Filter logFC heatmap
         self.progress(94, "生成筛选基因 logFC 热图...")
-        show_n = min(len(filtered_genes), 80)
+        filter_show_n = int(self.params.get('filter_show_n', 80))
+        show_n = min(len(filtered_genes), filter_show_n)
         show_genes = filtered_genes[:show_n]
-        logfc_sub = logfc_matrix.reindex(show_genes).clip(-5, 5)
+        logfc_clip = float(self.params.get('logfc_clip_range', 5.0))
+        logfc_sub = logfc_matrix.reindex(show_genes).clip(-logfc_clip, logfc_clip)
         fig_fheat = go.Figure(data=go.Heatmap(
             z=logfc_sub.values.tolist(), x=comp_names, y=show_genes,
             colorscale='RdBu_r', zmid=0, colorbar=dict(title='log2FC')))

@@ -315,6 +315,12 @@ PARAM_SCHEMAS = {
         {'key': 'filter_expression', 'label': '筛选表达式（可选）', 'type': 'textarea', 'default': '',
          'help': '通过集合逻辑表达式筛选目标基因集。支持 AND/OR/NOT/XOR 运算符和 ALL/ANY/ONLY 简写。'
                  '示例：ALL:up | hmc3-vs-ctrl:up AND rapa-vs-ctrl:down | ONLY[hmc3-vs-ctrl]:up'},
+        {'key': 'upset_top_n', 'label': 'Upset 图显示数', 'type': 'number', 'default': 20, 'step': 5,
+         'help': 'Upset 图显示的交集模式数量。'},
+        {'key': 'logfc_clip_range', 'label': 'logFC 截断范围', 'type': 'number', 'default': 5.0, 'step': 0.5,
+         'help': 'logFC 热图的颜色截断范围（±值）。'},
+        {'key': 'filter_show_n', 'label': '筛选热图显示基因数', 'type': 'number', 'default': 80, 'step': 10,
+         'help': '筛选基因 logFC 热图最多显示的基因数。'},
     ],
 }
 
