@@ -134,6 +134,8 @@ PARAM_SCHEMAS = {
          'help': '基因在至少 N 个样本中达到最小表达阈值才保留。0 = 不过滤。建议设为最小组的样本数。'},
         {'key': 'max_zero_pct', 'label': '最大零值比例 (%)', 'type': 'number', 'default': 0, 'step': 1,
          'help': '基因在超过此比例的样本中为零则被过滤。0 = 不过滤。建议 50-70%。'},
+        {'key': 'cpm_target', 'label': 'CPM 缩放目标', 'type': 'number', 'default': 1000000, 'step': 100000,
+         'help': 'CPM 标准化的缩放目标值。默认 1e6（标准 CPM）。'},
     ],
     'bulk_deg': [
         {'key': 'groupby', 'label': '分组列名', 'type': 'text', 'default': '', 'help': '分组列名。adata.obs 中用于区分实验组和对照组的列。如 condition、treatment、group。'},

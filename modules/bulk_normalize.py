@@ -72,9 +72,10 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             adata.layers['normalized'] = np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
 
         elif method == 'cpm':
+            cpm_target = float(self.params.get('cpm_target', 1e6))
             lib_sizes = raw_counts.sum(axis=1, keepdims=True)
             lib_sizes[lib_sizes == 0] = 1  # 避免除零
-            cpm = raw_counts / lib_sizes * 1e6
+            cpm = raw_counts / lib_sizes * cpm_target
             adata.layers['normalized'] = cpm
             adata.X = np.log2(cpm + 1)
 
