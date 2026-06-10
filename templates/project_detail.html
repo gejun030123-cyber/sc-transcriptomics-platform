@@ -94,6 +94,12 @@
 </div>
 
 <script>
+function escapeHtml(text) {
+    const d = document.createElement('div');
+    d.textContent = text;
+    return d.innerHTML;
+}
+
 function loadAdataInfo() {
     const panel = document.getElementById('adata-info-panel');
     const content = document.getElementById('adata-info-content');
@@ -104,7 +110,7 @@ function loadAdataInfo() {
         .then(r => r.json())
         .then(data => {
             if (data.error) {
-                content.innerHTML = '<div class="text-danger small">' + data.error + '</div>';
+                content.innerHTML = '<div class="text-danger small">' + escapeHtml(data.error) + '</div>';
                 return;
             }
             let html = '';
@@ -113,7 +119,7 @@ function loadAdataInfo() {
             html += '<div class="mb-3">';
             html += '<div class="fw-bold text-primary mb-1">基本信息</div>';
             html += '<table class="table table-sm table-borderless mb-0" style="font-size:0.85rem;">';
-            html += `<tr><td class="text-muted" style="width:120px;">文件名</td><td>${data.file}</td></tr>`;
+            html += `<tr><td class="text-muted" style="width:120px;">文件名</td><td>${escapeHtml(data.file)}</td></tr>`;
             html += `<tr><td class="text-muted">细胞数 (obs)</td><td><strong>${data.n_obs.toLocaleString()}</strong></td></tr>`;
             html += `<tr><td class="text-muted">基因数 (var)</td><td><strong>${data.n_vars.toLocaleString()}</strong></td></tr>`;
             html += '</table></div>';
@@ -127,7 +133,7 @@ function loadAdataInfo() {
                 for (const col of data.obs_columns) {
                     const vals = col.values ? col.values.slice(0, 5).join(', ') + (col.values.length > 5 ? '...' : '') : '-';
                     const nun = col.n_unique != null ? col.n_unique : '-';
-                    html += `<tr><td><code>${col.name}</code></td><td>${col.dtype}</td><td>${nun}</td><td class="text-muted">${vals}</td></tr>`;
+                    html += `<tr><td><code>${escapeHtml(col.name)}</code></td><td>${escapeHtml(col.dtype)}</td><td>${escapeHtml(String(nun))}</td><td class="text-muted">${escapeHtml(vals)}</td></tr>`;
                 }
                 html += '</tbody></table></div></div>';
             }
@@ -141,7 +147,7 @@ function loadAdataInfo() {
                 for (const col of data.var_columns) {
                     const vals = col.values ? col.values.slice(0, 5).join(', ') + (col.values.length > 5 ? '...' : '') : '-';
                     const nun = col.n_unique != null ? col.n_unique : '-';
-                    html += `<tr><td><code>${col.name}</code></td><td>${col.dtype}</td><td>${nun}</td><td class="text-muted">${vals}</td></tr>`;
+                    html += `<tr><td><code>${escapeHtml(col.name)}</code></td><td>${escapeHtml(col.dtype)}</td><td>${escapeHtml(String(nun))}</td><td class="text-muted">${escapeHtml(vals)}</td></tr>`;
                 }
                 html += '</tbody></table></div></div>';
             }
@@ -150,7 +156,7 @@ function loadAdataInfo() {
             if (data.var_names_sample && data.var_names_sample.length) {
                 html += '<div class="mb-3">';
                 html += '<div class="fw-bold text-primary mb-1">var_names（前 20 个基因）</div>';
-                html += '<div class="small text-muted" style="word-break:break-all;">' + data.var_names_sample.join(', ') + '</div>';
+                html += '<div class="small text-muted" style="word-break:break-all;">' + data.var_names_sample.map(v => escapeHtml(v)).join(', ') + '</div>';
                 html += '</div>';
             }
 
@@ -158,7 +164,7 @@ function loadAdataInfo() {
             if (data.obs_names_sample && data.obs_names_sample.length) {
                 html += '<div class="mb-3">';
                 html += '<div class="fw-bold text-primary mb-1">obs_names（前 10 个细胞）</div>';
-                html += '<div class="small text-muted" style="word-break:break-all;">' + data.obs_names_sample.join(', ') + '</div>';
+                html += '<div class="small text-muted" style="word-break:break-all;">' + data.obs_names_sample.map(v => escapeHtml(v)).join(', ') + '</div>';
                 html += '</div>';
             }
 
@@ -166,7 +172,7 @@ function loadAdataInfo() {
             if (data.layers && data.layers.length) {
                 html += '<div class="mb-3">';
                 html += `<div class="fw-bold text-primary mb-1">layers <span class="badge bg-secondary">${data.layers.length}</span></div>`;
-                html += '<div class="small">' + data.layers.map(k => '<code class="me-2">' + k + '</code>').join('') + '</div>';
+                html += '<div class="small">' + data.layers.map(k => '<code class="me-2">' + escapeHtml(k) + '</code>').join('') + '</div>';
                 html += '</div>';
             }
 
@@ -177,7 +183,7 @@ function loadAdataInfo() {
                 html += '<table class="table table-sm table-striped mb-0" style="font-size:0.8rem;">';
                 html += '<thead><tr><th>Key</th><th>Shape</th><th>Dtype</th></tr></thead><tbody>';
                 for (const m of data.obsm) {
-                    html += `<tr><td><code>${m.key}</code></td><td>${m.shape.join(' × ')}</td><td>${m.dtype}</td></tr>`;
+                    html += `<tr><td><code>${escapeHtml(m.key)}</code></td><td>${escapeHtml(String(m.shape.join(' × ')))}</td><td>${escapeHtml(m.dtype)}</td></tr>`;
                 }
                 html += '</tbody></table></div>';
             }
@@ -189,7 +195,7 @@ function loadAdataInfo() {
                 html += '<table class="table table-sm table-striped mb-0" style="font-size:0.8rem;">';
                 html += '<thead><tr><th>Key</th><th>Shape</th><th>Dtype</th></tr></thead><tbody>';
                 for (const m of data.varm) {
-                    html += `<tr><td><code>${m.key}</code></td><td>${m.shape.join(' × ')}</td><td>${m.dtype}</td></tr>`;
+                    html += `<tr><td><code>${escapeHtml(m.key)}</code></td><td>${escapeHtml(String(m.shape.join(' × ')))}</td><td>${escapeHtml(m.dtype)}</td></tr>`;
                 }
                 html += '</tbody></table></div>';
             }
@@ -198,7 +204,7 @@ function loadAdataInfo() {
             if (data.obsp && data.obsp.length) {
                 html += '<div class="mb-3">';
                 html += `<div class="fw-bold text-primary mb-1">obsp（邻接矩阵） <span class="badge bg-secondary">${data.obsp.length}</span></div>`;
-                html += '<div class="small">' + data.obsp.map(k => '<code class="me-2">' + k + '</code>').join('') + '</div>';
+                html += '<div class="small">' + data.obsp.map(k => '<code class="me-2">' + escapeHtml(k) + '</code>').join('') + '</div>';
                 html += '</div>';
             }
 
@@ -213,7 +219,7 @@ function loadAdataInfo() {
                     if (u.type === 'ndarray') preview = `shape: ${u.shape.join(' × ')}, dtype: ${u.dtype}`;
                     else if (u.type === 'dict') preview = `子键: ${u.keys.join(', ')}`;
                     else preview = u.preview || '';
-                    html += `<tr><td><code>${u.key}</code></td><td>${u.type}</td><td class="text-muted">${preview}</td></tr>`;
+                    html += `<tr><td><code>${escapeHtml(u.key)}</code></td><td>${escapeHtml(u.type)}</td><td class="text-muted">${escapeHtml(preview)}</td></tr>`;
                 }
                 html += '</tbody></table></div>';
             }
@@ -221,7 +227,7 @@ function loadAdataInfo() {
             content.innerHTML = html;
         })
         .catch(err => {
-            content.innerHTML = '<div class="text-danger small">请求失败: ' + err.message + '</div>';
+            content.innerHTML = '<div class="text-danger small">请求失败: ' + escapeHtml(err.message) + '</div>';
         });
 }
 </script>

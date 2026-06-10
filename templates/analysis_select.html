@@ -231,6 +231,12 @@ const PROJECT_ID = '{{ project.id }}';
 const MODULE_NAME = '{{ module.name }}';
 const ANALYSIS_TYPE = MODULE_NAME.startsWith('bulk_') ? 'bulk' : 'sc';
 
+function escapeHtml(text) {
+    const d = document.createElement('div');
+    d.textContent = text;
+    return d.innerHTML;
+}
+
 function collectCurrentParams() {
     const params = {};
     document.querySelectorAll('.param-form input, .param-form select, .param-form textarea').forEach(el => {
@@ -290,9 +296,9 @@ async function loadPresets() {
         data.presets.forEach(p => {
             const li = document.createElement('li');
             const scopeLabel = p.scope === 'global' ? ' [全局]' : '';
-            li.innerHTML = `<a class="dropdown-item" href="#" data-preset-id="${p.id}"
-                              data-scope="${p.scope}">${p.name}${scopeLabel}<br>
-                              <small class="text-muted">${p.description || ''}</small></a>`;
+            li.innerHTML = `<a class="dropdown-item" href="#" data-preset-id="${escapeHtml(p.id)}"
+                              data-scope="${escapeHtml(p.scope)}">${escapeHtml(p.name)}${escapeHtml(scopeLabel)}<br>
+                              <small class="text-muted">${escapeHtml(p.description || '')}</small></a>`;
             li.querySelector('a').addEventListener('click', async (e) => {
                 e.preventDefault();
                 const pid = e.currentTarget.dataset.presetId;
@@ -460,7 +466,7 @@ function updateDynamicSelects() {
                 if (group2Sel && group2Sel.value === v) return;
             }
             const selected = (v === currentVal) ? ' selected' : '';
-            sel.innerHTML += `<option value="${v}"${selected}>${v}</option>`;
+            sel.innerHTML += `<option value="${escapeHtml(v)}"${selected}>${escapeHtml(v)}</option>`;
         });
 
         if (currentVal && sel.querySelector(`option[value="${currentVal}"]`)) {
@@ -507,7 +513,7 @@ async function loadFullAdataInfo(filePath) {
     try {
         const r = await fetch(`/api/data-info-full?file_path=${encodeURIComponent(filePath)}`);
         const d = await r.json();
-        if (d.error) { container.innerHTML = '<div class="text-danger small">' + d.error + '</div>'; return; }
+        if (d.error) { container.innerHTML = '<div class="text-danger small">' + escapeHtml(d.error) + '</div>'; return; }
         let html = '';
 
         // obs 注释详情
@@ -516,7 +522,7 @@ async function loadFullAdataInfo(filePath) {
             for (const col of d.obs_columns) {
                 const vals = col.values ? col.values.slice(0, 5).join(', ') + (col.values.length > 5 ? '...' : '') : '-';
                 const nun = col.n_unique != null ? col.n_unique : '-';
-                rows += `<tr><td><code>${col.name}</code></td><td>${col.dtype}</td><td>${nun}</td><td class="text-muted">${vals}</td></tr>`;
+                rows += `<tr><td><code>${escapeHtml(col.name)}</code></td><td>${escapeHtml(col.dtype)}</td><td>${escapeHtml(String(nun))}</td><td class="text-muted">${escapeHtml(vals)}</td></tr>`;
             }
             rows += '</tbody>';
             html += renderAdataSection('obs 注释列', d.obs_columns.length, rows);
@@ -528,7 +534,7 @@ async function loadFullAdataInfo(filePath) {
             for (const col of d.var_columns) {
                 const vals = col.values ? col.values.slice(0, 5).join(', ') + (col.values.length > 5 ? '...' : '') : '-';
                 const nun = col.n_unique != null ? col.n_unique : '-';
-                rows += `<tr><td><code>${col.name}</code></td><td>${col.dtype}</td><td>${nun}</td><td class="text-muted">${vals}</td></tr>`;
+                rows += `<tr><td><code>${escapeHtml(col.name)}</code></td><td>${escapeHtml(col.dtype)}</td><td>${escapeHtml(String(nun))}</td><td class="text-muted">${escapeHtml(vals)}</td></tr>`;
             }
             rows += '</tbody>';
             html += renderAdataSection('var 注释列', d.var_columns.length, rows);
@@ -538,21 +544,21 @@ async function loadFullAdataInfo(filePath) {
         if (d.var_names_sample && d.var_names_sample.length) {
             html += '<div class="mb-3">';
             html += '<div class="fw-bold text-primary mb-1" style="font-size:0.88rem;">var_names（前 20 个基因）</div>';
-            html += '<div class="small text-muted" style="word-break:break-all;">' + d.var_names_sample.join(', ') + '</div></div>';
+            html += '<div class="small text-muted" style="word-break:break-all;">' + d.var_names_sample.map(v => escapeHtml(v)).join(', ') + '</div></div>';
         }
 
         // layers
         if (d.layers && d.layers.length) {
             html += '<div class="mb-3">';
             html += `<div class="fw-bold text-primary mb-1" style="font-size:0.88rem;">layers <span class="badge bg-secondary">${d.layers.length}</span></div>`;
-            html += '<div class="small">' + d.layers.map(k => '<code class="me-2">' + k + '</code>').join('') + '</div></div>';
+            html += '<div class="small">' + d.layers.map(k => '<code class="me-2">' + escapeHtml(k) + '</code>').join('') + '</div></div>';
         }
 
         // obsm
         if (d.obsm && d.obsm.length) {
             let rows = '<thead><tr><th>Key</th><th>Shape</th><th>Dtype</th></tr></thead><tbody>';
             for (const m of d.obsm) {
-                rows += `<tr><td><code>${m.key}</code></td><td>${m.shape.join(' × ')}</td><td>${m.dtype}</td></tr>`;
+                rows += `<tr><td><code>${escapeHtml(m.key)}</code></td><td>${escapeHtml(String(m.shape.join(' × ')))}</td><td>${escapeHtml(m.dtype)}</td></tr>`;
             }
             rows += '</tbody>';
             html += renderAdataSection('obsm（降维坐标）', d.obsm.length, rows);
@@ -562,7 +568,7 @@ async function loadFullAdataInfo(filePath) {
         if (d.varm && d.varm.length) {
             let rows = '<thead><tr><th>Key</th><th>Shape</th><th>Dtype</th></tr></thead><tbody>';
             for (const m of d.varm) {
-                rows += `<tr><td><code>${m.key}</code></td><td>${m.shape.join(' × ')}</td><td>${m.dtype}</td></tr>`;
+                rows += `<tr><td><code>${escapeHtml(m.key)}</code></td><td>${escapeHtml(String(m.shape.join(' × ')))}</td><td>${escapeHtml(m.dtype)}</td></tr>`;
             }
             rows += '</tbody>';
             html += renderAdataSection('varm', d.varm.length, rows);
@@ -572,7 +578,7 @@ async function loadFullAdataInfo(filePath) {
         if (d.obsp && d.obsp.length) {
             html += '<div class="mb-3">';
             html += `<div class="fw-bold text-primary mb-1" style="font-size:0.88rem;">obsp（邻接矩阵） <span class="badge bg-secondary">${d.obsp.length}</span></div>`;
-            html += '<div class="small">' + d.obsp.map(k => '<code class="me-2">' + k + '</code>').join('') + '</div></div>';
+            html += '<div class="small">' + d.obsp.map(k => '<code class="me-2">' + escapeHtml(k) + '</code>').join('') + '</div></div>';
         }
 
         // uns
@@ -583,7 +589,7 @@ async function loadFullAdataInfo(filePath) {
                 if (u.type === 'ndarray') preview = `shape: ${u.shape.join(' × ')}, dtype: ${u.dtype}`;
                 else if (u.type === 'dict') preview = `子键: ${u.keys.join(', ')}`;
                 else preview = u.preview || '';
-                rows += `<tr><td><code>${u.key}</code></td><td>${u.type}</td><td class="text-muted">${preview}</td></tr>`;
+                rows += `<tr><td><code>${escapeHtml(u.key)}</code></td><td>${escapeHtml(u.type)}</td><td class="text-muted">${escapeHtml(preview)}</td></tr>`;
             }
             rows += '</tbody>';
             html += renderAdataSection('uns（全局注释）', d.uns.length, rows);
@@ -591,7 +597,7 @@ async function loadFullAdataInfo(filePath) {
 
         container.innerHTML = html || '<div class="text-muted small">无额外结构信息</div>';
     } catch(e) {
-        container.innerHTML = '<div class="text-danger small">加载失败: ' + e.message + '</div>';
+        container.innerHTML = '<div class="text-danger small">加载失败: ' + escapeHtml(e.message) + '</div>';
     }
 }
 
@@ -625,7 +631,7 @@ async function suggestGroupbyColumns() {
                 hint.className = 'auto-group-hint text-info small mt-1';
                 f.parentNode.appendChild(hint);
             }
-            hint.innerHTML = '&#9888; 已从样本名自动检测到分组：<strong>' + autoGroupMapping.values.join(', ') + '</strong>（如需手动输入请修改此字段）';
+            hint.innerHTML = '&#9888; 已从样本名自动检测到分组：<strong>' + escapeHtml(autoGroupMapping.values.join(', ')) + '</strong>（如需手动输入请修改此字段）';
         }
     });
     updateDynamicSelects();
@@ -813,15 +819,15 @@ document.getElementById('btn-confirm-pipeline-save').addEventListener('click', a
             if (data.valid) {
                 const gc = data.gene_count;
                 const color = gc > 0 ? 'text-success' : 'text-warning';
-                result.innerHTML = `<span class="${color}">✓ 匹配 <b>${gc}</b> 个基因</span>`;
+                result.innerHTML = `<span class="${color}">✓ 匹配 <b>${escapeHtml(String(gc))}</b> 个基因</span>`;
                 if (data.warnings && data.warnings.length) {
-                    result.innerHTML += `<br><span class="text-warning">${data.warnings.join('<br>')}</span>`;
+                    result.innerHTML += `<br><span class="text-warning">${data.warnings.map(w => escapeHtml(w)).join('<br>')}</span>`;
                 }
             } else {
-                result.innerHTML = `<span class="text-danger">✗ ${data.error}</span>`;
+                result.innerHTML = `<span class="text-danger">✗ ${escapeHtml(data.error)}</span>`;
             }
         } catch (e) {
-            result.innerHTML = `<span class="text-danger">请求失败: ${e.message}</span>`;
+            result.innerHTML = `<span class="text-danger">请求失败: ${escapeHtml(e.message)}</span>`;
         } finally {
             btn.disabled = false;
             btn.textContent = '验证表达式';

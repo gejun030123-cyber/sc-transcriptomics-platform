@@ -1,8 +1,19 @@
 import json
+import os
 from flask import Blueprint, render_template, send_file, flash, redirect, url_for
 from models import Project, AnalysisTask, ResultFile
 from routes.analysis import MODULE_DISPLAY_MAP, STATUS_MAP
 from modules import PIPELINE_ORDER
+from config import Config
+
+
+def _validate_path(file_path):
+    if not file_path:
+        return False
+    abs_path = os.path.abspath(file_path)
+    data_dir = os.path.abspath(Config.DATA_DIR)
+    return abs_path.startswith(data_dir + os.sep)
+
 
 results_bp = Blueprint('results', __name__)
 
@@ -57,6 +68,9 @@ def view_file(pid, file_id):
     if not f:
         flash('文件未找到', 'danger')
         return redirect(url_for('projects.detail', pid=pid))
+    if not _validate_path(f.file_path):
+        flash('文件路径不合法', 'danger')
+        return redirect(url_for('main.index'))
     if f.file_type == 'csv':
         return send_file(f.file_path, as_attachment=True)
     return send_file(f.file_path)
@@ -67,4 +81,7 @@ def download_adata(pid, task_id):
     if not t or not t.output_adata_path:
         flash('文件未找到', 'danger')
         return redirect(url_for('projects.detail', pid=pid))
+    if not _validate_path(t.output_adata_path):
+        flash('文件路径不合法', 'danger')
+        return redirect(url_for('main.index'))
     return send_file(t.output_adata_path, as_attachment=True)

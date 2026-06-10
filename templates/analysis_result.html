@@ -131,6 +131,12 @@
 </div>
 
 <script>
+function escapeHtml(text) {
+    const d = document.createElement('div');
+    d.textContent = text;
+    return d.innerHTML;
+}
+
 async function loadOutputAdataInfo() {
     const adataPath = "{{ task.output_adata_path | default('') }}";
     if (!adataPath) return;
@@ -169,7 +175,7 @@ async function loadOutputAdataInfo() {
             for (const col of d2.obs_columns) {
                 const vals = col.values ? col.values.slice(0, 5).join(', ') + (col.values.length > 5 ? '...' : '') : '-';
                 const nun = col.n_unique != null ? col.n_unique : '-';
-                rows += `<tr><td><code>${col.name}</code></td><td>${col.dtype}</td><td>${nun}</td><td class="text-muted">${vals}</td></tr>`;
+                rows += `<tr><td><code>${escapeHtml(col.name)}</code></td><td>${escapeHtml(col.dtype)}</td><td>${escapeHtml(String(nun))}</td><td class="text-muted">${escapeHtml(vals)}</td></tr>`;
             }
             rows += '</tbody>';
             html += renderSection('obs 注释列', d2.obs_columns.length, rows);
@@ -181,7 +187,7 @@ async function loadOutputAdataInfo() {
             for (const col of d2.var_columns) {
                 const vals = col.values ? col.values.slice(0, 5).join(', ') + (col.values.length > 5 ? '...' : '') : '-';
                 const nun = col.n_unique != null ? col.n_unique : '-';
-                rows += `<tr><td><code>${col.name}</code></td><td>${col.dtype}</td><td>${nun}</td><td class="text-muted">${vals}</td></tr>`;
+                rows += `<tr><td><code>${escapeHtml(col.name)}</code></td><td>${escapeHtml(col.dtype)}</td><td>${escapeHtml(String(nun))}</td><td class="text-muted">${escapeHtml(vals)}</td></tr>`;
             }
             rows += '</tbody>';
             html += renderSection('var 注释列', d2.var_columns.length, rows);
@@ -190,20 +196,20 @@ async function loadOutputAdataInfo() {
         // var_names
         if (d2.var_names_sample && d2.var_names_sample.length) {
             html += '<div class="mb-3"><div class="fw-bold text-primary mb-1" style="font-size:0.88rem;">var_names（前 20 个基因）</div>';
-            html += '<div class="small text-muted" style="word-break:break-all;">' + d2.var_names_sample.join(', ') + '</div></div>';
+            html += '<div class="small text-muted" style="word-break:break-all;">' + d2.var_names_sample.map(v => escapeHtml(v)).join(', ') + '</div></div>';
         }
 
         // layers
         if (d2.layers && d2.layers.length) {
             html += '<div class="mb-3"><div class="fw-bold text-primary mb-1" style="font-size:0.88rem;">layers <span class="badge bg-secondary">' + d2.layers.length + '</span></div>';
-            html += '<div class="small">' + d2.layers.map(k => '<code class="me-2">' + k + '</code>').join('') + '</div></div>';
+            html += '<div class="small">' + d2.layers.map(k => '<code class="me-2">' + escapeHtml(k) + '</code>').join('') + '</div></div>';
         }
 
         // obsm
         if (d2.obsm && d2.obsm.length) {
             let rows = '<thead><tr><th>Key</th><th>Shape</th><th>Dtype</th></tr></thead><tbody>';
             for (const m of d2.obsm) {
-                rows += `<tr><td><code>${m.key}</code></td><td>${m.shape.join(' × ')}</td><td>${m.dtype}</td></tr>`;
+                rows += `<tr><td><code>${escapeHtml(m.key)}</code></td><td>${escapeHtml(String(m.shape.join(' × ')))}</td><td>${escapeHtml(m.dtype)}</td></tr>`;
             }
             rows += '</tbody>';
             html += renderSection('obsm（降维坐标）', d2.obsm.length, rows);
@@ -213,7 +219,7 @@ async function loadOutputAdataInfo() {
         if (d2.varm && d2.varm.length) {
             let rows = '<thead><tr><th>Key</th><th>Shape</th><th>Dtype</th></tr></thead><tbody>';
             for (const m of d2.varm) {
-                rows += `<tr><td><code>${m.key}</code></td><td>${m.shape.join(' × ')}</td><td>${m.dtype}</td></tr>`;
+                rows += `<tr><td><code>${escapeHtml(m.key)}</code></td><td>${escapeHtml(String(m.shape.join(' × ')))}</td><td>${escapeHtml(m.dtype)}</td></tr>`;
             }
             rows += '</tbody>';
             html += renderSection('varm', d2.varm.length, rows);
@@ -222,7 +228,7 @@ async function loadOutputAdataInfo() {
         // obsp
         if (d2.obsp && d2.obsp.length) {
             html += '<div class="mb-3"><div class="fw-bold text-primary mb-1" style="font-size:0.88rem;">obsp（邻接矩阵） <span class="badge bg-secondary">' + d2.obsp.length + '</span></div>';
-            html += '<div class="small">' + d2.obsp.map(k => '<code class="me-2">' + k + '</code>').join('') + '</div></div>';
+            html += '<div class="small">' + d2.obsp.map(k => '<code class="me-2">' + escapeHtml(k) + '</code>').join('') + '</div></div>';
         }
 
         // uns
@@ -233,7 +239,7 @@ async function loadOutputAdataInfo() {
                 if (u.type === 'ndarray') preview = `shape: ${u.shape.join(' × ')}, dtype: ${u.dtype}`;
                 else if (u.type === 'dict') preview = `子键: ${u.keys.join(', ')}`;
                 else preview = u.preview || '';
-                rows += `<tr><td><code>${u.key}</code></td><td>${u.type}</td><td class="text-muted">${preview}</td></tr>`;
+                rows += `<tr><td><code>${escapeHtml(u.key)}</code></td><td>${escapeHtml(u.type)}</td><td class="text-muted">${escapeHtml(preview)}</td></tr>`;
             }
             rows += '</tbody>';
             html += renderSection('uns（全局注释）', d2.uns.length, rows);
@@ -262,6 +268,12 @@ const TASK_ID = "{{ task.id }}";
 const STATUS = "{{ task.status }}";
 const PROJECT_ID = "{{ project.id }}";
 
+function escapeHtml(text) {
+    const d = document.createElement('div');
+    d.textContent = text;
+    return d.innerHTML;
+}
+
 const STATUS_CN = {'running': '运行中', 'completed': '已完成', 'pending': '等待中', 'failed': '失败'};
 
 function renderLog(log) {
@@ -270,7 +282,7 @@ function renderLog(log) {
     if (!container || !entries || !log || log.length === 0) return;
     container.style.display = 'block';
     entries.innerHTML = log.map(e =>
-        `<div style="margin-bottom:2px;"><span style="color:#888;">[${e.time}]</span> <span style="color:#1a237e;">${e.pct}%</span> ${e.msg}</div>`
+        `<div style="margin-bottom:2px;"><span style="color:#888;">[${escapeHtml(e.time)}]</span> <span style="color:#1a237e;">${escapeHtml(String(e.pct))}%</span> ${escapeHtml(e.msg)}</div>`
     ).join('');
     entries.scrollTop = entries.scrollHeight;
 }
