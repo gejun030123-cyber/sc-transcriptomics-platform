@@ -158,7 +158,7 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         fig_vol.add_annotation(
             x=row['log2FC'], y=-np.log10(max(row['padj'], 1e-300)),
             text=row['gene'], showarrow=True, arrowhead=2,
-            font=dict(size=9, color='#333'), ax=20, ay=-30
+            font=dict(size=max(7, font_size - 3), color='#333'), ax=20, ay=-30
         )
     fig_vol.update_layout(
         title=f'火山图 ({group1} vs {group2})',
@@ -609,7 +609,7 @@ class BulkDEGAnalysis(BaseAnalysis):
                        gene_id_to_name, counts, adata, plots_dir, result_files):
         import plotly.graph_objects as go
 
-        boxplot_n = min(5, int(self.params.get('top_n', 20)))
+        boxplot_n = min(int(self.params.get('boxplot_n', 5)), 20)
         # 构建双向映射：gene_name → gene_id（处理重名取首个）
         name_to_id = {}
         if gene_id_to_name:
