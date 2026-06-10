@@ -4,10 +4,13 @@ import shutil
 import struct
 import base64
 import uuid
+import logging
 import psutil
 from flask import Blueprint, jsonify, request, send_file
 from models import AnalysisTask, Project, ResultFile
 from config import Config
+
+logger = logging.getLogger(__name__)
 
 api_bp = Blueprint('api', __name__)
 
@@ -15,7 +18,18 @@ api_bp = Blueprint('api', __name__)
 PRESETS_GLOBAL_DIR = os.path.join(Config.DATA_DIR, 'presets', '_global')
 
 
+def _validate_file_path(file_path):
+    """校验文件路径在允许的目录内，防止路径遍历攻击"""
+    if not file_path:
+        return False
+    abs_path = os.path.abspath(file_path)
+    data_dir = os.path.abspath(Config.DATA_DIR)
+    return abs_path.startswith(data_dir + os.sep) or abs_path == data_dir
+
+
 def _get_project_presets_dir(project_id):
+    if '..' in project_id or '/' in project_id:
+        raise ValueError('无效的项目 ID')
     return os.path.join(Config.DATA_DIR, 'projects', project_id, 'presets')
 
 
@@ -208,10 +222,8 @@ def adata_info(pid):
         adata.file.close()
         return jsonify(info)
     except Exception as e:
-        import traceback
-        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
-
-@api_bp.route('/result-file/<file_id>')
+        logger.exception("API error")
+        return jsonify({'error': str(e)}), 500
 def get_result_file(file_id):
     f = ResultFile.get_by_id(file_id)
     if not f:
@@ -244,6 +256,8 @@ def column_values():
     column = request.args.get('column', '')
     if not file_path or not column:
         return jsonify({'values': []})
+    if not _validate_file_path(file_path):
+        return jsonify({'error': '文件路径不在允许范围内'}), 403
     try:
         from modules.io_utils import read_expression_matrix
         adata = read_expression_matrix(file_path)
@@ -402,6 +416,8 @@ def data_info():
     file_path = request.args.get('file_path', '')
     if not file_path:
         return jsonify({'error': 'No file path'}), 400
+    if not _validate_file_path(file_path):
+        return jsonify({'error': '文件路径不在允许范围内'}), 403
     try:
         from modules.io_utils import read_expression_matrix
         adata = read_expression_matrix(file_path)
@@ -424,6 +440,8 @@ def obs_columns():
     file_path = request.args.get('file_path', '')
     if not file_path:
         return jsonify({'columns': [], 'sample_groups': {}})
+    if not _validate_file_path(file_path):
+        return jsonify({'error': '文件路径不在允许范围内'}), 403
     try:
         from modules.io_utils import read_expression_matrix
         import re
@@ -481,6 +499,8 @@ def data_info_full():
     file_path = request.args.get('file_path', '')
     if not file_path:
         return jsonify({'error': 'No file path'}), 400
+    if not _validate_file_path(file_path):
+        return jsonify({'error': '文件路径不在允许范围内'}), 403
     if not file_path.endswith('.h5ad'):
         return jsonify({'error': 'Not an h5ad file'}), 400
     try:
@@ -552,8 +572,8 @@ def data_info_full():
         adata.file.close()
         return jsonify(info)
     except Exception as e:
-        import traceback
-        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+        logger.exception("API error")
+        return jsonify({'error': str(e)}), 500
 
 
 @api_bp.route('/presets')
@@ -582,6 +602,8 @@ def list_presets():
 
 @api_bp.route('/presets/<preset_id>')
 def get_preset(preset_id):
+    if '..' in preset_id or '/' in preset_id:
+        return jsonify({'error': '无效的预设 ID'}), 400
     project_id = request.args.get('project_id', '')
     if project_id:
         fpath = os.path.join(_get_project_presets_dir(project_id), f'{preset_id}.json')
@@ -627,6 +649,8 @@ def save_preset():
 
 @api_bp.route('/presets/<preset_id>', methods=['DELETE'])
 def delete_preset(preset_id):
+    if '..' in preset_id or '/' in preset_id:
+        return jsonify({'error': '无效的预设 ID'}), 400
     project_id = request.args.get('project_id', '')
     if project_id:
         fpath = os.path.join(_get_project_presets_dir(project_id), f'{preset_id}.json')
