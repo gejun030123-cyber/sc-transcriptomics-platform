@@ -56,4 +56,8 @@ def init_db():
             FOREIGN KEY (project_id) REFERENCES projects(id)
         );
     """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_project ON analysis_tasks(project_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON analysis_tasks(status)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_result_files_task ON result_files(task_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_result_files_project ON result_files(project_id)")
     db.commit()

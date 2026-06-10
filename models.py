@@ -6,7 +6,7 @@ from config import Config
 
 
 def gen_id():
-    return str(uuid.uuid4())[:8]
+    return str(uuid.uuid4())[:12]
 
 
 def _get_conn():
@@ -30,18 +30,11 @@ class Project:
     def save(self):
         conn = _get_conn()
         try:
-            existing = conn.execute("SELECT id FROM projects WHERE id=?", (self.id,)).fetchone()
-            if existing:
-                conn.execute(
-                    "UPDATE projects SET name=?, description=?, created_at=?, updated_at=?, status=?, metadata_json=? WHERE id=?",
-                    (self.name, self.description, self.created_at, self.updated_at, self.status, self.metadata_json, self.id)
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO projects (id, name, description, created_at, updated_at, status, metadata_json) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (self.id, self.name, self.description, self.created_at, self.updated_at, self.status, self.metadata_json)
-                )
+            conn.execute(
+                "INSERT OR REPLACE INTO projects (id, name, description, created_at, updated_at, status, metadata_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (self.id, self.name, self.description, self.created_at, self.updated_at, self.status, self.metadata_json)
+            )
             conn.commit()
         finally:
             conn.close()
@@ -119,28 +112,16 @@ class AnalysisTask:
     def save(self):
         conn = _get_conn()
         try:
-            existing = conn.execute("SELECT id FROM analysis_tasks WHERE id=?", (self.id,)).fetchone()
-            if existing:
-                conn.execute(
-                    "UPDATE analysis_tasks SET project_id=?, module_name=?, status=?, progress=?, "
-                    "progress_message=?, params_json=?, result_json=?, error_traceback=?, "
-                    "started_at=?, finished_at=?, output_adata_path=?, log_text=? WHERE id=?",
-                    (self.project_id, self.module_name, self.status, self.progress,
-                     self.progress_message, self.params_json, self.result_json,
-                     self.error_traceback, self.started_at, self.finished_at,
-                     self.output_adata_path, self.log_text, self.id)
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO analysis_tasks "
-                    "(id, project_id, module_name, status, progress, progress_message, "
-                    "params_json, result_json, error_traceback, started_at, finished_at, "
-                    "output_adata_path, log_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (self.id, self.project_id, self.module_name, self.status, self.progress,
-                     self.progress_message, self.params_json, self.result_json,
-                     self.error_traceback, self.started_at, self.finished_at,
-                     self.output_adata_path, self.log_text)
-                )
+            conn.execute(
+                "INSERT OR REPLACE INTO analysis_tasks "
+                "(id, project_id, module_name, status, progress, progress_message, "
+                "params_json, result_json, error_traceback, started_at, finished_at, "
+                "output_adata_path, log_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (self.id, self.project_id, self.module_name, self.status, self.progress,
+                 self.progress_message, self.params_json, self.result_json,
+                 self.error_traceback, self.started_at, self.finished_at,
+                 self.output_adata_path, self.log_text)
+            )
             conn.commit()
         finally:
             conn.close()
@@ -197,7 +178,7 @@ class ResultFile:
         conn = _get_conn()
         try:
             conn.execute(
-                "INSERT INTO result_files (id, task_id, project_id, file_type, category, label, file_path, created_at) "
+                "INSERT OR REPLACE INTO result_files (id, task_id, project_id, file_type, category, label, file_path, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (self.id, self.task_id, self.project_id, self.file_type, self.category,
                  self.label, self.file_path, self.created_at)
