@@ -25,6 +25,11 @@ def task_detail(pid, task_id):
         flash('未找到', 'danger')
         return redirect(url_for('main.index'))
     files = ResultFile.get_by_task(task_id)
+    for f in files:
+        try:
+            f._file_size = os.path.getsize(f.file_path) if f.file_path and os.path.exists(f.file_path) else 0
+        except Exception:
+            f._file_size = 0
     plotly_files = [f for f in files if f.file_type == 'plotly_json']
     image_files = [f for f in files if f.file_type in ('png', 'svg', 'jpg', 'jpeg')]
     csv_files = [f for f in files if f.file_type == 'csv']

@@ -10,6 +10,7 @@
         <div>
             <h4 class="mb-1">{{ module_display }} 分析</h4>
             <span class="status-badge status-{{ task.status }}" id="status-badge">{{ status_cn }}</span>
+            <span id="task-duration" class="ms-2 small text-muted"></span>
         </div>
         <div>
             {% if task.status == 'completed' and task.output_adata_path %}
@@ -17,6 +18,21 @@
             {% endif %}
         </div>
     </div>
+
+    {% if task.status == 'completed' %}
+    <script>
+    (function() {
+        const startedAt = '{{ task.started_at or "" }}';
+        const finishedAt = '{{ task.finished_at or "" }}';
+        if (startedAt && finishedAt) {
+            const dur = (new Date(finishedAt) - new Date(startedAt)) / 1000;
+            const durStr = dur < 60 ? Math.round(dur) + '秒' : Math.floor(dur/60) + '分' + Math.round(dur%60) + '秒';
+            const durEl = document.getElementById('task-duration');
+            if (durEl) durEl.textContent = '耗时: ' + durStr;
+        }
+    })();
+    </script>
+    {% endif %}
 
     {% if task.status == 'running' or task.status == 'pending' %}
     <div class="mt-3">
@@ -94,7 +110,7 @@
 <div class="card p-3 mb-4">
     {% for f in csv_files %}
     <div class="d-flex justify-content-between align-items-center py-2 border-bottom">
-        <span>{{ f.label }}</span>
+        <span>{{ f.label }} <span class="text-muted small">({{ "%.1f"|format(f._file_size / 1024) }} KB)</span></span>
         <a href="/projects/{{ project.id }}/results/file/{{ f.id }}" class="btn btn-outline-primary btn-sm">下载</a>
     </div>
     {% endfor %}
@@ -276,13 +292,19 @@ function escapeHtml(text) {
 
 const STATUS_CN = {'running': '运行中', 'completed': '已完成', 'pending': '等待中', 'failed': '失败'};
 
+function getLogColor(msg) {
+    if (msg.includes('错误') || msg.includes('失败') || msg.includes('Error')) return '#e53935';
+    if (msg.includes('警告') || msg.includes('Warning')) return '#ff9800';
+    return '#1a237e';
+}
+
 function renderLog(log) {
     const container = document.getElementById('log-container');
     const entries = document.getElementById('log-entries');
     if (!container || !entries || !log || log.length === 0) return;
     container.style.display = 'block';
     entries.innerHTML = log.map(e =>
-        `<div style="margin-bottom:2px;"><span style="color:#888;">[${escapeHtml(e.time)}]</span> <span style="color:#1a237e;">${escapeHtml(String(e.pct))}%</span> ${escapeHtml(e.msg)}</div>`
+        `<div style="margin-bottom:2px;"><span style="color:#888;">[${escapeHtml(e.time)}]</span> <span style="color:${getLogColor(e.msg)};">${escapeHtml(String(e.pct))}%</span> ${escapeHtml(e.msg)}</div>`
     ).join('');
     entries.scrollTop = entries.scrollHeight;
 }
