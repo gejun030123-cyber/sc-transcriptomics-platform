@@ -10,8 +10,3 @@ class Config:
     PLOTLY_MAX_CELLS = 50000
     MIN_FREE_RAM_GB = 50
     CUDA_DEVICES = '0,1'
-
-    # AI 对话配置（支持任意 OpenAI 兼容 API）
-    AI_API_KEY = os.environ.get('AI_API_KEY', '')
-    AI_API_URL = os.environ.get('AI_API_URL', 'https://api.anthropic.com/v1')
-    AI_MODEL = os.environ.get('AI_MODEL', 'claude-sonnet-4-20250514')
