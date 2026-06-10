@@ -13,7 +13,7 @@ def _parse_comparisons(comp_str):
     for item in comp_str.replace('\n', ';').split(';'):
         item = item.strip()
         if '-vs-' in item:
-            parts = item.split('-vs-')
+            parts = item.split('-vs-', 1)
             if len(parts) == 2 and parts[0].strip() and parts[1].strip():
                 pairs.append((parts[0].strip(), parts[1].strip()))
     return pairs
@@ -126,6 +126,9 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     })
     deg_df = deg_df.sort_values('padj')
 
+    # 保存过滤前的 top 基因用于火山图标注（与散点数据一致）
+    top_genes_vol = deg_df[deg_df['regulation'] != 'NS'].head(top_n)
+
     # 基础表达量过滤
     if base_mean_filter > 0:
         base_mean = (deg_df['mean_group1'] + deg_df['mean_group2']) / 2
@@ -150,8 +153,7 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     fig_vol.add_hline(y=-np.log10(pval_threshold), line_dash='dash', line_color='gray')
     fig_vol.add_vline(x=log2fc_threshold, line_dash='dash', line_color='gray')
     fig_vol.add_vline(x=-log2fc_threshold, line_dash='dash', line_color='gray')
-    # Gene annotations
-    top_genes_vol = deg_df[deg_df['regulation'] != 'NS'].head(top_n)
+    # Gene annotations（使用与散点图一致的过滤前数据）
     for _, row in top_genes_vol.iterrows():
         fig_vol.add_annotation(
             x=row['log2FC'], y=-np.log10(max(row['padj'], 1e-300)),
@@ -272,6 +274,10 @@ class BulkDEGAnalysis(BaseAnalysis):
     INPUT_REQUIRES = []
 
     def validate_input(self, adata):
+        if adata.n_obs < 2:
+            return "样本数不足，至少需要 2 个样本"
+        if adata.n_vars == 0:
+            return "基因数为 0，请检查输入数据"
         return None
 
     def run(self, input_path):
@@ -341,25 +347,12 @@ class BulkDEGAnalysis(BaseAnalysis):
                 adata.obs.loc[mask, new_col] = new_name
             groupby = new_col
 
-        # 确定两组样本名
-        if groupby in adata.obs.columns:
-            groups = adata.obs[groupby].unique().tolist()
-            if not group1 or group1 not in groups:
-                group1 = groups[0]
-            if group2 == 'rest' or (not group2 or group2 not in groups):
-                group2_samples = [s for s in adata.obs.index if adata.obs.loc[s, groupby] != group1]
-                group2 = f'rest (n={len(group2_samples)})'
-            else:
-                group2_samples = list(adata.obs.index[adata.obs[groupby] == group2])
-            group1_samples = list(adata.obs.index[adata.obs[groupby] == group1])
-        else:
+        # 确定两组样本名（延迟到 single-comparison 分支处理，避免重复逻辑）
+        if groupby not in adata.obs.columns:
             n = counts.shape[0]
             half = n // 2
             if half == 0 or half == n:
                 raise ValueError(f"未找到分组列 '{groupby}'，样本数不足。")
-            group1_samples = list(adata.obs.index[:half])
-            group2_samples = list(adata.obs.index[half:])
-            group1, group2 = "Group1", "Group2"
             adata.obs[groupby] = pd.Series(
                 ['Group1']*half + ['Group2']*(n-half), index=adata.obs.index
             )
@@ -563,6 +556,9 @@ class BulkDEGAnalysis(BaseAnalysis):
                 adata.obs[groupby] = pd.Series(
                     ['Group1']*half + ['Group2']*(n-half), index=adata.obs.index
                 )
+
+            if len(group1_samples) < 2 or len(group2_samples) < 2:
+                raise ValueError(f"样本数不足：{group1}={len(group1_samples)}个, {group2}={len(group2_samples)}个。每组至少需要2个样本。")
 
             self.progress(30, f"差异分析: {group1} vs {group2}...")
             deg_df, files, n_up, n_down = _run_single_comparison(
