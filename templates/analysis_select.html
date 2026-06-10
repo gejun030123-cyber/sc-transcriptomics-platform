@@ -51,6 +51,7 @@
                     </div>
                     <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-save-preset"
                             data-bs-toggle="modal" data-bs-target="#savePresetModal">保存预设</button>
+                    <button type="button" class="btn btn-outline-warning btn-sm" id="btn-reset-defaults" title="恢复默认参数">恢复默认</button>
                 </div>
 
                 <div class="mb-3">
@@ -834,5 +835,26 @@ document.getElementById('btn-confirm-pipeline-save').addEventListener('click', a
         }
     });
 })();
+
+// === Ctrl+Enter 快捷键提交表单 ===
+document.addEventListener('keydown', function(e) {
+    if (e.ctrlKey && e.key === 'Enter') {
+        const form = document.querySelector('.param-form');
+        if (form) form.submit();
+    }
+});
+
+// === 恢复默认参数 ===
+document.getElementById('btn-reset-defaults').addEventListener('click', function() {
+    if (!confirm('确定恢复所有参数为默认值？')) return;
+    document.querySelectorAll('.param-form select, .param-form input[type="text"], .param-form input[type="number"], .param-form textarea').forEach(el => {
+        if (el.name === 'input_path') return;
+        if (el.type === 'checkbox') {
+            el.checked = el.defaultChecked;
+        } else {
+            el.value = el.defaultValue || '';
+        }
+    });
+});
 </script>
 {% endblock %}
