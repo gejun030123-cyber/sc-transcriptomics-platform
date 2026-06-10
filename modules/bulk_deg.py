@@ -107,24 +107,13 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         else:
             regulation.append('NS')
 
-    # Group means — aligned to result.index (handles drop_duplicates_index reordering)
+    # Group means — 按 var_names 顺序计算（与 result 对齐）
     mask1_arr = np.array([s in group1_samples for s in adata.obs.index])
     mask2_arr = np.array([s in group2_samples for s in adata.obs.index])
-    orig_var_names = list(adata.var_names)
-    var_id_to_col = {str(g): j for j, g in enumerate(orig_var_names)}
-    col_indices = np.array([var_id_to_col[gid] for gid in gene_ids_list if gid in var_id_to_col])
-    if len(col_indices) == n_genes:
-        mean1 = counts[mask1_arr][:, col_indices].mean(axis=0)
-        mean2 = counts[mask2_arr][:, col_indices].mean(axis=0)
-    else:
-        # Fallback: compute per-gene (handles partial overlap)
-        mean1 = np.zeros(n_genes)
-        mean2 = np.zeros(n_genes)
-        for i, gid in enumerate(gene_ids_list):
-            j = var_id_to_col.get(gid)
-            if j is not None:
-                mean1[i] = counts[mask1_arr, j].mean()
-                mean2[i] = counts[mask2_arr, j].mean()
+    mean1_all = counts[mask1_arr].mean(axis=0)
+    mean2_all = counts[mask2_arr].mean(axis=0)
+    mean1 = mean1_all[:n_genes] if len(mean1_all) >= n_genes else mean1_all
+    mean2 = mean2_all[:n_genes] if len(mean2_all) >= n_genes else mean2_all
 
     deg_df = pd.DataFrame({
         'gene': gene_names,
@@ -181,7 +170,7 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'volcano',
                          'label': f'火山图 ({group1} vs {group2})'})
 
-    # MA plot — mean1/mean2 already aligned to result.index (length == n_genes)
+    # MA plot
     avg_expr = (mean1 + mean2) / 2
     fig_ma = go.Figure()
     for reg in ['NS', 'Up', 'Down']:
