@@ -98,7 +98,20 @@ SYSTEM_PROMPT = """你是一个生信分析助手，帮助用户进行 RNA-seq �
 - 简洁明了，不啰嗦
 - 执行分析时，先确认参数再执行（如"我将用 DESeq2 方法对 hmc3 vs ctrl 进行差异分析，FC 阈值 2.0，padj 阈值 0.05，确认执行吗？"）
 - 分析完成后，简要总结关键结果
-- 如果用户要求不明确，主动询问关键参数"""
+- 如果用户要求不明确，主动询问关键参数
+
+## 工具调用方式
+当你需要调用平台功能时，在回复末尾输出 JSON 代码块，格式如下：
+```tool
+{"name": "工具名", "args": {"参数名": "参数值"}}
+```
+支持的工具：
+- run_analysis: {"name": "run_analysis", "args": {"module_name": "bulk_deg", "params": {"method": "deseq2", "group1": "A", "group2": "B"}}}
+- get_project_status: {"name": "get_project_status", "args": {}}
+- get_task_results: {"name": "get_task_results", "args": {"task_id": "123"}}
+- list_modules: {"name": "list_modules", "args": {"pipeline_type": "bulk"}}
+
+可以输出多个 tool 块。只有在真正需要执行操作时才输出 tool 块，纯问答不需要。"""
 
 
 def _is_anthropic():
@@ -121,8 +134,29 @@ def chat(messages, project_id=None):
         return _chat_openai(messages, project_id, tool_calls_log)
 
 
+def _parse_tool_calls_from_text(text):
+    """从 AI 回复文本中解析 ```tool``` 代码块里的 JSON 工具调用"""
+    import re
+    calls = []
+    pattern = r'```tool\s*\n?(.*?)\n?```'
+    for match in re.finditer(pattern, text, re.DOTALL):
+        try:
+            data = json.loads(match.group(1).strip())
+            if isinstance(data, dict) and 'name' in data:
+                calls.append(data)
+        except json.JSONDecodeError:
+            pass
+    return calls
+
+
+def _strip_tool_blocks(text):
+    """从回复文本中移除 ```tool``` 代码块，只保留自然语言部分"""
+    import re
+    return re.sub(r'```tool\s*\n?.*?\n?```', '', text, flags=re.DOTALL).strip()
+
+
 def _chat_anthropic(messages, project_id, tool_calls_log):
-    """Anthropic API 格式对话"""
+    """Anthropic API 格式对话，带文本解析降级"""
     import anthropic
 
     client = anthropic.Anthropic(
@@ -130,16 +164,21 @@ def _chat_anthropic(messages, project_id, tool_calls_log):
         api_key=Config.AI_API_KEY,
     )
 
-    # 将历史消息转换为 Anthropic 格式
     api_messages = []
     for msg in messages:
         if msg.get("role") in ("user", "assistant"):
-            api_messages.append({"role": msg["role"], "content": msg.get("content", "")})
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                # Anthropic 格式的 content blocks
+                api_messages.append({"role": msg["role"], "content": content})
+            else:
+                api_messages.append({"role": msg["role"], "content": str(content)})
 
     if not api_messages:
         api_messages.append({"role": "user", "content": "你好"})
 
-    for _ in range(5):
+    # 第一次尝试：带 tools 调用
+    try:
         response = client.messages.create(
             model=Config.AI_MODEL,
             system=SYSTEM_PROMPT,
@@ -148,7 +187,6 @@ def _chat_anthropic(messages, project_id, tool_calls_log):
             max_tokens=2048,
         )
 
-        # 处理响应
         has_tool_use = False
         tool_results = []
         text_content = ""
@@ -160,39 +198,80 @@ def _chat_anthropic(messages, project_id, tool_calls_log):
                 has_tool_use = True
                 func_name = block.name
                 args = block.input if isinstance(block.input, dict) else {}
-
                 tool_calls_log.append({"name": func_name, "args": args})
-
                 try:
                     result = execute_tool(func_name, args, project_id)
                     result_str = json.dumps(result, ensure_ascii=False, default=str)
                 except Exception as e:
                     result_str = json.dumps({"error": str(e)}, ensure_ascii=False)
-
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
                     "content": result_str,
                 })
 
-        if not has_tool_use:
-            # 无工具调用，返回最终回复
+        if has_tool_use:
+            # 工具调用成功，继续对话循环
+            api_messages.append({"role": "assistant", "content": response.content})
+            api_messages.append({"role": "user", "content": tool_results})
+            for _ in range(4):
+                response = client.messages.create(
+                    model=Config.AI_MODEL,
+                    system=SYSTEM_PROMPT,
+                    messages=api_messages,
+                    tools=TOOLS_ANTHROPIC,
+                    max_tokens=2048,
+                )
+                new_text = ""
+                new_tool_results = []
+                has_more_tools = False
+                for block in response.content:
+                    if block.type == "text":
+                        new_text += block.text
+                    elif block.type == "tool_use":
+                        has_more_tools = True
+                        fn = block.name
+                        ar = block.input if isinstance(block.input, dict) else {}
+                        tool_calls_log.append({"name": fn, "args": ar})
+                        try:
+                            r = execute_tool(fn, ar, project_id)
+                            rs = json.dumps(r, ensure_ascii=False, default=str)
+                        except Exception as e:
+                            rs = json.dumps({"error": str(e)}, ensure_ascii=False)
+                        new_tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": rs})
+                if not has_more_tools:
+                    all_msgs = messages + [{"role": "assistant", "content": new_text}]
+                    return {"reply": new_text, "tool_calls": tool_calls_log, "messages": all_msgs}
+                api_messages.append({"role": "assistant", "content": response.content})
+                api_messages.append({"role": "user", "content": new_tool_results})
+
             all_msgs = messages + [{"role": "assistant", "content": text_content}]
-            return {
-                "reply": text_content,
-                "tool_calls": tool_calls_log,
-                "messages": all_msgs,
-            }
+            return {"reply": text_content, "tool_calls": tool_calls_log, "messages": all_msgs}
 
-        # 有工具调用：将 assistant 回复和 tool result 添加到消息历史
-        api_messages.append({"role": "assistant", "content": response.content})
-        api_messages.append({"role": "user", "content": tool_results})
+        # 无 tool_use 块 → 尝试从文本中解析 ```tool``` 代码块
+        parsed_calls = _parse_tool_calls_from_text(text_content)
+        if parsed_calls:
+            clean_text = _strip_tool_blocks(text_content)
+            for call in parsed_calls:
+                fn = call.get("name", "")
+                ar = call.get("args", {})
+                tool_calls_log.append({"name": fn, "args": ar})
+                try:
+                    result = execute_tool(fn, ar, project_id)
+                    result_str = json.dumps(result, ensure_ascii=False, default=str)
+                except Exception as e:
+                    result_str = json.dumps({"error": str(e)}, ensure_ascii=False)
+                clean_text += f"\n\n[工具 {fn} 执行结果: {result_str}]"
 
-    return {
-        "reply": "抱歉，处理过程过于复杂，请简化您的请求。",
-        "tool_calls": tool_calls_log,
-        "messages": messages,
-    }
+            all_msgs = messages + [{"role": "assistant", "content": clean_text}]
+            return {"reply": clean_text, "tool_calls": tool_calls_log, "messages": all_msgs}
+
+        # 纯文本回复
+        all_msgs = messages + [{"role": "assistant", "content": text_content}]
+        return {"reply": text_content, "tool_calls": tool_calls_log, "messages": all_msgs}
+
+    except Exception as e:
+        return {"reply": f"AI 调用失败: {str(e)}", "tool_calls": tool_calls_log, "messages": messages}
 
 
 def _chat_openai(messages, project_id, tool_calls_log):
