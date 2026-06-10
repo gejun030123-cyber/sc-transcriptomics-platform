@@ -49,6 +49,7 @@ class BaseAnalysis(ABC):
             op = rule.get('op', '')
             val = rule.get('value')
             if col not in adata.obs.columns:
+                self.progress(-1, f"警告: 列 '{col}' 不存在于 obs 中，跳过该过滤规则")
                 continue
             if op == '>=':
                 mask = adata.obs[col] >= val

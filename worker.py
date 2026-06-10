@@ -1,6 +1,7 @@
 import threading
 import concurrent.futures
 import traceback
+import sys
 import json
 import sqlite3
 from datetime import datetime
@@ -57,7 +58,7 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
                 "INSERT INTO result_files (id, task_id, project_id, file_type, category, label, file_path) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (gen_id(), task_id, project_id,
-                 rf['file_type'], rf['category'], rf['label'], rf['file_path'])
+                 rf.get('file_type', ''), rf.get('category', ''), rf.get('label', ''), rf.get('file_path', ''))
             )
 
         db.execute(
@@ -69,6 +70,7 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
         db.commit()
 
     except Exception as e:
+        print(f"[Worker] Task {task_id} failed:\n{traceback.format_exc()}", file=sys.stderr)
         db.execute(
             "UPDATE analysis_tasks SET status='failed', error_traceback=?, "
             "progress_message='失败', finished_at=CURRENT_TIMESTAMP WHERE id=?",

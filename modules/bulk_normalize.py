@@ -43,6 +43,9 @@ class BulkNormalizeAnalysis(BaseAnalysis):
                 gene_mask = gene_mask & (zero_pct <= max_zero_pct)
             adata = adata[:, gene_mask].copy()
 
+        if adata.n_vars == 0:
+            raise ValueError("所有基因均被过滤掉（低表达），请降低 min_expr_samples 参数")
+
         from scipy import sparse as _sp
         raw_counts = np.asarray(adata.X.toarray()) if _sp.issparse(adata.X) else np.asarray(adata.X)
         raw_counts = raw_counts.astype(float)
@@ -104,6 +107,9 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             size_factors = _estimate_size_factors(raw_counts)
             adata.obs['size_factor'] = size_factors
             adata.X = _rlog_transform(raw_counts, size_factors)
+
+        else:
+            raise ValueError(f"未知标准化方法: {method}，支持: deseq2/tmm/cpm/log2_quantile/vst/rlog")
 
         # 统一输出标记
         adata.uns['normalization'] = {
