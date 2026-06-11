@@ -41,10 +41,13 @@ class QCAnalysis(BaseAnalysis):
         adata = sc.read_h5ad(input_path)
         from modules.io_utils import remap_var_names
         adata = remap_var_names(adata)
-        adata.layers["counts"] = adata.X.copy()
-
         # 应用自定义过滤规则
         adata = self.apply_filters(adata, 'qc')
+
+        # 保存 counts 层
+        save_counts = self.params.get('save_counts_layer', True)
+        if save_counts:
+            adata.layers["counts"] = adata.X.copy()
 
         # ── 1. 标记基因集 ─────────────────────────────────────────────────
         self.progress(10, "Flagging MT/ribo/hb genes...")
@@ -113,6 +116,9 @@ class QCAnalysis(BaseAnalysis):
         ngenes_min = int(self.params.get('detected_genes', 250))
         ngenes_max = int(self.params.get('max_detected_genes', 0))  # 0 = 不限制
         ribo_perc_max = float(self.params.get('ribo_perc', 0))  # 0 = 不过滤
+        hb_perc_max = float(self.params.get('hb_perc', 0))  # 0 = 不过滤
+        batch_adaptive = self.params.get('batch_adaptive_qc', False)
+        mad_multiplier = float(self.params.get('mad_multiplier', 3.0))
 
         adata = ov.pp.qc(
             adata,
@@ -135,8 +141,31 @@ class QCAnalysis(BaseAnalysis):
 
         # ── 6. 额外过滤：核糖体比例上限 ─────────────────────────────────
         if ribo_perc_max > 0 and 'pct_counts_ribo' in adata.obs.columns:
-            mask = adata.obs['pct_counts_ribo'] <= ribo_perc_max * 100  # 参数是 0-100 比例
+            mask = adata.obs['pct_counts_ribo'] <= ribo_perc_max * 100
             adata = adata[mask].copy()
+
+        # ── 6b. 额外过滤：血红蛋白比例上限 ──────────────────────────────
+        if hb_perc_max > 0 and 'pct_counts_hb' in adata.obs.columns:
+            mask = adata.obs['pct_counts_hb'] <= hb_perc_max * 100
+            adata = adata[mask].copy()
+
+        # ── 6c. 批次自适应 QC（MAD 方法）──────────────────────────────
+        if batch_adaptive and batch_key and batch_key in adata.obs.columns:
+            self.progress(55, "Batch-adaptive QC filtering (MAD)...")
+            for qc_col in ['n_genes_by_counts', 'total_counts']:
+                if qc_col not in adata.obs.columns:
+                    continue
+                keep_mask = np.ones(adata.n_obs, dtype=bool)
+                for batch_val in adata.obs[batch_key].unique():
+                    batch_mask = adata.obs[batch_key] == batch_val
+                    vals = adata.obs.loc[batch_mask, qc_col]
+                    median_val = vals.median()
+                    mad_val = np.median(np.abs(vals - median_val))
+                    if mad_val > 0:
+                        lower = median_val - mad_multiplier * mad_val * 1.4826
+                        upper = median_val + mad_multiplier * mad_val * 1.4826
+                        keep_mask[batch_mask] = (vals >= lower) & (vals <= upper)
+                adata = adata[keep_mask].copy()
 
         n_after = adata.shape[0]
 

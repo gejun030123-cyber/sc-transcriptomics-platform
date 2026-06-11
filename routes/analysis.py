@@ -8,7 +8,8 @@ analysis_bp = Blueprint('analysis', __name__)
 
 SC_MODULE_LIST = [
     {'name': 'qc', 'display': '质控', 'desc': 'MT/ribo/hb 过滤 + 双细胞检测 + 细胞周期评分 + 复杂度过滤'},
-    {'name': 'preprocess', 'display': '预处理', 'desc': '标准化，选择高变异基因'},
+    {'name': 'normalize', 'display': '标准化', 'desc': '数据标准化（log1p / Pearson 残差）'},
+    {'name': 'hvg', 'display': '高变异基因', 'desc': '选择高变异基因，支持批次感知和基因过滤'},
     {'name': 'dimred', 'display': '降维分析', 'desc': 'PCA, UMAP'},
     {'name': 'batch_correct', 'display': '批次校正', 'desc': 'Harmony, ComBat, SysVI'},
     {'name': 'clustering', 'display': '聚类分析', 'desc': 'Leiden 聚类'},
@@ -52,12 +53,27 @@ PARAM_SCHEMAS = {
         {'key': 'detected_genes', 'label': '最小检测基因数', 'type': 'number', 'default': 250, 'help': '每个细胞检测到的最小基因数。低于此值的细胞可能为低质量或空液滴。常用范围 200-500。'},
         {'key': 'max_detected_genes', 'label': '最大检测基因数（0 = 不限制）', 'type': 'number', 'default': 0, 'help': '每个细胞检测到的最大基因数。高于此值的细胞可能是双细胞或聚合物。设为 0 表示不限制。建议范围 5000-8000，根据数据分布调整。'},
         {'key': 'ribo_perc', 'label': '最大核糖体比例 %（0 = 不过滤）', 'type': 'number', 'default': 0, 'step': 1.0, 'help': '过滤核糖体蛋白基因比例高于此值的细胞。核糖体比例过高可能反映细胞应激或人为扩增。设为 0 表示不过滤。建议范围 30-50%。'},
+        {'key': 'hb_perc', 'label': '最大血红蛋白比例 %（0 = 不过滤）', 'type': 'number', 'default': 0, 'step': 1.0, 'help': '过滤血红蛋白基因比例高于此值的细胞。高比例通常表示红细胞污染。设为 0 表示不过滤。建议范围 5-10%。'},
         {'key': 'batch_key', 'label': '批次列名', 'type': 'text', 'default': 'batch', 'help': 'adata.obs 中标识实验批次的列名。用于分批次运行 Scrublet 双细胞检测。'},
+        {'key': 'batch_adaptive_qc', 'label': '批次自适应 QC', 'type': 'checkbox', 'default': False, 'help': '按批次独立计算 MAD 阈值过滤，适用于批次间质量差异大的数据。'},
+        {'key': 'mad_multiplier', 'label': 'MAD 倍数', 'type': 'number', 'default': 3.0, 'step': 0.5, 'help': '批次自适应 QC 的 MAD 倍数。越大越宽松。默认 3.0（约对应 3σ）。'},
+        {'key': 'save_counts_layer', 'label': '保存原始 counts 层', 'type': 'checkbox', 'default': True, 'help': '在 QC 过滤前将原始表达矩阵保存到 adata.layers["counts"]，供下游标准化使用。'},
     ],
-    'preprocess': [
+    'normalize': [
+        {'key': 'method', 'label': '标准化方法', 'type': 'select', 'options': ['log1p', 'pearson_residuals'], 'default': 'log1p', 'help': 'log1p：标准 log1p CPM（shiftlog），适合大多数分析。pearson_residuals：Pearson 残差标准化，对技术噪声更鲁棒。'},
+        {'key': 'target_sum', 'label': '标准化目标总数', 'type': 'number', 'default': 10000, 'help': '每个细胞标准化后的总计数目标。10000 为 scanpy 默认值。'},
+        {'key': 'clip_values', 'label': '裁剪 Pearson 残差', 'type': 'checkbox', 'default': True, 'help': '仅 pearson_residuals 模式生效。裁剪残差到 ±√n 范围，减少极端值影响。'},
+    ],
+    'hvg': [
         {'key': 'n_top_genes', 'label': '高变异基因数量', 'type': 'number', 'default': 2000, 'help': '选择的高变异基因数量。2000 为标准值，适合大多数分析。基因数过少会丢失生物学信号，过多会引入噪声。'},
-        {'key': 'target_sum', 'label': '标准化目标总数', 'type': 'number', 'default': 10000, 'help': '每个细胞标准化后的总计数目标。10000 为 scanpy 默认值，设为 None 则中位数标准化。'},
-        {'key': 'batch_key', 'label': '批次列名（可选）', 'type': 'text', 'default': '', 'help': '用于 HVG 选择的批次校正。留空则不进行批次校正。设置后会在选择高变异基因时考虑批次效应。'},
+        {'key': 'batch_key', 'label': '批次列名（可选）', 'type': 'text', 'default': '', 'help': '用于批次感知 HVG 选择。留空则不进行批次校正。'},
+        {'key': 'hvg_flavor', 'label': 'HVG 选择方法', 'type': 'select', 'options': ['seurat_v3', 'cell_ranger', 'seurat'], 'default': 'seurat_v3', 'help': 'seurat_v3：基于方差稳定的 HVG（推荐）。cell_ranger：Cell Ranger 方法。seurat：Seurat v1 方法（dispersion-based）。'},
+        {'key': 'batch_hvg_strategy', 'label': '批次 HVG 合并策略', 'type': 'select', 'options': ['intersection', 'union'], 'default': 'intersection', 'help': '仅批次列名非空时生效。intersection：取各批次 HVG 的交集（更严格）。union：取并集（更宽松）。'},
+        {'key': 'exclude_mt_genes', 'label': '排除线粒体基因', 'type': 'checkbox', 'default': False, 'help': '从 HVG 中排除线粒体基因（MT- 前缀）。'},
+        {'key': 'exclude_cc_genes', 'label': '排除细胞周期基因', 'type': 'checkbox', 'default': False, 'help': '从 HVG 中排除 S 期和 G2M 期细胞周期基因。'},
+        {'key': 'force_include_genes', 'label': '强制包含基因（可选）', 'type': 'textarea', 'default': '', 'help': '强制包含在 HVG 中的基因名，逗号或换行分隔。无论是否被选为 HVG 都会保留。'},
+        {'key': 'cc_scoring', 'label': '细胞周期评分', 'type': 'checkbox', 'default': False, 'help': '计算 S 期和 G2M 期评分，存入 obs。'},
+        {'key': 'regress_cc', 'label': '回归去除细胞周期', 'type': 'checkbox', 'default': False, 'help': '回归去除细胞周期效应（需先开启细胞周期评分）。用于消除细胞周期对下游分析的干扰。'},
     ],
     'dimred': [
         {'key': 'n_comps', 'label': 'PCA 主成分数量', 'type': 'number', 'default': 50, 'help': 'PCA 主成分数量。通常 30-50 即可捕获大部分方差。过多会引入噪声维度。可通过肘部图选择。'},
