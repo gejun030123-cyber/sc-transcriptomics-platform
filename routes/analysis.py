@@ -18,6 +18,7 @@ SC_MODULE_LIST = [
     {'name': 'deg', 'display': '差异表达', 'desc': '差异表达基因分析'},
     {'name': 'trajectory', 'display': '轨迹分析', 'desc': '拟时序分析'},
     {'name': 'proportion', 'display': '比例分析', 'desc': '细胞比例分析'},
+    {'name': 'cell_communication', 'display': '细胞通讯', 'desc': '基于 LIANA 的细胞间通讯分析'},
 ]
 
 BULK_MODULE_LIST = [
@@ -165,6 +166,14 @@ PARAM_SCHEMAS = {
         {'key': 'stat_test', 'label': '统计检验', 'type': 'select', 'options': ['chi_square', 'fisher_exact', 'permutation'], 'default': 'chi_square', 'help': '比例差异的统计检验方法。'},
         {'key': 'n_permutations', 'label': '置换检验次数', 'type': 'number', 'default': 1000, 'help': '置换检验的置换次数。仅 permutation 方法生效。'},
         {'key': 'min_cells_per_group', 'label': '最小细胞数', 'type': 'number', 'default': 10, 'help': '每组最小细胞数，低于此值的组不参与比较。'},
+    ],
+    'cell_communication': [
+        {'key': 'cluster_key', 'label': '细胞类型列', 'type': 'text', 'default': 'celltype', 'help': '用于通讯分析的细胞类型列名。需先运行注释模块。'},
+        {'key': 'resource', 'label': '配体-受体数据库', 'type': 'select', 'options': ['consensus', 'cellcall', 'cellchatdb', 'omnipath'], 'default': 'consensus', 'help': 'consensus：综合多数据库（推荐）。cellcall/cellchatdb：特定数据库。omnipath：OmniPath 数据库。'},
+        {'key': 'organism', 'label': '物种', 'type': 'select', 'options': ['human', 'mouse'], 'default': 'human', 'help': '物种选择，影响配体-受体对匹配。'},
+        {'key': 'min_prop', 'label': '最小表达比例', 'type': 'number', 'default': 0.1, 'step': 0.05, 'help': '基因在细胞群中的最小表达比例，低于此值的不参与分析。'},
+        {'key': 'top_n_interactions', 'label': '展示 Top N', 'type': 'number', 'default': 20, 'help': '展示 Top N 个最强相互作用。'},
+        {'key': 'show_heatmap', 'label': '生成通讯热图', 'type': 'checkbox', 'default': True, 'help': '生成细胞类型间通讯数量热图。'},
     ],
     'bulk_qc': [
         {'key': 'min_counts', 'label': '最小文库 reads 数', 'type': 'number', 'default': 100000, 'help': '最小文库 reads 数。低于此值的样本被过滤。人类/小鼠 RNA-seq 通常要求 ≥100000，小样本可降至 50000。'},

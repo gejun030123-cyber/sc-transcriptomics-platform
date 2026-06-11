@@ -9,6 +9,7 @@ from .annotation import AnnotationAnalysis
 from .deg import DEGAnalysis
 from .trajectory import TrajectoryAnalysis
 from .proportion import ProportionAnalysis
+from .cell_communication import CellCommunicationAnalysis
 from .bulk_qc import BulkQCAnalysis
 from .bulk_normalize import BulkNormalizeAnalysis
 from .bulk_deg import BulkDEGAnalysis
@@ -32,6 +33,7 @@ MODULE_REGISTRY = {
     'deg': DEGAnalysis,
     'trajectory': TrajectoryAnalysis,
     'proportion': ProportionAnalysis,
+    'cell_communication': CellCommunicationAnalysis,
     # Bulk RNA-seq 分析模块
     'bulk_qc': BulkQCAnalysis,
     'bulk_normalize': BulkNormalizeAnalysis,
@@ -47,7 +49,7 @@ MODULE_REGISTRY = {
 
 PIPELINE_ORDER = [
     'qc', 'normalize', 'hvg', 'dimred', 'batch_correct', 'clustering',
-    'qc_reassess', 'annotation', 'deg', 'trajectory', 'proportion',
+    'qc_reassess', 'annotation', 'deg', 'trajectory', 'proportion', 'cell_communication',
     'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca', 'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
     'bulk_deg_integration',
 ]
@@ -64,6 +66,7 @@ PIPELINE_DEPS = {
     'deg': ['clustering'],
     'trajectory': ['clustering'],
     'proportion': ['clustering'],
+    'cell_communication': ['annotation'],
 }
 
 def validate_pipeline_order(modules):
