@@ -25,6 +25,11 @@ class DEGAnalysis(BaseAnalysis):
         method = self.params.get('method', 'wilcoxon')
         n_genes = int(self.params.get('n_genes', 20))
         reference = self.params.get('reference', 'rest')
+        pval_cutoff = float(self.params.get('pval_cutoff', 0.05))
+        logfc_cutoff = float(self.params.get('logfc_cutoff', 1.0))
+        min_pct = float(self.params.get('min_pct', 0.1))
+        volcano_top_n = int(self.params.get('volcano_top_n', 10))
+        volcano_genes_str = self.params.get('volcano_genes', '').strip()
 
         if groupby not in adata.obs.columns:
             groupby = 'leiden'
@@ -66,11 +71,25 @@ class DEGAnalysis(BaseAnalysis):
             g_df = deg_df[g_mask].copy()
             g_df['-log10(pval_adj)'] = -g_df['pval_adj'].apply(lambda x: __import__('math').log10(max(x, 1e-300)))
             fig = go.Figure()
-            sig = (g_df['pval_adj'] < 0.05) & (g_df['logfc'].abs() > 1)
+            sig = (g_df['pval_adj'] < pval_cutoff) & (g_df['logfc'].abs() > logfc_cutoff)
             fig.add_trace(go.Scattergl(x=g_df.loc[sig, 'logfc'], y=g_df.loc[sig, '-log10(pval_adj)'],
                                        mode='markers', marker=dict(color='#e53935', size=4), name='Significant'))
             fig.add_trace(go.Scattergl(x=g_df.loc[~sig, 'logfc'], y=g_df.loc[~sig, '-log10(pval_adj)'],
                                        mode='markers', marker=dict(color='#9e9e9e', size=3), name='Not significant'))
+            # Gene annotations on volcano
+            annotate_genes = set()
+            if volcano_genes_str:
+                annotate_genes = {g.strip() for g in volcano_genes_str.replace('\n', ',').split(',') if g.strip()}
+            if volcano_top_n > 0:
+                top_sig = g_df[sig].nsmallest(volcano_top_n, 'pval_adj')
+                annotate_genes.update(top_sig['gene'].tolist())
+            for gene_name in annotate_genes:
+                gene_row = g_df[g_df['gene'] == gene_name]
+                if not gene_row.empty:
+                    row = gene_row.iloc[0]
+                    fig.add_annotation(x=row['logfc'], y=row['-log10(pval_adj)'],
+                                      text=gene_name, showarrow=True, arrowhead=2, ax=20, ay=-20,
+                                      font=dict(size=9))
             fig.update_layout(title=f'Volcano Plot: {first_group}', xaxis_title='Log2 FC', yaxis_title='-log10(padj)',
                              plot_bgcolor='white', width=600, height=400)
             fpath = os.path.join(plots_dir, f'deg_volcano_{first_group}.json')

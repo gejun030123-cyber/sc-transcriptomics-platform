@@ -23,12 +23,29 @@ class TrajectoryAnalysis(BaseAnalysis):
         from modules.io_utils import remap_var_names
         adata = remap_var_names(adata)
         cluster_key = self.params.get('cluster_key', 'leiden')
+        enable_paga = self.params.get('enable_paga', False)
+        paga_threshold = float(self.params.get('paga_threshold', 0.05))
+        n_diffcomps = int(self.params.get('n_diffcomps', 15))
+        start_cluster = self.params.get('start_cluster', '').strip()
+        n_dcs = int(self.params.get('n_dcs', 10))
+        n_branchings = int(self.params.get('n_branchings', 0))
 
         self.progress(20, "Computing diffusion map...")
-        sc.tl.diffmap(adata)
+        sc.tl.diffmap(adata, n_comps=n_diffcomps)
+
+        # Set root cell for pseudotime
+        if start_cluster and cluster_key in adata.obs.columns:
+            root_mask = adata.obs[cluster_key].astype(str) == start_cluster
+            if root_mask.sum() > 0:
+                adata.uns['iroot'] = adata.obs.index[root_mask][0]
 
         self.progress(40, "Computing diffusion pseudotime...")
-        sc.tl.dpt(adata, n_branchings=0, n_dcs=10)
+        sc.tl.dpt(adata, n_branchings=n_branchings, n_dcs=n_dcs)
+
+        # PAGA
+        if enable_paga and cluster_key in adata.obs.columns:
+            self.progress(50, "Computing PAGA...")
+            sc.tl.paga(adata, groups=cluster_key)
 
         self.progress(60, "Generating trajectory plots...")
         plots_dir = os.path.join(self.project_dir, 'plots')
@@ -40,6 +57,34 @@ class TrajectoryAnalysis(BaseAnalysis):
         fpath = os.path.join(plots_dir, 'trajectory_pseudotime.json')
         with open(fpath, 'w') as f: f.write(fig_json)
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'Trajectory by {color_key}'})
+
+        # PAGA plot
+        if enable_paga and 'paga' in adata.uns:
+            try:
+                paga_connectivities = adata.uns['paga']['connectivities'].toarray() if hasattr(adata.uns['paga']['connectivities'], 'toarray') else adata.uns['paga']['connectivities']
+                fig_paga = go.Figure()
+                if 'X_umap' in adata.obsm:
+                    cluster_means = {}
+                    for cat in adata.obs[cluster_key].unique():
+                        mask = adata.obs[cluster_key] == cat
+                        cluster_means[cat] = adata.obsm['X_umap'][mask].mean(axis=0)
+                    for i, ci in enumerate(adata.obs[cluster_key].cat.categories if hasattr(adata.obs[cluster_key], 'cat') else sorted(adata.obs[cluster_key].unique())):
+                        for j, cj in enumerate(adata.obs[cluster_key].cat.categories if hasattr(adata.obs[cluster_key], 'cat') else sorted(adata.obs[cluster_key].unique())):
+                            if i < j and paga_connectivities[i, j] > paga_threshold:
+                                xi, yi = cluster_means.get(ci, [0, 0])
+                                xj, yj = cluster_means.get(cj, [0, 0])
+                                fig_paga.add_trace(go.Scattergl(
+                                    x=[xi, xj], y=[yi, yj], mode='lines',
+                                    line=dict(width=paga_connectivities[i, j] * 5, color='gray'),
+                                    showlegend=False
+                                ))
+                fig_paga.update_layout(title='PAGA Trajectory', xaxis_title='UMAP1', yaxis_title='UMAP2',
+                                      plot_bgcolor='white', width=600, height=500)
+                fpath = os.path.join(plots_dir, 'trajectory_paga.json')
+                with open(fpath, 'w') as f: json.dump(json.loads(fig_paga.to_json()), f)
+                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'paga', 'label': 'PAGA Trajectory'})
+            except Exception:
+                pass
 
         if 'X_diffmap' in adata.obsm:
             dc = adata.obsm['X_diffmap'][:, :2]
