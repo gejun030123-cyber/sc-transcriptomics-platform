@@ -16,6 +16,7 @@ class ClusteringAnalysis(BaseAnalysis):
         import scanpy as sc
         from modules.visualization import umap_scatter
         import json
+        import numpy as np
 
         self.progress(5, "Loading data...")
         adata = sc.read_h5ad(input_path)
@@ -23,15 +24,32 @@ class ClusteringAnalysis(BaseAnalysis):
         adata = remap_var_names(adata)
         resolutions = [float(r.strip()) for r in str(self.params.get('resolutions', '0.6,0.8,1.0')).split(',')]
         n_neighbors = int(self.params.get('n_neighbors', 15))
+        clustering_method = self.params.get('clustering_method', 'leiden')
+        n_iterations = int(self.params.get('n_iterations', 2))
+        distance_metric = self.params.get('distance_metric', 'euclidean')
+        use_corrected = self.params.get('use_corrected', True)
+        auto_select = self.params.get('auto_select_resolution', False)
+        resolution_metric = self.params.get('resolution_metric', 'silhouette')
+
+        # Determine representation to use
+        use_rep = 'X_pca'
+        if use_corrected:
+            for key in ['X_pca_harmony', 'X_pca_combat', 'X_scanorama', 'X_sysvi', 'X_scVI', 'X_bbknn']:
+                if key in adata.obsm:
+                    use_rep = key
+                    break
 
         self.progress(20, f"Computing KNN graph (n_neighbors={n_neighbors})...")
-        sc.pp.neighbors(adata, n_neighbors=n_neighbors)
+        sc.pp.neighbors(adata, n_neighbors=n_neighbors, use_rep=use_rep, metric=distance_metric)
 
-        self.progress(40, f"Running Leiden clustering at resolutions: {resolutions}...")
+        self.progress(40, f"Running {clustering_method} clustering at resolutions: {resolutions}...")
         for i, res in enumerate(resolutions):
-            sc.tl.leiden(adata, resolution=res, key_added=f'leiden_{res}', flavor="igraph", n_iterations=2)
+            if clustering_method == 'louvain':
+                sc.tl.louvain(adata, resolution=res, key_added=f'leiden_{res}')
+            else:
+                sc.tl.leiden(adata, resolution=res, key_added=f'leiden_{res}', flavor="igraph", n_iterations=n_iterations)
             pct = 40 + int((i + 1) / len(resolutions) * 30)
-            self.progress(pct, f"Leiden resolution {res} done")
+            self.progress(pct, f"{clustering_method} resolution {res} done")
 
         if 'leiden' not in adata.obs.columns:
             adata.obs['leiden'] = adata.obs[f'leiden_{resolutions[0]}'].copy()
@@ -109,9 +127,36 @@ class ClusteringAnalysis(BaseAnalysis):
         output_path = os.path.join(intermediate_dir, 'clustering_output.h5ad')
         adata.write_h5ad(output_path)
 
+        # Auto-select best resolution
+        best_res = resolutions[0]
+        if auto_select and len(resolutions) > 1:
+            try:
+                from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+                best_score = -float('inf')
+                for res in resolutions:
+                    key = f'leiden_{res}'
+                    if key not in adata.obs.columns:
+                        continue
+                    labels = adata.obs[key].astype('category').cat.codes.values
+                    rep_data = adata.obsm[use_rep]
+                    if resolution_metric == 'silhouette':
+                        score = silhouette_score(rep_data, labels)
+                    elif resolution_metric == 'calinski':
+                        score = calinski_harabasz_score(rep_data, labels)
+                    elif resolution_metric == 'davies_bouldin':
+                        score = -davies_bouldin_score(rep_data, labels)  # negate: lower is better
+                    else:
+                        score = silhouette_score(rep_data, labels)
+                    if score > best_score:
+                        best_score = score
+                        best_res = res
+            except Exception:
+                pass
+
         self.progress(100, "Done")
         summary = {f'n_clusters_{res}': int(adata.obs[f'leiden_{res}'].nunique()) for res in resolutions if f'leiden_{res}' in adata.obs.columns}
         summary['resolutions'] = resolutions
+        summary['best_resolution'] = best_res
         return {
             'output_adata': output_path,
             'result_files': result_files,

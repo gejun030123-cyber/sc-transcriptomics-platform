@@ -30,6 +30,9 @@ class QCReassessAnalysis(BaseAnalysis):
         cluster_key = self.params.get('cluster_key', 'leiden')
         doublet_threshold = float(self.params.get('doublet_threshold', 0.3))
         mt_threshold = float(self.params.get('mt_threshold', 15.0))
+        ribo_threshold = float(self.params.get('ribosomal_threshold', 0))
+        min_cells = int(self.params.get('min_cells_per_cluster', 10))
+        auto_remove = self.params.get('auto_remove', False)
 
         self.progress(20, "计算各簇 QC 指标...")
         result_files = []
@@ -52,14 +55,30 @@ class QCReassessAnalysis(BaseAnalysis):
             mt_mean = adata.obs.loc[mask, 'pct_counts_mt'].mean() if 'pct_counts_mt' in adata.obs.columns else 0
             counts_mean = adata.obs.loc[mask, 'total_counts'].mean() if 'total_counts' in adata.obs.columns else 0
             genes_mean = adata.obs.loc[mask, 'n_genes_by_counts'].mean() if 'n_genes_by_counts' in adata.obs.columns else 0
-            is_low = doublet_frac > doublet_threshold or mt_mean > mt_threshold
+            is_low = False
+            reasons = []
+            if doublet_frac > doublet_threshold:
+                is_low = True
+                reasons.append('high_doublet')
+            if mt_mean > mt_threshold:
+                is_low = True
+                reasons.append('high_mt')
+            if ribo_threshold > 0:
+                ribo_mean = adata.obs.loc[mask, 'pct_counts_ribo'].mean() if 'pct_counts_ribo' in adata.obs.columns else 0
+                if ribo_mean > ribo_threshold:
+                    is_low = True
+                    reasons.append('high_ribo')
+            if n_cells < min_cells:
+                is_low = True
+                reasons.append('too_few_cells')
             cluster_stats.append({
                 'cluster': str(c), 'n_cells': n_cells,
                 'doublet_fraction': round(doublet_frac, 4),
                 'mean_pct_mt': round(mt_mean, 2),
                 'mean_total_counts': round(counts_mean, 0),
                 'mean_n_genes': round(genes_mean, 0),
-                'low_quality': is_low
+                'low_quality': is_low,
+                'low_reasons': ', '.join(reasons),
             })
 
         stats_df = pd.DataFrame(cluster_stats)
@@ -68,6 +87,14 @@ class QCReassessAnalysis(BaseAnalysis):
         result_files.append({'file_path': csv_path, 'file_type': 'csv', 'category': 'table', 'label': '簇 QC 统计'})
 
         n_low = stats_df['low_quality'].sum()
+
+        # Auto-remove low quality clusters
+        if auto_remove and n_low > 0:
+            low_clusters = set(stats_df[stats_df['low_quality']]['cluster'].tolist())
+            keep_mask = ~adata.obs[cluster_key].astype(str).isin(low_clusters)
+            n_before = adata.n_obs
+            adata = adata[keep_mask].copy()
+            self.progress(45, f"Removed {n_before - adata.n_obs} cells from {len(low_clusters)} low-quality clusters")
 
         self.progress(50, "生成 UMAP 图...")
         # UMAP with doublet score
