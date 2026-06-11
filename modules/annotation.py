@@ -78,41 +78,61 @@ class AnnotationAnalysis(BaseAnalysis):
         leiden_key = f'leiden_{resolution}' if f'leiden_{resolution}' in adata.obs.columns else cluster_key
 
         self.progress(20, "Scoring cell type markers...")
+        method = self.params.get('method', 'auto_marker')
         marker_set_name = self.params.get('marker_set', 'TME')
         custom_markers_str = self.params.get('custom_markers', '').strip()
 
-        if custom_markers_str:
-            # Parse custom markers: "CellType1:GENE1,GENE2;CellType2:GENE3,GENE4"
-            # Also supports newline-separated format
-            markers = {}
-            for ct_genes in custom_markers_str.replace('\n', ';').split(';'):
-                ct_genes = ct_genes.strip()
-                if ':' in ct_genes:
-                    ct, genes_str = ct_genes.split(':', 1)
-                    markers[ct.strip()] = [g.strip() for g in genes_str.split(',') if g.strip()]
-            if not markers:
+        if method == 'manual' and custom_markers_str:
+            self.progress(40, "Applying manual cell type mapping...")
+            manual_mapping = {}
+            for line in custom_markers_str.split('\n'):
+                line = line.strip()
+                if not line or ':' not in line:
+                    continue
+                cluster_id, cell_type = line.split(':', 1)
+                manual_mapping[cluster_id.strip()] = cell_type.strip()
+
+            if manual_mapping:
+                adata.obs['celltype'] = adata.obs[leiden_key].astype(str).map(manual_mapping)
+                adata.obs['celltype'] = adata.obs['celltype'].fillna('Unknown').astype('category')
+                markers = {}
+            else:
+                self.progress(45, "No valid mapping found, falling back to auto_marker...")
+                method = 'auto_marker'
+
+        if method == 'auto_marker':
+            if custom_markers_str:
+                # Parse custom markers: "CellType1:GENE1,GENE2;CellType2:GENE3,GENE4"
+                # Also supports newline-separated format
+                markers = {}
+                for ct_genes in custom_markers_str.replace('\n', ';').split(';'):
+                    ct_genes = ct_genes.strip()
+                    if ':' in ct_genes:
+                        ct, genes_str = ct_genes.split(':', 1)
+                        markers[ct.strip()] = [g.strip() for g in genes_str.split(',') if g.strip()]
+                if not markers:
+                    markers = MARKER_SETS.get(marker_set_name, DEFAULT_TME_MARKERS)
+            else:
                 markers = MARKER_SETS.get(marker_set_name, DEFAULT_TME_MARKERS)
-        else:
-            markers = MARKER_SETS.get(marker_set_name, DEFAULT_TME_MARKERS)
 
-        for ct, genes in markers.items():
-            available_genes = [g for g in genes if g in adata.var_names]
-            if available_genes:
-                sc.tl.score_genes(adata, available_genes, score_name=f'score_{ct}', use_raw=False)
+            for ct, genes in markers.items():
+                available_genes = [g for g in genes if g in adata.var_names]
+                if available_genes:
+                    sc.tl.score_genes(adata, available_genes, score_name=f'score_{ct}', use_raw=False)
 
-        self.progress(50, "Assigning cell types to clusters...")
-        score_cols = [f'score_{ct}' for ct in markers if f'score_{ct}' in adata.obs.columns]
-        if score_cols:
-            cluster_annotations = {}
-            for cluster in adata.obs[leiden_key].cat.categories:
-                mask = adata.obs[leiden_key] == cluster
-                mean_scores = {col: adata.obs.loc[mask, col].mean() for col in score_cols}
-                best_col = max(mean_scores, key=mean_scores.get)
-                best_ct = best_col.replace('score_', '')
-                cluster_annotations[cluster] = best_ct
-            adata.obs['celltype'] = adata.obs[leiden_key].map(cluster_annotations).astype('category')
-        else:
-            adata.obs['celltype'] = adata.obs[leiden_key].astype(str)
+            self.progress(50, "Assigning cell types to clusters...")
+            score_cols = [f'score_{ct}' for ct in markers if f'score_{ct}' in adata.obs.columns]
+            if score_cols:
+                cluster_annotations = {}
+                for cluster in adata.obs[leiden_key].cat.categories:
+                    mask = adata.obs[leiden_key] == cluster
+                    mean_scores = {col: adata.obs.loc[mask, col].mean() for col in score_cols}
+                    best_col = max(mean_scores, key=mean_scores.get)
+                    best_ct = best_col.replace('score_', '')
+                    cluster_annotations[cluster] = best_ct
+                adata.obs['celltype'] = adata.obs[leiden_key].map(cluster_annotations).astype('category')
+            else:
+                adata.obs['celltype'] = adata.obs[leiden_key].astype(str)
 
         self.progress(70, "Generating dotplot and UMAP...")
         plots_dir = os.path.join(self.project_dir, 'plots')

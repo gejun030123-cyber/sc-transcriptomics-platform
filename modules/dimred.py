@@ -21,6 +21,7 @@ class DimredAnalysis(BaseAnalysis):
         from modules.io_utils import remap_var_names
         adata = remap_var_names(adata)
         n_comps = int(self.params.get('n_comps', 50))
+        use_mde = self.params.get('use_mde', False)
 
         self.progress(20, "Scaling data...")
         ov.pp.scale(adata, max_value=10)
@@ -31,8 +32,21 @@ class DimredAnalysis(BaseAnalysis):
         self.progress(55, "Computing neighbors...")
         sc.pp.neighbors(adata, n_pcs=n_comps)
 
-        self.progress(70, "Computing UMAP...")
-        sc.tl.umap(adata)
+        self.progress(70, "Computing 2D embedding...")
+        embedding_method = 'umap'
+        if use_mde:
+            try:
+                import pymde
+                mde = pymde.preserve_neighbors(adata.obsm['X_pca'], embedding_dim=2, device='cpu')
+                embedding = mde.embed(verbose=False)
+                adata.obsm['X_mde'] = embedding.cpu().numpy() if hasattr(embedding, 'cpu') else embedding.numpy()
+                adata.obsm['X_umap'] = adata.obsm['X_mde']
+                embedding_method = 'mde'
+            except ImportError:
+                self.progress(71, "pymde not installed, falling back to UMAP...")
+                sc.tl.umap(adata)
+        else:
+            sc.tl.umap(adata)
 
         self.progress(80, "Generating UMAP plots...")
         plots_dir = os.path.join(self.project_dir, 'plots')
@@ -60,5 +74,6 @@ class DimredAnalysis(BaseAnalysis):
                 'n_cells': adata.n_obs,
                 'n_pcs': n_comps,
                 'pca_variance_ratio_top5': round(float(adata.uns['pca']['variance_ratio'][:5].sum()), 3) if 'pca' in adata.uns else None,
+                'embedding_method': embedding_method,
             }
         }

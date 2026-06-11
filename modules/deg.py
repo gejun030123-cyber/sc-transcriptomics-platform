@@ -24,12 +24,14 @@ class DEGAnalysis(BaseAnalysis):
         groupby = self.params.get('groupby', 'celltype')
         method = self.params.get('method', 'wilcoxon')
         n_genes = int(self.params.get('n_genes', 20))
+        reference = self.params.get('reference', 'rest')
 
         if groupby not in adata.obs.columns:
             groupby = 'leiden'
 
         self.progress(20, f"Running DEG analysis ({method})...")
-        sc.tl.rank_genes_groups(adata, groupby=groupby, method=method, n_genes=100)
+        ref_kwarg = {} if reference == 'rest' else {'reference': str(reference)}
+        sc.tl.rank_genes_groups(adata, groupby=groupby, method=method, n_genes=100, **ref_kwarg)
 
         self.progress(50, "Extracting results...")
         result = adata.uns['rank_genes_groups']
@@ -146,6 +148,7 @@ class DEGAnalysis(BaseAnalysis):
                 'n_groups': len(groups),
                 'groups': list(groups),
                 'method': method,
+                'reference': reference,
                 'total_deg_genes': len(deg_data),
                 'custom_dotplot_genes': self.params.get('custom_dotplot_genes', '').strip() or None,
             }

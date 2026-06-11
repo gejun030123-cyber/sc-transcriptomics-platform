@@ -5,7 +5,7 @@ from modules.base import BaseAnalysis
 class TrajectoryAnalysis(BaseAnalysis):
     MODULE_NAME = "trajectory"
     DISPLAY_NAME = "轨迹分析"
-    DESCRIPTION = "基于扩散图或 Slingshot 的拟时序分析"
+    DESCRIPTION = "基于扩散图的拟时序分析"
     INPUT_REQUIRES = ['X_umap']
 
     def validate_input(self, adata):
@@ -22,10 +22,9 @@ class TrajectoryAnalysis(BaseAnalysis):
         adata = sc.read_h5ad(input_path)
         from modules.io_utils import remap_var_names
         adata = remap_var_names(adata)
-        method = self.params.get('method', 'diffusion_map')
         cluster_key = self.params.get('cluster_key', 'leiden')
 
-        self.progress(20, f"Computing diffusion map...")
+        self.progress(20, "Computing diffusion map...")
         sc.tl.diffmap(adata)
 
         self.progress(40, "Computing diffusion pseudotime...")
@@ -36,10 +35,11 @@ class TrajectoryAnalysis(BaseAnalysis):
         os.makedirs(plots_dir, exist_ok=True)
         result_files = []
 
-        fig_json = json.dumps(umap_scatter(adata, 'dpt_pseudotime', title='Diffusion Pseudotime'))
+        color_key = cluster_key if cluster_key in adata.obs.columns else 'dpt_pseudotime'
+        fig_json = json.dumps(umap_scatter(adata, color_key, title=f'Trajectory by {color_key}'))
         fpath = os.path.join(plots_dir, 'trajectory_pseudotime.json')
         with open(fpath, 'w') as f: f.write(fig_json)
-        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': 'Pseudotime UMAP'})
+        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'Trajectory by {color_key}'})
 
         if 'X_diffmap' in adata.obsm:
             dc = adata.obsm['X_diffmap'][:, :2]
@@ -97,7 +97,7 @@ class TrajectoryAnalysis(BaseAnalysis):
             'output_adata': output_path,
             'result_files': result_files,
             'summary': {
-                'method': method,
+                'cluster_column': cluster_key,
                 'max_pseudotime': round(float(adata.obs['dpt_pseudotime'].max()), 3) if 'dpt_pseudotime' in adata.obs.columns else None,
                 'n_cells': adata.n_obs,
             }
