@@ -4,7 +4,7 @@ from modules.base import BaseAnalysis
 class DimredAnalysis(BaseAnalysis):
     MODULE_NAME = "dimred"
     DISPLAY_NAME = "降维分析"
-    DESCRIPTION = "标准化、PCA、UMAP 降维"
+    DESCRIPTION = "PCA、UMAP/t-SNE 降维，支持自动选 PC"
     INPUT_REQUIRES = []
 
     def validate_input(self, adata):
@@ -15,6 +15,7 @@ class DimredAnalysis(BaseAnalysis):
         import omicverse as ov
         from modules.visualization import umap_scatter
         import json
+        import numpy as np
 
         self.progress(5, "Loading data...")
         adata = sc.read_h5ad(input_path)
@@ -22,6 +23,18 @@ class DimredAnalysis(BaseAnalysis):
         adata = remap_var_names(adata)
         n_comps = int(self.params.get('n_comps', 50))
         use_mde = self.params.get('use_mde', False)
+        auto_n_comps = self.params.get('auto_n_comps', 'none')
+
+        # UMAP parameters
+        umap_n_neighbors = int(self.params.get('umap_n_neighbors', 15))
+        umap_min_dist = float(self.params.get('umap_min_dist', 0.5))
+        umap_metric = self.params.get('umap_metric', 'euclidean')
+        umap_spread = float(self.params.get('umap_spread', 1.0))
+
+        # t-SNE parameters
+        enable_tsne = self.params.get('enable_tsne', False)
+        tsne_perplexity = float(self.params.get('tsne_perplexity', 30))
+        tsne_learning_rate = float(self.params.get('tsne_learning_rate', 1000))
 
         self.progress(20, "Scaling data...")
         ov.pp.scale(adata, max_value=10)
@@ -29,10 +42,34 @@ class DimredAnalysis(BaseAnalysis):
         self.progress(35, f"Running PCA ({n_comps} components)...")
         sc.pp.pca(adata, n_comps=n_comps, layer='scaled')
 
-        self.progress(55, "Computing neighbors...")
-        sc.pp.neighbors(adata, n_pcs=n_comps)
+        # Auto-select number of PCs
+        if auto_n_comps != 'none' and 'pca' in adata.uns:
+            variance_ratio = adata.uns['pca']['variance_ratio']
+            if auto_n_comps == 'elbow':
+                # Elbow method: find point of maximum curvature
+                cumvar = np.cumsum(variance_ratio)
+                diffs = np.diff(cumvar)
+                diffs2 = np.diff(diffs)
+                n_comps_auto = int(np.argmax(diffs2) + 2)  # +2 for diff offsets
+                n_comps_auto = max(5, min(n_comps_auto, n_comps))
+                self.progress(40, f"Auto-selected {n_comps_auto} PCs (elbow)")
+                n_comps = n_comps_auto
+            elif auto_n_comps == 'kneedle':
+                try:
+                    from kneed import KneeLocator
+                    x = range(1, len(variance_ratio) + 1)
+                    kl = KneeLocator(x, variance_ratio, curve='convex', direction='decreasing')
+                    if kl.knee:
+                        n_comps_auto = max(5, min(int(kl.knee), n_comps))
+                        self.progress(40, f"Auto-selected {n_comps_auto} PCs (kneedle)")
+                        n_comps = n_comps_auto
+                except ImportError:
+                    self.progress(40, "kneed not installed, using default n_comps")
 
-        self.progress(70, "Computing 2D embedding...")
+        self.progress(50, "Computing neighbors...")
+        sc.pp.neighbors(adata, n_pcs=n_comps, n_neighbors=umap_n_neighbors, metric=umap_metric)
+
+        self.progress(65, "Computing UMAP...")
         embedding_method = 'umap'
         if use_mde:
             try:
@@ -43,12 +80,17 @@ class DimredAnalysis(BaseAnalysis):
                 adata.obsm['X_umap'] = adata.obsm['X_mde']
                 embedding_method = 'mde'
             except ImportError:
-                self.progress(71, "pymde not installed, falling back to UMAP...")
-                sc.tl.umap(adata)
+                self.progress(66, "pymde not installed, falling back to UMAP...")
+                sc.tl.umap(adata, min_dist=umap_min_dist, spread=umap_spread)
         else:
-            sc.tl.umap(adata)
+            sc.tl.umap(adata, min_dist=umap_min_dist, spread=umap_spread)
 
-        self.progress(80, "Generating UMAP plots...")
+        # Optional t-SNE
+        if enable_tsne:
+            self.progress(72, "Computing t-SNE...")
+            sc.tl.tsne(adata, perplexity=tsne_perplexity, learning_rate=int(tsne_learning_rate), n_pcs=n_comps)
+
+        self.progress(80, "Generating embedding plots...")
         plots_dir = os.path.join(self.project_dir, 'plots')
         os.makedirs(plots_dir, exist_ok=True)
         result_files = []
@@ -59,6 +101,35 @@ class DimredAnalysis(BaseAnalysis):
                 fpath = os.path.join(plots_dir, f'dimred_umap_{color_key}.json')
                 with open(fpath, 'w') as f: f.write(fig_json)
                 result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'UMAP by {color_key}'})
+
+        # t-SNE plot
+        if enable_tsne and 'X_tsne' in adata.obsm:
+            for color_key in ['batch', 'leiden']:
+                if color_key in adata.obs.columns:
+                    import plotly.graph_objects as go
+                    tsne = adata.obsm['X_tsne']
+                    color_vals = adata.obs[color_key].astype(str).values if color_key in adata.obs.columns else None
+                    fig = go.Figure()
+                    fig.add_trace(go.Scattergl(x=tsne[:, 0], y=tsne[:, 1], mode='markers',
+                                               marker=dict(size=3, opacity=0.6), text=color_vals))
+                    fig.update_layout(title=f't-SNE by {color_key}', xaxis_title='tSNE1', yaxis_title='tSNE2',
+                                     plot_bgcolor='white', width=600, height=500)
+                    fpath = os.path.join(plots_dir, f'dimred_tsne_{color_key}.json')
+                    with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
+                    result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'tsne', 'label': f't-SNE by {color_key}'})
+
+        # Variance ratio plot
+        if 'pca' in adata.uns:
+            import plotly.graph_objects as go
+            vr = adata.uns['pca']['variance_ratio'][:min(50, n_comps)]
+            fig = go.Figure()
+            fig.add_trace(go.Bar(y=vr, name='Individual'))
+            fig.add_trace(go.Scatter(y=np.cumsum(vr), mode='lines', name='Cumulative'))
+            fig.update_layout(title='PCA Variance Ratio', xaxis_title='PC', yaxis_title='Variance Ratio',
+                             plot_bgcolor='white', width=600, height=400)
+            fpath = os.path.join(plots_dir, 'dimred_pca_variance.json')
+            with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
+            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': 'PCA Variance Ratio'})
 
         self.progress(90, "Saving output...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')
@@ -75,5 +146,6 @@ class DimredAnalysis(BaseAnalysis):
                 'n_pcs': n_comps,
                 'pca_variance_ratio_top5': round(float(adata.uns['pca']['variance_ratio'][:5].sum()), 3) if 'pca' in adata.uns else None,
                 'embedding_method': embedding_method,
+                'tsne_enabled': enable_tsne,
             }
         }
