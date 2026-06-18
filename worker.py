@@ -54,12 +54,15 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
         result = module.run(input_path)
 
         for rf in result.get('result_files', []):
-            db.execute(
-                "INSERT INTO result_files (id, task_id, project_id, file_type, category, label, file_path) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (gen_id(), task_id, project_id,
-                 rf.get('file_type', ''), rf.get('category', ''), rf.get('label', ''), rf.get('file_path', ''))
-            )
+            try:
+                db.execute(
+                    "INSERT INTO result_files (id, task_id, project_id, file_type, category, label, file_path) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (gen_id(), task_id, project_id,
+                     rf.get('file_type', ''), rf.get('category', ''), rf.get('label', ''), rf.get('file_path', ''))
+                )
+            except sqlite3.IntegrityError:
+                print(f"[Worker] Skipping result_files insert (FK constraint): {rf.get('file_path', '')}", file=sys.stderr)
 
         db.execute(
             "UPDATE analysis_tasks SET status='completed', progress=100, "
