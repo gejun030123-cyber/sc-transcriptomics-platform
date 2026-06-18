@@ -54,6 +54,31 @@
                     <button type="button" class="btn btn-outline-warning btn-sm" id="btn-reset-defaults" title="恢复默认参数">恢复默认</button>
                 </div>
 
+                <!-- 可视化设置面板 -->
+                <div class="viz-settings-panel" style="margin: 10px 0; border: 1px solid #e0e0e0; border-radius: 6px; overflow: hidden;">
+                    <div class="viz-panel-header" style="padding: 8px 12px; background: #f5f5f5; cursor: pointer; font-weight: 600; font-size: 13px;"
+                         onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? 'block' : 'none'; this.querySelector('.arrow').textContent = this.nextElementSibling.style.display === 'none' ? '▸' : '▾';">
+                        <span class="arrow">▸</span> 可视化设置
+                    </div>
+                    <div class="viz-panel-body" style="display: none; padding: 12px;">
+                        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; font-size: 12px;">
+                            <label>主题 <select name="_viz_theme" style="width: 100%;"><option value="default">默认</option><option value="nature">Nature 论文</option><option value="dark">暗色</option></select></label>
+                            <label>宽度 <input type="number" name="_viz_width" value="800" min="200" max="2000" style="width: 100%;"></label>
+                            <label>高度 <input type="number" name="_viz_height" value="500" min="200" max="1500" style="width: 100%;"></label>
+                            <label>字号 <input type="number" name="_viz_fontsize" value="12" min="8" max="24" style="width: 100%;"></label>
+                            <label>字体 <select name="_viz_fontfamily" style="width: 100%;"><option>Arial</option><option>Helvetica</option><option>Times New Roman</option><option>SimSun</option></select></label>
+                            <label>UMAP 点大小 <input type="number" name="_viz_umap_point_size" value="5" min="1" max="20" style="width: 100%;"></label>
+                            <label>UMAP 透明度 <input type="number" name="_viz_umap_opacity" value="0.7" min="0.1" max="1" step="0.1" style="width: 100%;"></label>
+                            <label>图例字号 <input type="number" name="_viz_legend_fontsize" value="10" min="6" max="20" style="width: 100%;"></label>
+                            <label>导出格式 <div style="display: flex; gap: 10px; padding-top: 4px;">
+                                <label style="font-weight:normal"><input type="checkbox" name="_viz_export_plotly" checked> Plotly</label>
+                                <label style="font-weight:normal"><input type="checkbox" name="_viz_export_svg"> SVG</label>
+                                <label style="font-weight:normal"><input type="checkbox" name="_viz_export_png"> PNG</label>
+                            </div></label>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="mb-3">
                     <label class="form-label">输入数据</label>
                     <select name="input_path" class="form-select" required>
@@ -385,8 +410,9 @@ document.querySelectorAll('.multiselect-group').forEach(async (group) => {
     }
 });
 
-// 表单提交时注入 _visualization 配置
+// 表单提交时注入 _visualization 和 _filters 配置
 document.querySelector('.param-form').addEventListener('submit', function() {
+    // 可视化配置
     let vizHidden = this.querySelector('input[name="_visualization"]');
     if (!vizHidden) {
         vizHidden = document.createElement('input');
@@ -394,9 +420,51 @@ document.querySelector('.param-form').addEventListener('submit', function() {
         vizHidden.name = '_visualization';
         this.appendChild(vizHidden);
     }
-    if (!vizHidden.value) {
-        vizHidden.value = JSON.stringify({});
+    const exportFormats = [];
+    if (this.querySelector('[name="_viz_export_plotly"]')?.checked) exportFormats.push('plotly_json');
+    if (this.querySelector('[name="_viz_export_svg"]')?.checked) exportFormats.push('svg');
+    if (this.querySelector('[name="_viz_export_png"]')?.checked) exportFormats.push('png');
+
+    vizHidden.value = JSON.stringify({
+        theme: this.querySelector('[name="_viz_theme"]')?.value || 'default',
+        figure_width: parseInt(this.querySelector('[name="_viz_width"]')?.value) || 800,
+        figure_height: parseInt(this.querySelector('[name="_viz_height"]')?.value) || 500,
+        font_size: parseInt(this.querySelector('[name="_viz_fontsize"]')?.value) || 12,
+        font_family: this.querySelector('[name="_viz_fontfamily"]')?.value || 'Arial',
+        umap_point_size: parseInt(this.querySelector('[name="_viz_umap_point_size"]')?.value) || 5,
+        umap_opacity: parseFloat(this.querySelector('[name="_viz_umap_opacity"]')?.value) || 0.7,
+        umap_legend_fontsize: parseInt(this.querySelector('[name="_viz_legend_fontsize"]')?.value) || 10,
+        export_formats: exportFormats,
+    });
+
+    // 过滤规则配置
+    let filterHidden = this.querySelector('input[name="_filters"]');
+    if (!filterHidden) {
+        filterHidden = document.createElement('input');
+        filterHidden.type = 'hidden';
+        filterHidden.name = '_filters';
+        this.appendChild(filterHidden);
     }
+    const filtersByModule = {};
+    this.querySelectorAll('.filter-rule-row').forEach(row => {
+        const module = row.dataset.module;
+        const col = row.querySelector('.filter-col')?.value;
+        const op = row.querySelector('.filter-op')?.value;
+        const val = row.querySelector('.filter-val')?.value;
+        if (col && op && val !== '') {
+            if (!filtersByModule[module]) filtersByModule[module] = [];
+            let parsedVal = val;
+            if (op === 'in' || op === 'not_in') {
+                parsedVal = val.split(',').map(s => s.trim());
+            } else if (op === 'between') {
+                parsedVal = val.split(',').map(s => parseFloat(s.trim()));
+            } else {
+                parsedVal = isNaN(val) ? val : parseFloat(val);
+            }
+            filtersByModule[module].push({ column: col, op: op, value: parsedVal });
+        }
+    });
+    filterHidden.value = JSON.stringify(filtersByModule);
 });
 
 const inputSelect = document.querySelector('select[name="input_path"]');
@@ -845,6 +913,44 @@ document.addEventListener('keydown', function(e) {
 });
 
 // === 恢复默认参数 ===
+// === 过滤规则 UI ===
+function addFilterRule(btn, moduleName) {
+    const container = btn.closest('.filter-rules-section').querySelector('.filter-rules-container');
+    const row = document.createElement('div');
+    row.className = 'filter-rule-row';
+    row.dataset.module = moduleName;
+    row.style.cssText = 'display: flex; gap: 6px; align-items: center; margin-bottom: 4px;';
+    row.innerHTML = `
+        <select class="filter-col" style="width: 160px; font-size: 11px; padding: 2px;">
+            <option value="">-- 列名 --</option>
+        </select>
+        <select class="filter-op" style="width: 100px; font-size: 11px; padding: 2px;">
+            <option value=">=">≥</option>
+            <option value="<=">≤</option>
+            <option value="==">＝</option>
+            <option value="!=">≠</option>
+            <option value="in">包含</option>
+            <option value="not_in">不包含</option>
+            <option value="between">范围</option>
+        </select>
+        <input class="filter-val" style="width: 140px; font-size: 11px; padding: 2px;" placeholder="值（逗号分隔）">
+        <button type="button" onclick="this.parentElement.remove()" style="background: #e53935; color: white; border: none; border-radius: 3px; padding: 2px 6px; cursor: pointer;">×</button>
+    `;
+    container.appendChild(row);
+    // 填充列名下拉
+    const filePath = document.querySelector('select[name="input_path"]')?.value;
+    if (filePath) {
+        fetch(`/api/obs-columns?file_path=${encodeURIComponent(filePath)}`)
+            .then(r => r.json())
+            .then(d => {
+                const sel = row.querySelector('.filter-col');
+                (d.columns || []).forEach(c => {
+                    sel.innerHTML += `<option value="${c}">${c}</option>`;
+                });
+            });
+    }
+}
+
 document.getElementById('btn-reset-defaults').addEventListener('click', function() {
     if (!confirm('确定恢复所有参数为默认值？')) return;
     document.querySelectorAll('.param-form select, .param-form input[type="text"], .param-form input[type="number"], .param-form textarea').forEach(el => {
