@@ -28,6 +28,7 @@ class DEGAnalysis(BaseAnalysis):
         pval_cutoff = float(self.params.get('pval_cutoff', 0.05))
         logfc_cutoff = float(self.params.get('logfc_cutoff', 1.0))
         min_pct = float(self.params.get('min_pct', 0.1))
+        correction_method = self.params.get('correction_method', 'benjamini_hochberg')
         volcano_top_n = int(self.params.get('volcano_top_n', 10))
         volcano_genes_str = self.params.get('volcano_genes', '').strip()
 
@@ -39,19 +40,51 @@ class DEGAnalysis(BaseAnalysis):
         sc.tl.rank_genes_groups(adata, groupby=groupby, method=method, n_genes=100, **ref_kwarg)
 
         self.progress(50, "Extracting results...")
+        from statsmodels.stats.multitest import multipletests
+        import numpy as np
+
         result = adata.uns['rank_genes_groups']
         groups = result['names'].dtype.names
+
+        # 预计算每组每基因的表达比例（用于 min_pct 过滤）
+        pct_expr = {}
+        if min_pct > 0:
+            for g in groups:
+                mask = adata.obs[groupby] == g
+                n_cells = mask.sum()
+                if n_cells > 0:
+                    expr = (adata[mask].X > 0).sum(axis=0)
+                    if hasattr(expr, 'A1'):
+                        expr = expr.A1
+                    pct_expr[g] = dict(zip(adata.var_names, expr / n_cells))
+
         deg_data = []
+        correction_map = {'benjamini_hochberg': 'fdr_bh', 'bonferroni': 'bonferroni', 'BY': 'fdr_by'}
+        meth = correction_map.get(correction_method, 'fdr_bh')
+
         for g in groups:
-            for i in range(min(n_genes, len(result['names'][g]))):
-                deg_data.append({
-                    'cluster': g,
-                    'gene': result['names'][g][i],
+            raw_pvals = []
+            gene_info = []
+            for i in range(min(100, len(result['names'][g]))):
+                gene = result['names'][g][i]
+                raw_p = float(result['pvals'][g][i])
+                if min_pct > 0 and g in pct_expr:
+                    if pct_expr[g].get(gene, 0) < min_pct:
+                        continue
+                raw_pvals.append(max(raw_p, 1e-300))
+                gene_info.append({
+                    'gene': gene,
                     'logfc': round(float(result['logfoldchanges'][g][i]), 3),
-                    'pval': float(result['pvals'][g][i]),
-                    'pval_adj': float(result['pvals_adj'][g][i]),
+                    'pval': raw_p,
                     'score': round(float(result['scores'][g][i]), 3),
                 })
+
+            if raw_pvals:
+                reject, padj, _, _ = multipletests(raw_pvals, method=meth)
+                for j, info in enumerate(gene_info):
+                    info['pval_adj'] = float(padj[j])
+                    info['cluster'] = g
+                    deg_data.append(info)
 
         self.progress(70, "Generating volcano plots...")
         plots_dir = os.path.join(self.project_dir, 'plots')
