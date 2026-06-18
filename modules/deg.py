@@ -65,7 +65,7 @@ class DEGAnalysis(BaseAnalysis):
         for g in groups:
             raw_pvals = []
             gene_info = []
-            for i in range(min(100, len(result['names'][g]))):
+            for i in range(min(n_genes, len(result['names'][g]))):
                 gene = result['names'][g][i]
                 raw_p = float(result['pvals'][g][i])
                 if min_pct > 0 and g in pct_expr:
