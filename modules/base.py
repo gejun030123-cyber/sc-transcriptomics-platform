@@ -103,6 +103,15 @@ class BaseAnalysis(ABC):
         layout.update(overrides)
         return layout
 
+    def get_viz_params(self):
+        """返回传递给 umap_scatter 的可视化参数 dict。"""
+        viz = self.params.get('_visualization', {})
+        return {
+            'umap_point_size': viz.get('umap_point_size', 5),
+            'umap_opacity': viz.get('umap_opacity', 0.7),
+            'umap_legend_fontsize': viz.get('umap_legend_fontsize', 10),
+        }
+
     @abstractmethod
     def validate_input(self, adata) -> Optional[str]:
         pass

@@ -1,8 +1,14 @@
 import json
 import numpy as np
 
-def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title=''):
+def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title='',
+                 viz_params=None):
     import plotly.graph_objects as go
+
+    vp = viz_params or {}
+    point_size = vp.get('umap_point_size', 5)
+    opacity = vp.get('umap_opacity', 0.7)
+    legend_fontsize = vp.get('umap_legend_fontsize', 10)
     coords = adata.obsm[basis]
     if coords.shape[1] > 2:
         coords = coords[:, :2]
@@ -20,25 +26,26 @@ def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title='
             fig.add_trace(go.Scattergl(
                 x=coords[mask, 0], y=coords[mask, 1],
                 mode='markers', name=str(cat),
-                marker=dict(size=2, opacity=0.6),
+                marker=dict(size=point_size, opacity=opacity),
             ))
     elif color_vals is not None:
         fig.add_trace(go.Scattergl(
             x=coords[:, 0], y=coords[:, 1],
             mode='markers',
-            marker=dict(size=2, opacity=0.6, color=color_vals, colorscale='Viridis',
+            marker=dict(size=point_size, opacity=opacity, color=color_vals, colorscale='Viridis',
                        colorbar=dict(title=color_key)),
         ))
     else:
         fig.add_trace(go.Scattergl(
             x=coords[:, 0], y=coords[:, 1],
             mode='markers',
-            marker=dict(size=2, opacity=0.5, color='#1a237e'),
+            marker=dict(size=point_size, opacity=opacity, color='#1a237e'),
         ))
     fig.update_layout(
         title=title, xaxis_title='UMAP-1', yaxis_title='UMAP-2',
         plot_bgcolor='white', width=700, height=500,
-        margin=dict(l=40, r=40, t=40, b=40)
+        margin=dict(l=40, r=40, t=40, b=40),
+        legend=dict(font=dict(size=legend_fontsize))
     )
     return json.loads(fig.to_json())
 
