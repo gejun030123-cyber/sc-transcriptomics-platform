@@ -2,6 +2,44 @@ import os
 import json
 from modules.base import BaseAnalysis
 
+def _run_stat_test(ct_abs, test_type, n_permutations=1000):
+    """对列联表运行指定统计检验，返回 (statistic, p_value)。"""
+    from scipy.stats import chi2_contingency, fisher_exact
+    import numpy as np
+
+    if test_type == 'chi_square':
+        chi2, pval, _, _ = chi2_contingency(ct_abs)
+        return chi2, pval
+    elif test_type == 'fisher_exact':
+        if ct_abs.shape == (2, 2):
+            stat, pval = fisher_exact(ct_abs.values)
+            return stat, pval
+        else:
+            chi2, pval, _, _ = chi2_contingency(ct_abs, simulate_pval=True, n_permutations=n_permutations)
+            return chi2, pval
+    elif test_type == 'permutation':
+        observed_chi2, _, _, _ = chi2_contingency(ct_abs)
+        count = 0
+        import pandas as pd
+        for _ in range(n_permutations):
+            shuffled = ct_abs.copy()
+            total = shuffled.values.sum()
+            col_sums = shuffled.sum(axis=0).values
+            row_sums = shuffled.sum(axis=1).values
+            perm_table = np.random.multinomial(total, col_sums / total).reshape(1, -1)
+            for rs in row_sums[1:]:
+                row = np.random.multinomial(rs, col_sums / total)
+                perm_table = np.vstack([perm_table, row])
+            perm_df = pd.DataFrame(perm_table, index=ct_abs.index, columns=ct_abs.columns)
+            perm_chi2, _, _, _ = chi2_contingency(perm_df)
+            if perm_chi2 >= observed_chi2:
+                count += 1
+        pval = (count + 1) / (n_permutations + 1)
+        return observed_chi2, pval
+    else:
+        chi2, pval, _, _ = chi2_contingency(ct_abs)
+        return chi2, pval
+
 class ProportionAnalysis(BaseAnalysis):
     MODULE_NAME = "proportion"
     DISPLAY_NAME = "细胞比例分析"
@@ -24,16 +62,26 @@ class ProportionAnalysis(BaseAnalysis):
         adata = remap_var_names(adata)
         groupby = self.params.get('groupby', 'celltype')
         batch_key = self.params.get('batch_key', 'batch')
+        stat_test = self.params.get('stat_test', 'chi_square')
+        n_permutations = int(self.params.get('n_permutations', 1000))
+        min_cells_per_group = int(self.params.get('min_cells_per_group', 10))
 
         if groupby not in adata.obs.columns:
             groupby = 'leiden'
 
         self.progress(30, "Computing cell proportions...")
+        if min_cells_per_group > 0:
+            group_counts = adata.obs[groupby].value_counts()
+            valid_groups = group_counts[group_counts >= min_cells_per_group].index.tolist()
+            if len(valid_groups) < len(group_counts):
+                removed = set(group_counts.index) - set(valid_groups)
+                self.progress(-1, f"移除 {len(removed)} 个低细胞数组: {removed}")
+                adata = adata[adata.obs[groupby].isin(valid_groups)].copy()
         ct = pd.crosstab(adata.obs[batch_key], adata.obs[groupby], normalize='index')
         ct_abs = pd.crosstab(adata.obs[batch_key], adata.obs[groupby])
 
         self.progress(50, "Running chi-squared test...")
-        chi2, pval, dof, expected = chi2_contingency(ct_abs)
+        chi2, pval = _run_stat_test(ct_abs, stat_test, n_permutations)
 
         self.progress(65, "Generating proportion plots...")
         plots_dir = os.path.join(self.project_dir, 'plots')
@@ -87,7 +135,7 @@ class ProportionAnalysis(BaseAnalysis):
                 ct_sub_abs = pd.crosstab(adata_sub.obs[batch_key], adata_sub.obs[groupby])
                 ct_sub = pd.crosstab(adata_sub.obs[batch_key], adata_sub.obs[groupby], normalize='index')
 
-                chi2_sub, pval_sub, _, _ = chi2_contingency(ct_sub_abs)
+                chi2_sub, pval_sub = _run_stat_test(ct_sub_abs, stat_test, n_permutations)
 
                 fig_sub = go.Figure()
                 for col in ct_sub.columns:
@@ -120,5 +168,6 @@ class ProportionAnalysis(BaseAnalysis):
                 'p_value': float(pval),
                 'n_batches': len(ct.index),
                 'n_groups': len(ct.columns),
+                'stat_test': stat_test,
             }
         }
