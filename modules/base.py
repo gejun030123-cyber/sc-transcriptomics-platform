@@ -112,6 +112,61 @@ class BaseAnalysis(ABC):
             'umap_legend_fontsize': viz.get('umap_legend_fontsize', 10),
         }
 
+    def export_static_fig(self, fig, plots_dir, filename, export_formats=None):
+        """将 Plotly figure 导出为静态图片（SVG/PNG）。依赖 kaleido。"""
+        if not export_formats:
+            return []
+        import os
+        exported = []
+        for fmt in export_formats:
+            if fmt in ('svg', 'png'):
+                try:
+                    import plotly.io as pio
+                    out_path = os.path.join(plots_dir, filename.replace('.json', f'.{fmt}'))
+                    pio.write_image(fig, out_path, format=fmt, engine='kaleido')
+                    exported.append(out_path)
+                except ImportError:
+                    self.progress(-1, "kaleido 未安装，跳过静态图片导出")
+                except Exception as e:
+                    self.progress(-1, f"静态导出 {fmt} 失败: {e}")
+        return exported
+
+    def export_results(self, adata, output_dir, export_format='h5ad',
+                       include_layers=None, include_obsm=None, compression='gzip'):
+        """将 adata 导出为指定格式。返回导出文件路径列表。"""
+        import os, pandas as pd
+        os.makedirs(output_dir, exist_ok=True)
+        exported = []
+
+        if export_format == 'h5ad':
+            out_path = os.path.join(output_dir, 'result.h5ad')
+            adata.write_h5ad(out_path, compression=compression if compression != 'none' else None)
+            exported.append(out_path)
+        elif export_format == 'csv':
+            adata.obs.to_csv(os.path.join(output_dir, 'obs.csv'))
+            exported.append(os.path.join(output_dir, 'obs.csv'))
+            adata.var.to_csv(os.path.join(output_dir, 'var.csv'))
+            exported.append(os.path.join(output_dir, 'var.csv'))
+            x_path = os.path.join(output_dir, 'expression.csv')
+            if hasattr(adata.X, 'toarray'):
+                df = pd.DataFrame(adata.X.toarray(), index=adata.obs_names, columns=adata.var_names)
+            else:
+                df = pd.DataFrame(adata.X, index=adata.obs_names, columns=adata.var_names)
+            df.to_csv(x_path, compression='gzip' if compression == 'gzip' else None)
+            exported.append(x_path)
+        elif export_format == 'loom':
+            out_path = os.path.join(output_dir, 'result.loom')
+            adata.write_loom(out_path)
+            exported.append(out_path)
+
+        if include_obsm:
+            for key in include_obsm:
+                if key in adata.obsm:
+                    obsm_path = os.path.join(output_dir, f'obsm_{key}.csv')
+                    pd.DataFrame(adata.obsm[key], index=adata.obs_names).to_csv(obsm_path)
+                    exported.append(obsm_path)
+        return exported
+
     @abstractmethod
     def validate_input(self, adata) -> Optional[str]:
         pass
