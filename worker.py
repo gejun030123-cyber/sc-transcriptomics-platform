@@ -28,6 +28,11 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA foreign_keys=ON")
     try:
+        # Debug: verify task and project exist
+        task_row = db.execute("SELECT id, project_id FROM analysis_tasks WHERE id=?", (task_id,)).fetchone()
+        proj_row = db.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
+        print(f"[Worker] task_id={task_id} exists={task_row is not None}, project_id={project_id} exists={proj_row is not None}", file=sys.stderr)
+
         db.execute(
             "UPDATE analysis_tasks SET status='running', started_at=CURRENT_TIMESTAMP WHERE id=?",
             (task_id,)
