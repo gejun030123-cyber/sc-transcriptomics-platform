@@ -81,6 +81,9 @@ class AnnotationAnalysis(BaseAnalysis):
         method = self.params.get('method', 'auto_marker')
         marker_set_name = self.params.get('marker_set', 'TME')
         custom_markers_str = self.params.get('custom_markers', '').strip()
+        confidence_method = self.params.get('confidence_method', 'none')
+        mark_unknown = self.params.get('mark_unknown', True)
+        merge_similar_threshold = float(self.params.get('merge_similar_threshold', 0))
 
         if method == 'manual' and custom_markers_str:
             self.progress(40, "Applying manual cell type mapping...")
@@ -98,6 +101,30 @@ class AnnotationAnalysis(BaseAnalysis):
                 markers = {}
             else:
                 self.progress(45, "No valid mapping found, falling back to auto_marker...")
+                method = 'auto_marker'
+
+        if method == 'celltypist':
+            self.progress(30, "Running CellTypist annotation...")
+            try:
+                import celltypist
+                from celltypist import annotate
+                ct_model = self.params.get('celltypist_model', 'Immune_All_Low')
+                ct_threshold = float(self.params.get('celltypist_threshold', 0.5))
+                majority_voting = self.params.get('celltypist_majority_voting', True)
+
+                predictions = annotate(
+                    adata, model=ct_model,
+                    majority_voting=majority_voting,
+                    confidence_threshold=ct_threshold,
+                )
+                adata.obs['celltype'] = predictions.predicted_labels['predicted_labels'].values
+                adata.obs['celltype'] = adata.obs['celltype'].astype('category')
+                markers = {}
+            except ImportError:
+                self.progress(35, "celltypist not installed, falling back to auto_marker...")
+                method = 'auto_marker'
+            except Exception as e:
+                self.progress(35, f"CellTypist failed: {e}, falling back to auto_marker...")
                 method = 'auto_marker'
 
         if method == 'auto_marker':
@@ -133,6 +160,52 @@ class AnnotationAnalysis(BaseAnalysis):
                 adata.obs['celltype'] = adata.obs[leiden_key].map(cluster_annotations).astype('category')
             else:
                 adata.obs['celltype'] = adata.obs[leiden_key].astype(str)
+
+        # 置信度评估
+        if confidence_method != 'none' and 'celltype' in adata.obs.columns:
+            self.progress(60, f"Computing annotation confidence ({confidence_method})...")
+            score_cols = [c for c in adata.obs.columns if c.startswith('score_')]
+            if confidence_method == 'entropy' and score_cols:
+                import numpy as np
+                score_matrix = adata.obs[score_cols].values
+                exp_scores = np.exp(score_matrix - score_matrix.max(axis=1, keepdims=True))
+                probs = exp_scores / (exp_scores.sum(axis=1, keepdims=True) + 1e-10)
+                entropy = -np.sum(probs * np.log(probs + 1e-10), axis=1)
+                max_entropy = np.log(len(score_cols)) if len(score_cols) > 1 else 1
+                adata.obs['annotation_confidence'] = 1 - entropy / (max_entropy + 1e-10)
+            elif confidence_method == 'score_margin' and score_cols:
+                import numpy as np
+                score_matrix = adata.obs[score_cols].values
+                sorted_scores = np.sort(score_matrix, axis=1)
+                if sorted_scores.shape[1] >= 2:
+                    adata.obs['annotation_confidence'] = sorted_scores[:, -1] - sorted_scores[:, -2]
+                else:
+                    adata.obs['annotation_confidence'] = sorted_scores[:, -1]
+
+            if mark_unknown and 'annotation_confidence' in adata.obs.columns:
+                low_conf_mask = adata.obs['annotation_confidence'] < 0.2
+                adata.obs.loc[low_conf_mask, 'celltype'] = 'Unknown'
+                n_unknown = low_conf_mask.sum()
+                if n_unknown > 0:
+                    self.progress(-1, f"标记 {n_unknown} 个低置信度细胞为 Unknown")
+
+        # 相似簇合并
+        if merge_similar_threshold > 0 and 'annotation_confidence' in adata.obs.columns:
+            import numpy as np
+            score_cols = [c for c in adata.obs.columns if c.startswith('score_')]
+            if score_cols:
+                cluster_profiles = {}
+                for cluster in adata.obs[leiden_key].cat.categories:
+                    mask = adata.obs[leiden_key] == cluster
+                    cluster_profiles[cluster] = adata.obs.loc[mask, score_cols].mean().values
+                clusters = list(cluster_profiles.keys())
+                for i in range(len(clusters)):
+                    for j in range(i + 1, len(clusters)):
+                        corr = np.corrcoef(cluster_profiles[clusters[i]], cluster_profiles[clusters[j]])[0, 1]
+                        if corr >= merge_similar_threshold:
+                            new_ct = adata.obs.loc[adata.obs[leiden_key] == clusters[i], 'celltype'].mode().iloc[0]
+                            adata.obs.loc[adata.obs[leiden_key] == clusters[j], 'celltype'] = new_ct
+                            self.progress(-1, f"合并簇 {clusters[j]} → {clusters[i]} (r={corr:.2f})")
 
         self.progress(70, "Generating dotplot and UMAP...")
         plots_dir = os.path.join(self.project_dir, 'plots')
@@ -176,12 +249,16 @@ class AnnotationAnalysis(BaseAnalysis):
 
         ct_counts = adata.obs['celltype'].value_counts().to_dict()
         self.progress(100, "Done")
-        return {
+        result = {
             'output_adata': output_path,
             'result_files': result_files,
             'summary': {
                 'n_celltypes': adata.obs['celltype'].nunique(),
                 'celltype_counts': {str(k): int(v) for k, v in ct_counts.items()},
                 'cluster_column': leiden_key,
+                'method_used': method,
             }
         }
+        if 'annotation_confidence' in adata.obs.columns:
+            result['summary']['mean_confidence'] = round(float(adata.obs['annotation_confidence'].mean()), 3)
+        return result
