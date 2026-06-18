@@ -190,7 +190,7 @@ class AnnotationAnalysis(BaseAnalysis):
                     self.progress(-1, f"标记 {n_unknown} 个低置信度细胞为 Unknown")
 
         # 相似簇合并
-        if merge_similar_threshold > 0 and 'annotation_confidence' in adata.obs.columns:
+        if merge_similar_threshold > 0:
             import numpy as np
             score_cols = [c for c in adata.obs.columns if c.startswith('score_')]
             if score_cols:
