@@ -1,4 +1,3 @@
-import os
 from modules.base import BaseAnalysis
 
 class BatchCorrectAnalysis(BaseAnalysis):
@@ -13,6 +12,7 @@ class BatchCorrectAnalysis(BaseAnalysis):
         return None
 
     def run(self, input_path):
+        import os
         import scanpy as sc
         import omicverse as ov
         from modules.visualization import umap_scatter
@@ -20,11 +20,11 @@ class BatchCorrectAnalysis(BaseAnalysis):
         import numpy as np
 
         self.progress(5, "Loading data...")
-        adata = sc.read_h5ad(input_path)
-        from modules.io_utils import remap_var_names
-        adata = remap_var_names(adata)
+        adata = self.load_adata(input_path)
         method = self.params.get('method', 'harmony')
         batch_key = self.params.get('batch_key', 'batch')
+        if batch_key not in adata.obs.columns:
+            raise ValueError(f"batch_key '{batch_key}' 不在 adata.obs 中，可用列: {list(adata.obs.columns)}")
         n_pcs = int(self.params.get('n_pcs', 50))
 
         if method == 'harmony':
@@ -105,12 +105,14 @@ class BatchCorrectAnalysis(BaseAnalysis):
             return {'output_adata': input_path, 'result_files': [], 'summary': {'error': f'Unknown method: {method}'}}
 
         self.progress(60, "Computing UMAP on corrected embeddings...")
-        sc.pp.neighbors(adata, use_rep=corrected_key, n_pcs=n_pcs)
+        n_pcs_kwargs = {}
+        if corrected_key.startswith('X_pca'):
+            n_pcs_kwargs['n_pcs'] = n_pcs
+        sc.pp.neighbors(adata, use_rep=corrected_key, **n_pcs_kwargs)
         sc.tl.umap(adata)
 
         self.progress(70, "Generating comparison plots...")
-        plots_dir = os.path.join(self.project_dir, 'plots')
-        os.makedirs(plots_dir, exist_ok=True)
+        plots_dir = self.ensure_plots_dir()
         result_files = []
 
         fig_json = json.dumps(umap_scatter(adata, 'batch', title=f'UMAP after {method} correction (by batch)'))
@@ -155,10 +157,7 @@ class BatchCorrectAnalysis(BaseAnalysis):
                 eval_metrics['error'] = str(e)
 
         self.progress(90, "Saving output...")
-        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
-        os.makedirs(intermediate_dir, exist_ok=True)
-        output_path = os.path.join(intermediate_dir, f'batch_correct_{method}_output.h5ad')
-        adata.write_h5ad(output_path)
+        output_path = self.save_output(adata, 'batch_correct')
 
         summary = {
             'method': method,

@@ -9,8 +9,8 @@ class TrajectoryAnalysis(BaseAnalysis):
     INPUT_REQUIRES = ['X_umap']
 
     def validate_input(self, adata):
-        if 'X_umap' not in adata.obsm:
-            return "UMAP not found. Run dimensionality reduction first."
+        if 'neighbors' not in adata.uns:
+            return "邻居图未找到，请先运行降维分析（dimred）"
         return None
 
     def run(self, input_path):
@@ -19,9 +19,7 @@ class TrajectoryAnalysis(BaseAnalysis):
         import plotly.graph_objects as go
 
         self.progress(5, "Loading data...")
-        adata = sc.read_h5ad(input_path)
-        from modules.io_utils import remap_var_names
-        adata = remap_var_names(adata)
+        adata = self.load_adata(input_path)
         cluster_key = self.params.get('cluster_key', 'leiden')
         enable_paga = self.params.get('enable_paga', False)
         paga_threshold = float(self.params.get('paga_threshold', 0.05))
@@ -37,7 +35,7 @@ class TrajectoryAnalysis(BaseAnalysis):
         if start_cluster and cluster_key in adata.obs.columns:
             root_mask = adata.obs[cluster_key].astype(str) == start_cluster
             if root_mask.sum() > 0:
-                adata.uns['iroot'] = adata.obs.index[root_mask][0]
+                adata.uns['iroot'] = np.where(root_mask)[0][0]
 
         self.progress(40, "Computing diffusion pseudotime...")
         sc.tl.dpt(adata, n_branchings=n_branchings, n_dcs=n_dcs)
@@ -48,8 +46,7 @@ class TrajectoryAnalysis(BaseAnalysis):
             sc.tl.paga(adata, groups=cluster_key)
 
         self.progress(60, "Generating trajectory plots...")
-        plots_dir = os.path.join(self.project_dir, 'plots')
-        os.makedirs(plots_dir, exist_ok=True)
+        plots_dir = self.ensure_plots_dir()
         result_files = []
 
         color_key = cluster_key if cluster_key in adata.obs.columns else 'dpt_pseudotime'
@@ -80,9 +77,7 @@ class TrajectoryAnalysis(BaseAnalysis):
                                 ))
                 fig_paga.update_layout(title='PAGA Trajectory', xaxis_title='UMAP1', yaxis_title='UMAP2',
                                       plot_bgcolor='white', width=600, height=500)
-                fpath = os.path.join(plots_dir, 'trajectory_paga.json')
-                with open(fpath, 'w') as f: json.dump(json.loads(fig_paga.to_json()), f)
-                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'paga', 'label': 'PAGA Trajectory'})
+                result_files.append(self.save_plotly_json(fig_paga, plots_dir, 'trajectory_paga.json', 'paga', 'PAGA Trajectory'))
             except Exception:
                 pass
 
@@ -94,9 +89,7 @@ class TrajectoryAnalysis(BaseAnalysis):
                                        marker=dict(size=2, color=color_vals, colorscale='Viridis', colorbar=dict(title='Pseudotime'))))
             fig.update_layout(title='Diffusion Map', xaxis_title='DC1', yaxis_title='DC2',
                              plot_bgcolor='white', width=600, height=500)
-            fpath = os.path.join(plots_dir, 'trajectory_diffmap.json')
-            with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'diffusion_map', 'label': 'Diffusion Map'})
+            result_files.append(self.save_plotly_json(fig, plots_dir, 'trajectory_diffmap.json', 'diffusion_map', 'Diffusion Map'))
 
         # Gene expression along pseudotime
         plot_genes_str = self.params.get('plot_genes', '').strip()
@@ -127,15 +120,10 @@ class TrajectoryAnalysis(BaseAnalysis):
                     xaxis_title='Pseudotime', yaxis_title='Expression',
                     plot_bgcolor='white', width=700, height=400
                 )
-                fpath = os.path.join(plots_dir, 'trajectory_gene_expression.json')
-                with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
-                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'gene_expression', 'label': '基因拟时序表达'})
+                result_files.append(self.save_plotly_json(fig, plots_dir, 'trajectory_gene_expression.json', 'gene_expression', '基因拟时序表达'))
 
         self.progress(85, "Saving output...")
-        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
-        os.makedirs(intermediate_dir, exist_ok=True)
-        output_path = os.path.join(intermediate_dir, 'trajectory_output.h5ad')
-        adata.write_h5ad(output_path)
+        output_path = self.save_output(adata, 'trajectory')
 
         self.progress(100, "Done")
         return {

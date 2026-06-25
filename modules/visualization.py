@@ -16,19 +16,21 @@ def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title='
     if adata.n_obs > max_cells:
         idx = np.random.choice(adata.n_obs, max_cells, replace=False)
         coords = coords[idx]
-    color_vals = None
+    color_series = None
     if color_key and color_key in adata.obs.columns:
-        color_vals = adata.obs[color_key].values[idx]
+        color_series = adata.obs[color_key]
     fig = go.Figure()
-    if color_vals is not None and hasattr(color_vals, 'dtype') and hasattr(color_vals, 'cat'):
-        for cat in color_vals.cat.categories:
-            mask = np.array(color_vals == cat)
+    if color_series is not None and hasattr(color_series, 'cat'):
+        color_vals = color_series.values[idx]
+        for cat in color_series.cat.categories:
+            mask = np.array(color_series.iloc[idx] == cat)
             fig.add_trace(go.Scattergl(
                 x=coords[mask, 0], y=coords[mask, 1],
                 mode='markers', name=str(cat),
                 marker=dict(size=point_size, opacity=opacity),
             ))
-    elif color_vals is not None:
+    elif color_series is not None:
+        color_vals = np.asarray(color_series)[idx]
         fig.add_trace(go.Scattergl(
             x=coords[:, 0], y=coords[:, 1],
             mode='markers',
@@ -58,7 +60,10 @@ def violin_plot(adata, keys, groupby=None, title=''):
         if key not in adata.obs.columns:
             continue
         if groupby and groupby in adata.obs.columns:
-            for cat in adata.obs[groupby].cat.categories:
+            grp = adata.obs[groupby]
+            if not hasattr(grp.dtype, 'categories'):
+                grp = grp.astype('category')
+            for cat in grp.cat.categories:
                 mask = adata.obs[groupby] == cat
                 fig.add_trace(go.Violin(
                     y=adata.obs.loc[mask, key], name=str(cat),

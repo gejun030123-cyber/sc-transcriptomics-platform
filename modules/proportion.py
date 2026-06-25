@@ -15,7 +15,7 @@ def _run_stat_test(ct_abs, test_type, n_permutations=1000):
             stat, pval = fisher_exact(ct_abs.values)
             return stat, pval
         else:
-            chi2, pval, _, _ = chi2_contingency(ct_abs, simulate_pval=True, n_permutations=n_permutations)
+            chi2, pval, _, _ = chi2_contingency(ct_abs)
             return chi2, pval
     elif test_type == 'permutation':
         observed_chi2, _, _, _ = chi2_contingency(ct_abs)
@@ -26,9 +26,11 @@ def _run_stat_test(ct_abs, test_type, n_permutations=1000):
             total = shuffled.values.sum()
             col_sums = shuffled.sum(axis=0).values
             row_sums = shuffled.sum(axis=1).values
-            perm_table = np.random.multinomial(row_sums[0], col_sums / total).reshape(1, -1)
+            pvals = col_sums / total
+            pvals = pvals / pvals.sum()
+            perm_table = np.random.multinomial(row_sums[0], pvals).reshape(1, -1)
             for rs in row_sums[1:]:
-                row = np.random.multinomial(rs, col_sums / total)
+                row = np.random.multinomial(rs, pvals)
                 perm_table = np.vstack([perm_table, row])
             perm_df = pd.DataFrame(perm_table, index=ct_abs.index, columns=ct_abs.columns)
             perm_chi2, _, _, _ = chi2_contingency(perm_df)
