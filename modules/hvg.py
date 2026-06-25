@@ -94,9 +94,6 @@ class HVGAnalysis(BaseAnalysis):
             self.progress(65, "Regressing out cell cycle...")
             sc.pp.regress_out(adata, ['S_score', 'G2M_score'])
 
-        # Subset to HVGs
-        adata_hvg = adata[:, adata.var['highly_variable']].copy()
-
         self.progress(75, "Generating HVG plot...")
         plots_dir = self.ensure_plots_dir()
         result_files = []

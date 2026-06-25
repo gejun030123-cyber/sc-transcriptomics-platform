@@ -1,5 +1,3 @@
-import os
-import json
 from modules.base import BaseAnalysis
 
 class DEGAnalysis(BaseAnalysis):
@@ -8,19 +6,15 @@ class DEGAnalysis(BaseAnalysis):
     DESCRIPTION = "差异表达基因分析（Wilcoxon 检验）"
     INPUT_REQUIRES = ['leiden']
 
-    def validate_input(self, adata):
-        return None
-
     def run(self, input_path):
         import scanpy as sc
         import pandas as pd
         from modules.visualization import umap_scatter
         import plotly.graph_objects as go
+        import os, json
 
         self.progress(5, "Loading data...")
-        adata = sc.read_h5ad(input_path)
-        from modules.io_utils import remap_var_names
-        adata = remap_var_names(adata)
+        adata = self.load_adata(input_path)
         groupby = self.params.get('groupby', 'celltype')
         method = self.params.get('method', 'wilcoxon')
         n_genes = int(self.params.get('n_genes', 20))
@@ -87,8 +81,7 @@ class DEGAnalysis(BaseAnalysis):
                     deg_data.append(info)
 
         self.progress(70, "Generating volcano plots...")
-        plots_dir = os.path.join(self.project_dir, 'plots')
-        os.makedirs(plots_dir, exist_ok=True)
+        plots_dir = self.ensure_plots_dir()
         results_dir = os.path.join(self.project_dir, 'results')
         os.makedirs(results_dir, exist_ok=True)
         result_files = []
@@ -102,7 +95,7 @@ class DEGAnalysis(BaseAnalysis):
         if first_group:
             g_mask = deg_df['cluster'] == first_group
             g_df = deg_df[g_mask].copy()
-            g_df['-log10(pval_adj)'] = -g_df['pval_adj'].apply(lambda x: __import__('math').log10(max(x, 1e-300)))
+            g_df['-log10(pval_adj)'] = -np.log10(g_df['pval_adj'].clip(lower=1e-300))
             fig = go.Figure()
             sig = (g_df['pval_adj'] < pval_cutoff) & (g_df['logfc'].abs() > logfc_cutoff)
             fig.add_trace(go.Scattergl(x=g_df.loc[sig, 'logfc'], y=g_df.loc[sig, '-log10(pval_adj)'],
@@ -125,9 +118,7 @@ class DEGAnalysis(BaseAnalysis):
                                       font=dict(size=9))
             fig.update_layout(title=f'Volcano Plot: {first_group}', xaxis_title='Log2 FC', yaxis_title='-log10(padj)',
                              plot_bgcolor='white', width=600, height=400)
-            fpath = os.path.join(plots_dir, f'deg_volcano_{first_group}.json')
-            with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'volcano', 'label': f'Volcano: {first_group}'})
+            result_files.append(self.save_plotly_json(fig, plots_dir, f'deg_volcano_{first_group}.json', 'volcano', f'Volcano: {first_group}'))
 
         # DEG Dotplot
         if self.params.get('show_dotplot', True):
@@ -187,10 +178,7 @@ class DEGAnalysis(BaseAnalysis):
             result_files.append({'file_path': full_csv, 'file_type': 'csv', 'category': 'table', 'label': '完整 DEG 结果'})
 
         self.progress(90, "Saving output...")
-        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
-        os.makedirs(intermediate_dir, exist_ok=True)
-        output_path = os.path.join(intermediate_dir, 'deg_output.h5ad')
-        adata.write_h5ad(output_path)
+        output_path = self.save_output(adata, 'deg')
 
         self.progress(100, "Done")
         return {

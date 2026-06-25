@@ -88,7 +88,7 @@ class QCAnalysis(BaseAnalysis):
         requested_batch = self.params.get('batch_key', 'batch')
         batch_key = requested_batch if requested_batch in adata.obs.columns else None
 
-        mito_perc = float(self.params.get('mito_perc', 0.2))
+        mito_perc = float(self.params.get('mito_perc', 0.2))  # 0-1 scale, 0.2 = 20%
         nUMIs_min = int(self.params.get('nUMIs', 500))
         ngenes_min = int(self.params.get('detected_genes', 250))
         ngenes_max = int(self.params.get('max_detected_genes', 0))  # 0 = 不限制

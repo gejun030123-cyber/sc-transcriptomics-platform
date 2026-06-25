@@ -1,4 +1,3 @@
-import os
 from modules.base import BaseAnalysis
 
 class DimredAnalysis(BaseAnalysis):
@@ -7,10 +6,8 @@ class DimredAnalysis(BaseAnalysis):
     DESCRIPTION = "PCA、UMAP/t-SNE 降维，支持自动选 PC"
     INPUT_REQUIRES = []
 
-    def validate_input(self, adata):
-        return None
-
     def run(self, input_path):
+        import os
         import scanpy as sc
         import omicverse as ov
         from modules.visualization import umap_scatter
@@ -18,9 +15,7 @@ class DimredAnalysis(BaseAnalysis):
         import numpy as np
 
         self.progress(5, "Loading data...")
-        adata = sc.read_h5ad(input_path)
-        from modules.io_utils import remap_var_names
-        adata = remap_var_names(adata)
+        adata = self.load_adata(input_path)
         n_comps = int(self.params.get('n_comps', 50))
         use_mde = self.params.get('use_mde', False)
         auto_n_comps = self.params.get('auto_n_comps', 'none')
@@ -40,7 +35,12 @@ class DimredAnalysis(BaseAnalysis):
         ov.pp.scale(adata, max_value=10)
 
         self.progress(35, f"Running PCA ({n_comps} components)...")
-        sc.pp.pca(adata, n_comps=n_comps, layer='scaled')
+        try:
+            sc.pp.pca(adata, n_comps=n_comps, layer='scaled')
+        except TypeError:
+            if 'scaled' in adata.layers:
+                adata.X = adata.layers['scaled']
+            sc.pp.pca(adata, n_comps=n_comps)
 
         # Auto-select number of PCs
         if auto_n_comps != 'none' and 'pca' in adata.uns:
@@ -91,8 +91,7 @@ class DimredAnalysis(BaseAnalysis):
             sc.tl.tsne(adata, perplexity=tsne_perplexity, learning_rate=int(tsne_learning_rate), n_pcs=n_comps)
 
         self.progress(80, "Generating embedding plots...")
-        plots_dir = os.path.join(self.project_dir, 'plots')
-        os.makedirs(plots_dir, exist_ok=True)
+        plots_dir = self.ensure_plots_dir()
         result_files = []
 
         for color_key in ['batch', 'leiden', 'n_genes_by_counts']:
@@ -114,9 +113,7 @@ class DimredAnalysis(BaseAnalysis):
                                                marker=dict(size=3, opacity=0.6), text=color_vals))
                     fig.update_layout(title=f't-SNE by {color_key}', xaxis_title='tSNE1', yaxis_title='tSNE2',
                                      plot_bgcolor='white', width=600, height=500)
-                    fpath = os.path.join(plots_dir, f'dimred_tsne_{color_key}.json')
-                    with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
-                    result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'tsne', 'label': f't-SNE by {color_key}'})
+                    result_files.append(self.save_plotly_json(fig, plots_dir, f'dimred_tsne_{color_key}.json', 'tsne', f't-SNE by {color_key}'))
 
         # Variance ratio plot
         if 'pca' in adata.uns:
@@ -127,15 +124,10 @@ class DimredAnalysis(BaseAnalysis):
             fig.add_trace(go.Scatter(y=np.cumsum(vr), mode='lines', name='Cumulative'))
             fig.update_layout(title='PCA Variance Ratio', xaxis_title='PC', yaxis_title='Variance Ratio',
                              plot_bgcolor='white', width=600, height=400)
-            fpath = os.path.join(plots_dir, 'dimred_pca_variance.json')
-            with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': 'PCA Variance Ratio'})
+            result_files.append(self.save_plotly_json(fig, plots_dir, 'dimred_pca_variance.json', 'pca', 'PCA Variance Ratio'))
 
         self.progress(90, "Saving output...")
-        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
-        os.makedirs(intermediate_dir, exist_ok=True)
-        output_path = os.path.join(intermediate_dir, 'dimred_output.h5ad')
-        adata.write_h5ad(output_path)
+        output_path = self.save_output(adata, 'dimred')
 
         self.progress(100, "Done")
         return {
