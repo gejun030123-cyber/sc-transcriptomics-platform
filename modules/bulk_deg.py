@@ -119,16 +119,14 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         else:
             regulation.append('NS')
 
-    # Group means — 按 result.index（去重后基因名）精确匹配
-    mask1_arr = adata.obs.index.isin(group1_samples)
-    mask2_arr = adata.obs.index.isin(group2_samples)
-    mean1_all = counts[mask1_arr].mean(axis=0)
-    mean2_all = counts[mask2_arr].mean(axis=0)
-    # 构建基因名→均值映射，按 result.index 顺序提取
-    mean1_map = dict(zip(adata.var_names, mean1_all))
-    mean2_map = dict(zip(adata.var_names, mean2_all))
-    mean1 = np.array([mean1_map.get(g, 0.0) for g in result.index])
-    mean2 = np.array([mean2_map.get(g, 0.0) for g in result.index])
+    # Group means — 使用 dds 去重后的数据计算（避免重复基因均值错位）
+    dedup_data = dds.data  # genes x samples DataFrame（去重后）
+    g1_mask = dedup_data.columns.isin(group1_samples)
+    g2_mask = dedup_data.columns.isin(group2_samples)
+    mean1_series = dedup_data.loc[:, g1_mask].mean(axis=1)
+    mean2_series = dedup_data.loc[:, g2_mask].mean(axis=1)
+    mean1 = np.array([mean1_series.get(g, 0.0) for g in result.index])
+    mean2 = np.array([mean2_series.get(g, 0.0) for g in result.index])
 
     deg_df = pd.DataFrame({
         'gene': gene_names,
