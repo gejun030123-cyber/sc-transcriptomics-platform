@@ -23,28 +23,30 @@ def submit_task(task_id, project_id, module_name, params, project_dir, input_pat
     _active_futures[task_id] = future
 
 def _run_task(task_id, project_id, module_name, params, project_dir, input_path):
-    task = AnalysisTask.get_by_id(task_id)
-    if not task:
-        logger.warning(f"[Worker] Task {task_id} not found")
-        return
-
-    proj_conn = get_conn()
     try:
-        proj_row = proj_conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
-        logger.info(f"[Worker] task_id={task_id} exists=True, project_id={project_id} exists={proj_row is not None}")
-    finally:
-        proj_conn.close()
+        task = AnalysisTask.get_by_id(task_id)
+        if not task:
+            logger.warning(f"[Worker] Task {task_id} not found")
+            return
 
-    task.mark_running()
+        proj_conn = get_conn()
+        try:
+            proj_row = proj_conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
+            logger.info(f"[Worker] task_id={task_id} exists=True, project_id={project_id} exists={proj_row is not None}")
+        finally:
+            proj_conn.close()
 
-    progress_log = []
+        if not task.mark_running():
+            logger.warning(f"[Worker] Task {task_id} not in pending state, skipping")
+            return
 
-    def progress_cb(pct, message):
-        now = datetime.now().strftime('%H:%M:%S')
-        progress_log.append({'time': now, 'pct': pct, 'msg': message})
-        task.update_progress(pct, message, json.dumps(progress_log, ensure_ascii=False))
+        progress_log = []
 
-    try:
+        def progress_cb(pct, message):
+            now = datetime.now().strftime('%H:%M:%S')
+            progress_log.append({'time': now, 'pct': pct, 'msg': message})
+            task.update_progress(pct, message, json.dumps(progress_log, ensure_ascii=False))
+
         from modules import MODULE_REGISTRY
         cls = MODULE_REGISTRY.get(module_name)
         if not cls:

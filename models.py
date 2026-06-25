@@ -130,12 +130,13 @@ class AnalysisTask:
     def mark_running(self):
         conn = get_conn()
         try:
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE analysis_tasks SET status='running', started_at=CURRENT_TIMESTAMP "
                 "WHERE id=? AND status='pending'",
                 (self.id,)
             )
             conn.commit()
+            return cursor.rowcount > 0
         finally:
             conn.close()
 
@@ -156,7 +157,7 @@ class AnalysisTask:
             conn.execute(
                 "UPDATE analysis_tasks SET status='completed', progress=100, "
                 "progress_message='已完成', finished_at=CURRENT_TIMESTAMP, "
-                "output_adata_path=?, result_json=? WHERE id=?",
+                "output_adata_path=?, result_json=? WHERE id=? AND status='running'",
                 (output_adata, result_json, self.id)
             )
             conn.commit()
@@ -168,7 +169,8 @@ class AnalysisTask:
         try:
             conn.execute(
                 "UPDATE analysis_tasks SET status='failed', error_traceback=?, "
-                "progress_message='失败', finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                "progress_message='失败', finished_at=CURRENT_TIMESTAMP "
+                "WHERE id=? AND status IN ('pending', 'running')",
                 (error_traceback, self.id)
             )
             conn.commit()
