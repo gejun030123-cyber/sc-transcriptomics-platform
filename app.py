@@ -1,6 +1,8 @@
 import matplotlib
 matplotlib.use('Agg')
 
+import os
+
 from flask import Flask
 from flask_cors import CORS
 from config import Config
@@ -9,7 +11,12 @@ from database import init_db
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
-    CORS(app)
+
+    cors_origins = os.environ.get('CORS_ORIGINS', '*')
+    if cors_origins == '*':
+        CORS(app)
+    else:
+        CORS(app, origins=cors_origins.split(','))
 
     init_db()
 
