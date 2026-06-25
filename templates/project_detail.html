@@ -306,6 +306,23 @@ function loadAdataInfo() {
     0%, 80%, 100% { transform: scale(0); }
     40% { transform: scale(1); }
 }
+.proposed-tool-card {
+    background: #fff3e0; border: 1px solid #ff9800; border-radius: 10px;
+    padding: 10px 14px; margin: 6px 0; font-size: 12px;
+}
+.proposed-tool-card .tool-title { font-weight: 600; color: #e65100; margin-bottom: 4px; }
+.proposed-tool-card .tool-params { color: #555; font-size: 11px; margin-bottom: 8px; word-break: break-all; }
+.proposed-tool-card .tool-actions { display: flex; gap: 8px; }
+.proposed-tool-card .btn-confirm {
+    background: #1a237e; color: white; border: none; border-radius: 6px;
+    padding: 4px 14px; font-size: 12px; cursor: pointer;
+}
+.proposed-tool-card .btn-confirm:hover { background: #283593; }
+.proposed-tool-card .btn-reject {
+    background: #e0e0e0; color: #333; border: none; border-radius: 6px;
+    padding: 4px 14px; font-size: 12px; cursor: pointer;
+}
+.proposed-tool-card .btn-reject:hover { background: #bdbdbd; }
 </style>
 
 <button id="chat-toggle" onclick="toggleChat()" title="AI 助手">
@@ -356,6 +373,60 @@ function addToolCall(name, args) {
     document.getElementById('chat-messages').appendChild(div);
 }
 
+function addProposedTool(tool, index) {
+    const div = document.createElement('div');
+    div.className = 'proposed-tool-card';
+    const paramStr = Object.keys(tool.args || {}).length > 0
+        ? JSON.stringify(tool.args, null, 2) : '（默认参数）';
+    div.innerHTML =
+        '<div class="tool-title">📋 AI 建议执行: ' + escapeHtml(tool.name) + '</div>' +
+        '<div class="tool-params"><pre style="margin:0;font-size:11px;white-space:pre-wrap;">' + escapeHtml(paramStr) + '</pre></div>' +
+        '<div class="tool-actions">' +
+        '<button class="btn-confirm" onclick="approveTool(\'' + escapeHtml(tool.name) + '\', ' + index + ')">✓ 确认执行</button>' +
+        '<button class="btn-reject" onclick="this.closest(\'.proposed-tool-card\').remove()">✕ 取消</button>' +
+        '</div>';
+    document.getElementById('chat-messages').appendChild(div);
+    div.scrollIntoView({ behavior: 'smooth' });
+}
+
+let _pendingTools = [];
+
+async function approveTool(toolName, index) {
+    const tool = _pendingTools[index];
+    if (!tool) return;
+
+    const cards = document.querySelectorAll('.proposed-tool-card');
+    if (cards[index]) {
+        cards[index].querySelector('.tool-actions').innerHTML = '<span style="color:#1a237e;">⏳ 执行中...</span>';
+    }
+
+    try {
+        const r = await fetch('/api/chat/approve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                tool_name: tool.name,
+                args: tool.args || {},
+                project_id: PROJECT_ID,
+            }),
+        });
+        const data = await r.json();
+        if (data.error) {
+            addMessage('assistant', '执行失败: ' + data.error);
+        } else {
+            addMessage('assistant', '✓ 任务已提交: ' + (data.message || JSON.stringify(data)));
+        }
+        if (cards[index]) cards[index].remove();
+    } catch (e) {
+        addMessage('assistant', '网络错误: ' + e.message);
+        if (cards[index]) {
+            cards[index].querySelector('.tool-actions').innerHTML =
+                '<button class="btn-confirm" onclick="approveTool(\'' + escapeHtml(tool.name) + '\', ' + index + ')">↻ 重试</button>' +
+                '<button class="btn-reject" onclick="this.closest(\'.proposed-tool-card\').remove()">✕ 取消</button>';
+        }
+    }
+}
+
 function showTyping() {
     const div = document.createElement('div');
     div.id = 'typing-indicator';
@@ -403,6 +474,14 @@ async function sendChat() {
         if (data.tool_calls) {
             for (const tc of data.tool_calls) {
                 addToolCall(tc.name, tc.args || {});
+            }
+        }
+
+        // 显示待确认的工具调用
+        if (data.proposed_tools && data.proposed_tools.length > 0) {
+            _pendingTools = data.proposed_tools;
+            for (let i = 0; i < data.proposed_tools.length; i++) {
+                addProposedTool(data.proposed_tools[i], i);
             }
         }
 

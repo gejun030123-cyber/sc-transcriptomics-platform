@@ -101,3 +101,25 @@ def clear_history(pid):
     """清空聊天历史"""
     _chat_histories.clear(pid)
     return jsonify({"status": "ok"})
+
+
+@chat_bp.route('/api/chat/approve', methods=['POST'])
+@require_ai_token
+def approve_tool():
+    """用户确认执行 AI 提议的工具调用"""
+    data = request.get_json(silent=True) or {}
+    tool_name = data.get('tool_name', '')
+    args = data.get('args', {})
+    project_id = data.get('project_id', '')
+
+    if not tool_name:
+        return jsonify({"error": "缺少 tool_name"}), 400
+    if not project_id:
+        return jsonify({"error": "缺少 project_id"}), 400
+
+    try:
+        from modules.ai_tools import execute_tool
+        result = execute_tool(tool_name, args, project_id)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": f"执行失败: {str(e)}"}), 500
