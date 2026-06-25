@@ -1,11 +1,13 @@
 import threading
 import concurrent.futures
 import traceback
-import sys
 import json
+import logging
 from datetime import datetime
 from database import get_conn
 from models import gen_id, AnalysisTask, ResultFile
+
+logger = logging.getLogger(__name__)
 
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 _active_futures = {}
@@ -23,13 +25,13 @@ def submit_task(task_id, project_id, module_name, params, project_dir, input_pat
 def _run_task(task_id, project_id, module_name, params, project_dir, input_path):
     task = AnalysisTask.get_by_id(task_id)
     if not task:
-        print(f"[Worker] Task {task_id} not found", file=sys.stderr)
+        logger.warning(f"[Worker] Task {task_id} not found")
         return
 
     proj_conn = get_conn()
     try:
         proj_row = proj_conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
-        print(f"[Worker] task_id={task_id} exists=True, project_id={project_id} exists={proj_row is not None}", file=sys.stderr)
+        logger.info(f"[Worker] task_id={task_id} exists=True, project_id={project_id} exists={proj_row is not None}")
     finally:
         proj_conn.close()
 
@@ -56,8 +58,10 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
             validation_error = module.validate_input(adata)
             if validation_error:
                 raise ValueError(f"输入验证失败: {validation_error}")
-        except (FileNotFoundError, ImportError):
-            pass  # Input file may not exist yet for convert_10x; module deps may be missing
+        except FileNotFoundError:
+            logger.debug(f"[Worker] Input file not found for validation: {input_path}")
+        except ImportError as ie:
+            logger.debug(f"[Worker] Module dependency missing for validation: {ie}")
 
         result = module.run(input_path)
 
@@ -71,7 +75,7 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
                     file_path=rf.get('file_path', '')
                 )
             except Exception as e:
-                print(f"[Worker] Skipping result_files insert: {rf.get('file_path', '')} ({e})", file=sys.stderr)
+                logger.warning(f"[Worker] Skipping result_files insert: {rf.get('file_path', '')} ({e})")
 
         task.mark_completed(
             result.get('output_adata'),
@@ -79,10 +83,10 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
         )
 
     except Exception as e:
-        print(f"[Worker] Task {task_id} failed:\n{traceback.format_exc()}", file=sys.stderr)
+        logger.error(f"[Worker] Task {task_id} failed:\n{traceback.format_exc()}")
         try:
             task.mark_failed(traceback.format_exc())
         except Exception as db_err:
-            print(f"[Worker] Failed to mark task {task_id} as failed: {db_err}", file=sys.stderr)
+            logger.error(f"[Worker] Failed to mark task {task_id} as failed: {db_err}")
     finally:
         _active_futures.pop(task_id, None)
