@@ -167,9 +167,38 @@ class BaseAnalysis(ABC):
                     exported.append(obsm_path)
         return exported
 
-    @abstractmethod
     def validate_input(self, adata) -> Optional[str]:
-        pass
+        return None
+
+    def load_adata(self, input_path):
+        """加载 h5ad 并 remap 基因名。"""
+        import scanpy as sc
+        from modules.io_utils import remap_var_names
+        adata = sc.read_h5ad(input_path)
+        return remap_var_names(adata)
+
+    def save_output(self, adata, module_name):
+        """保存中间结果到 intermediate/，返回 output_path。"""
+        import os
+        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
+        os.makedirs(intermediate_dir, exist_ok=True)
+        output_path = os.path.join(intermediate_dir, f'{module_name}_output.h5ad')
+        adata.write_h5ad(output_path)
+        return output_path
+
+    def ensure_plots_dir(self):
+        """确保 plots/ 目录存在，返回路径。"""
+        import os
+        plots_dir = os.path.join(self.project_dir, 'plots')
+        os.makedirs(plots_dir, exist_ok=True)
+        return plots_dir
+
+    def save_plotly_json(self, fig, plots_dir, filename, category, label):
+        """将 Plotly figure 保存为 JSON 并返回 result_file dict。"""
+        import os
+        fpath = os.path.join(plots_dir, filename)
+        fig.write_json(fpath)
+        return {'file_path': fpath, 'file_type': 'plotly_json', 'category': category, 'label': label}
 
     @abstractmethod
     def run(self, input_path: str) -> dict:
