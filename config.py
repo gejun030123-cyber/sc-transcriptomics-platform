@@ -20,6 +20,7 @@ class Config:
             os.makedirs(os.path.dirname(secret_file), exist_ok=True)
             with open(secret_file, 'w') as f:
                 f.write(key)
+            os.chmod(secret_file, 0o600)
             return key
 
     SECRET_KEY = _load_secret.__func__()

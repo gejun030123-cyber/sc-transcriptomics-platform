@@ -64,6 +64,12 @@ def _run_analysis(args, project_id):
         if not real_input.startswith(real_project + os.sep) and real_input != real_project:
             return {"error": "输入文件路径必须在项目目录内"}
 
+    # Reject symlinks and special files
+    if os.path.islink(input_path):
+        return {"error": "不支持符号链接文件"}
+    if not os.path.isfile(input_path):
+        return {"error": "输入路径不是普通文件"}
+
     params = args.get("params", {})
     params, err = _validate_analysis_params(module_name, params)
     if err:

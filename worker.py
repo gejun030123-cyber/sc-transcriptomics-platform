@@ -1,4 +1,3 @@
-import threading
 import concurrent.futures
 import traceback
 import json
@@ -18,12 +17,13 @@ def active_count():
 def submit_task(task_id, project_id, module_name, params, project_dir, input_path):
     if task_id in _active_futures:
         logger.warning(f"[Worker] Task {task_id} already submitted, skipping")
-        return
+        return False
     future = _executor.submit(
         _run_task, task_id, project_id, module_name,
         params, project_dir, input_path
     )
     _active_futures[task_id] = future
+    return True
 
 def _run_task(task_id, project_id, module_name, params, project_dir, input_path):
     task = None
