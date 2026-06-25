@@ -28,7 +28,7 @@ def _run_analysis(args, project_id):
     if module_name not in MODULE_REGISTRY:
         return {"error": f"未知模块: {module_name}，可用: {list(MODULE_REGISTRY.keys())}"}
 
-    project_dir = os.path.join(Config.DATA_DIR, 'projects', project_id)
+    project_dir = Config.project_dir(project_id)
     if not os.path.isdir(project_dir):
         return {"error": "项目不存在"}
 
@@ -58,6 +58,9 @@ def _run_analysis(args, project_id):
         return {"error": "未找到可用的输入文件，请先上传数据"}
 
     params = args.get("params", {})
+    params, err = _validate_analysis_params(module_name, params)
+    if err:
+        return {"error": f"参数校验失败: {err}"}
 
     # 创建任务
     task = AnalysisTask(
@@ -85,7 +88,7 @@ def _get_project_status(project_id):
     """获取项目状态"""
     from models import AnalysisTask
 
-    project_dir = os.path.join(Config.DATA_DIR, 'projects', project_id)
+    project_dir = Config.project_dir(project_id)
     if not os.path.isdir(project_dir):
         return {"error": "项目不存在"}
 
@@ -176,3 +179,40 @@ def _list_modules(pipeline_type="all"):
         }
 
     return {"modules": modules}
+
+
+def _validate_analysis_params(module_name, params):
+    """校验 AI 传入的分析参数，移除未知键，返回 (cleaned_params, error_msg)。"""
+    from modules.schemas import PARAM_SCHEMAS
+
+    schema_list = PARAM_SCHEMAS.get(module_name, [])
+    valid_keys = {s['key'] for s in schema_list}
+
+    if not params:
+        return {}, None
+
+    cleaned = {}
+    for key, value in params.items():
+        if key.startswith('_'):
+            continue  # 内置参数不允许 AI 设置
+        if key not in valid_keys:
+            continue  # 静默移除未知参数
+        schema_entry = next((s for s in schema_list if s['key'] == key), None)
+        if schema_entry:
+            expected_type = schema_entry.get('type', 'text')
+            if expected_type == 'number':
+                try:
+                    cleaned[key] = float(value)
+                except (ValueError, TypeError):
+                    return None, f"参数 '{key}' 应为数字，收到: {value}"
+            elif expected_type == 'checkbox':
+                if isinstance(value, str):
+                    cleaned[key] = value.lower() in ('true', '1', 'yes', 'on')
+                else:
+                    cleaned[key] = bool(value)
+            else:
+                cleaned[key] = str(value)
+        else:
+            cleaned[key] = value
+
+    return cleaned, None
