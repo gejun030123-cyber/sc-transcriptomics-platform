@@ -61,7 +61,7 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     dds = ov.bulk.pyDEG(count_df)
     n_before_dedup = count_df.shape[0]
     dds.drop_duplicates_index()
-    n_after_dedup = dds.deg_res.shape[0] if hasattr(dds, 'deg_res') and dds.deg_res is not None else n_before_dedup
+    n_after_dedup = dds.data.shape[0] if hasattr(dds, 'data') and dds.data is not None else n_before_dedup
     if n_before_dedup != n_after_dedup:
         import logging
         logging.getLogger(__name__).warning(f"[bulk_deg] 去重: {n_before_dedup} → {n_after_dedup} 基因（移除 {n_before_dedup - n_after_dedup} 个重复）")
@@ -243,8 +243,8 @@ def _run_lrt_test(adata, counts, groupby, method, pval_threshold, gene_id_to_nam
     dds = ov.bulk.pyDEG(count_df)
     dds.drop_duplicates_index()
 
-    # Use deduplicated count matrix for DGEList
-    dedup_count_df = count_df.loc[~count_df.index.duplicated()]
+    # Use the same deduplicated matrix as dds (keeps highest-sum duplicate)
+    dedup_count_df = dds.data.copy()
 
     groups = adata.obs[groupby].astype(str)
     anno = pd.DataFrame({'group': groups.values}, index=groups.index)
