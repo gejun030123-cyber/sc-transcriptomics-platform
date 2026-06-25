@@ -26,7 +26,7 @@ def _run_stat_test(ct_abs, test_type, n_permutations=1000):
             total = shuffled.values.sum()
             col_sums = shuffled.sum(axis=0).values
             row_sums = shuffled.sum(axis=1).values
-            perm_table = np.random.multinomial(total, col_sums / total).reshape(1, -1)
+            perm_table = np.random.multinomial(row_sums[0], col_sums / total).reshape(1, -1)
             for rs in row_sums[1:]:
                 row = np.random.multinomial(rs, col_sums / total)
                 perm_table = np.vstack([perm_table, row])
@@ -46,9 +46,6 @@ class ProportionAnalysis(BaseAnalysis):
     DESCRIPTION = "各分组间的细胞比例差异分析"
     INPUT_REQUIRES = ['leiden']
 
-    def validate_input(self, adata):
-        return None
-
     def run(self, input_path):
         import scanpy as sc
         import pandas as pd
@@ -57,9 +54,7 @@ class ProportionAnalysis(BaseAnalysis):
         from plotly.subplots import make_subplots
 
         self.progress(5, "Loading data...")
-        adata = sc.read_h5ad(input_path)
-        from modules.io_utils import remap_var_names
-        adata = remap_var_names(adata)
+        adata = self.load_adata(input_path)
         groupby = self.params.get('groupby', 'celltype')
         batch_key = self.params.get('batch_key', 'batch')
         stat_test = self.params.get('stat_test', 'chi_square')
@@ -84,9 +79,8 @@ class ProportionAnalysis(BaseAnalysis):
         chi2, pval = _run_stat_test(ct_abs, stat_test, n_permutations)
 
         self.progress(65, "Generating proportion plots...")
-        plots_dir = os.path.join(self.project_dir, 'plots')
+        plots_dir = self.ensure_plots_dir()
         results_dir = os.path.join(self.project_dir, 'results')
-        os.makedirs(plots_dir, exist_ok=True)
         os.makedirs(results_dir, exist_ok=True)
         result_files = []
 
@@ -98,18 +92,14 @@ class ProportionAnalysis(BaseAnalysis):
             barmode='stack',
             xaxis_title=batch_key, yaxis_title='Proportion',
         ))
-        fpath = os.path.join(plots_dir, 'proportion_stacked.json')
-        with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
-        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': 'Cell Proportions (Stacked)'})
+        result_files.append(self.save_plotly_json(fig, plots_dir, 'proportion_stacked.json', 'bar', 'Cell Proportions (Stacked)'))
 
         fig2 = make_subplots(rows=1, cols=len(ct.index), subplot_titles=[str(x) for x in ct.index])
         for i, idx in enumerate(ct.index, 1):
             fig2.add_trace(go.Pie(labels=[str(x) for x in ct.columns], values=ct.loc[idx].values, hole=0.3),
                           row=1, col=i)
         fig2.update_layout(title='Cell Type Distribution per Batch', width=300 * len(ct.index), height=400)
-        fpath = os.path.join(plots_dir, 'proportion_pie.json')
-        with open(fpath, 'w') as f: json.dump(json.loads(fig2.to_json()), f)
-        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pie', 'label': 'Cell Type Distribution'})
+        result_files.append(self.save_plotly_json(fig2, plots_dir, 'proportion_pie.json', 'pie', 'Cell Type Distribution'))
 
         ct_abs.to_csv(os.path.join(results_dir, 'cell_counts.csv'))
         ct.to_csv(os.path.join(results_dir, 'cell_proportions.csv'))
@@ -147,17 +137,12 @@ class ProportionAnalysis(BaseAnalysis):
                     width=600, height=400,
                 ))
                 safe_name = f'{group_a}_vs_{group_b}'.replace(' ', '_')
-                fpath = os.path.join(plots_dir, f'proportion_compare_{safe_name}.json')
-                with open(fpath, 'w') as f: json.dump(json.loads(fig_sub.to_json()), f)
-                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': f'{group_a} vs {group_b} 比例比较'})
+                result_files.append(self.save_plotly_json(fig_sub, plots_dir, f'proportion_compare_{safe_name}.json', 'bar', f'{group_a} vs {group_b} 比例比较'))
 
                 ct_sub_abs.to_csv(os.path.join(results_dir, f'cell_counts_{safe_name}.csv'))
 
         self.progress(90, "Saving output...")
-        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
-        os.makedirs(intermediate_dir, exist_ok=True)
-        output_path = os.path.join(intermediate_dir, 'proportion_output.h5ad')
-        adata.write_h5ad(output_path)
+        output_path = self.save_output(adata, 'proportion')
 
         self.progress(100, "Done")
         return {
