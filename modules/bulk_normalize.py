@@ -1,7 +1,10 @@
 import os
+import logging
 import numpy as np
 import pandas as pd
 from modules.base import BaseAnalysis
+
+logger = logging.getLogger(__name__)
 
 class BulkNormalizeAnalysis(BaseAnalysis):
     MODULE_NAME = "bulk_normalize"
@@ -58,8 +61,8 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             norm_counts = raw_counts / size_factors[:, None]
             adata.layers['normalized'] = norm_counts
             adata.X = np.log2(norm_counts + 1)
-            adata.X = np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
-            adata.layers['normalized'] = np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
+            adata.X = _sanitize(adata.X, 'deseq2 X')
+            adata.layers['normalized'] = _sanitize(adata.layers['normalized'], 'deseq2 normalized')
 
         elif method == 'tmm':
             tmm_factors = _tmm_normalize(raw_counts)
@@ -68,54 +71,60 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             norm_counts = raw_counts / tmm_factors[:, None]
             adata.layers['normalized'] = norm_counts
             adata.X = np.log2(norm_counts + 1)
-            adata.X = np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
-            adata.layers['normalized'] = np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
+            adata.X = _sanitize(adata.X, 'tmm X')
+            adata.layers['normalized'] = _sanitize(adata.layers['normalized'], 'tmm normalized')
 
         elif method == 'cpm':
             cpm_target = float(self.params.get('cpm_target', 1e6))
             lib_sizes = raw_counts.sum(axis=1, keepdims=True)
-            lib_sizes[lib_sizes == 0] = 1  # 避免除零
-            cpm = raw_counts / lib_sizes * cpm_target
+            cpm = np.where(lib_sizes > 0, raw_counts / lib_sizes * cpm_target, 0.0)
             adata.layers['normalized'] = cpm
             adata.X = np.log2(cpm + 1)
-
-            # 清理 inf/NaN 值
-            adata.X = np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
-            adata.layers['normalized'] = np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
+            adata.X = _sanitize(adata.X, 'cpm X')
+            adata.layers['normalized'] = _sanitize(adata.layers['normalized'], 'cpm normalized')
 
         elif method == 'log2_quantile':
             log_counts = np.log2(raw_counts + 1)
+            # 按样本（行）排序，计算每个秩次的参考分布
+            sorted_per_sample = np.sort(log_counts, axis=1)  # (n_samples, n_genes)
+            ref_distribution = np.mean(sorted_per_sample, axis=0)  # (n_genes,)
+            # 按秩次替换：每个基因的值替换为该秩次对应的参考值
             from scipy.stats import rankdata
-            ranked = np.apply_along_axis(rankdata, 0, log_counts)
-            ref_distribution = np.mean(np.sort(log_counts, axis=0), axis=1)
             norm = np.zeros_like(log_counts)
-            for i in range(log_counts.shape[1]):
-                sorted_idx = np.argsort(ranked[:, i])
-                norm[sorted_idx, i] = ref_distribution
+            for i in range(log_counts.shape[0]):  # 遍历样本
+                ranks = rankdata(log_counts[i], method='ordinal').astype(int) - 1
+                ranks = np.clip(ranks, 0, len(ref_distribution) - 1)
+                norm[i] = ref_distribution[ranks]
             adata.layers['normalized'] = 2**norm - 1
             adata.X = norm
-
-            # 清理 inf/NaN 值
-            adata.X = np.nan_to_num(adata.X, nan=0.0, posinf=0.0, neginf=0.0)
-            adata.layers['normalized'] = np.nan_to_num(adata.layers['normalized'], nan=0.0, posinf=0.0, neginf=0.0)
+            adata.X = _sanitize(adata.X, 'quantile X')
+            adata.layers['normalized'] = _sanitize(adata.layers['normalized'], 'quantile normalized')
 
         elif method == 'vst':
             size_factors = _estimate_size_factors(raw_counts)
             adata.obs['size_factor'] = size_factors
-            adata.X = _vst_transform(raw_counts, size_factors)
+            vst_vals = _vst_transform(raw_counts, size_factors)
+            adata.X = vst_vals
+            adata.layers['normalized'] = vst_vals
 
         elif method == 'rlog':
             size_factors = _estimate_size_factors(raw_counts)
             adata.obs['size_factor'] = size_factors
-            adata.X = _rlog_transform(raw_counts, size_factors)
+            rlog_vals = _rlog_transform(raw_counts, size_factors)
+            adata.X = rlog_vals
+            adata.layers['normalized'] = rlog_vals
 
         else:
             raise ValueError(f"未知标准化方法: {method}，支持: deseq2/tmm/cpm/log2_quantile/vst/rlog")
 
         # 统一输出标记
+        linear_layer_methods = ('deseq2', 'tmm', 'cpm')
         adata.uns['normalization'] = {
             'method': method,
             'is_log_transformed': method in ('deseq2', 'tmm', 'cpm', 'vst', 'log2_quantile', 'rlog'),
+            'X_scale': 'log2(CPM+1)' if method in linear_layer_methods else ('log2(normed+0.5)' if method in ('vst', 'rlog') else 'quantile-normalized'),
+            'normalized_layer_scale': 'linear' if method in linear_layer_methods else ('same as X' if method in ('vst', 'rlog') else 'linear(2^X-1)'),
+            'note': '近似实现：log2(normed + 0.5)，非 DESeq2 原始 VST/rlog' if method in ('vst', 'rlog') else '',
         }
 
         self.progress(60, "生成标准化前后对比图...")
@@ -123,18 +132,23 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         os.makedirs(plots_dir, exist_ok=True)
         result_files = []
 
-        # 文库大小对比图：仅对线性尺度方法有意义
+        # 文库大小对比图
+        from plotly.subplots import make_subplots
         if method in ('vst', 'rlog'):
-            norm_lib = raw_lib  # vst/rlog 无 normalized 层，用原始文库大小展示
+            # VST/rlog 输出不是 counts，展示标准化前后每样本均值对比
+            raw_means = np.log2(raw_counts + 1).mean(axis=1)
+            norm_means = adata.X.mean(axis=1)
+            fig = make_subplots(rows=1, cols=2, subplot_titles=['标准化前 (mean log2 raw)', '标准化后 (mean transformed)'])
+            fig.add_trace(go.Bar(y=raw_means.tolist(), marker_color='#e53935', name='Raw'), row=1, col=1)
+            fig.add_trace(go.Bar(y=norm_means.tolist(), marker_color='#4caf50', name='Normalized'), row=1, col=2)
+            fig.update_layout(height=350, width=700, showlegend=False, title='每样本均值对比')
         else:
             norm_layer = adata.layers.get('normalized', adata.X)
             norm_lib = norm_layer.sum(axis=1) if hasattr(norm_layer, 'sum') else np.ones(adata.n_obs)
-
-        from plotly.subplots import make_subplots
-        fig = make_subplots(rows=1, cols=2, subplot_titles=['标准化前 (Raw)', '标准化后 (Normalized)'])
-        fig.add_trace(go.Bar(y=raw_lib, marker_color='#e53935', name='Raw'), row=1, col=1)
-        fig.add_trace(go.Bar(y=norm_lib, marker_color='#4caf50', name='Normalized'), row=1, col=2)
-        fig.update_layout(height=350, width=700, showlegend=False, title='文库大小对比')
+            fig = make_subplots(rows=1, cols=2, subplot_titles=['标准化前 (Raw)', '标准化后 (Normalized)'])
+            fig.add_trace(go.Bar(y=raw_lib.tolist(), marker_color='#e53935', name='Raw'), row=1, col=1)
+            fig.add_trace(go.Bar(y=norm_lib.tolist(), marker_color='#4caf50', name='Normalized'), row=1, col=2)
+            fig.update_layout(height=350, width=700, showlegend=False, title='文库大小对比')
         fpath = os.path.join(plots_dir, 'bulk_norm_libsize.json')
         with open(fpath, 'w') as f: f.write(fig.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': '文库大小对比'})
@@ -243,8 +257,9 @@ def _tmm_normalize(counts):
         keep = (Mi >= m_lo) & (Mi <= m_hi) & (Ai <= a_hi)
 
         if keep.sum() > 0:
-            wi = (fi - counts[i, mask][keep]) / (fi * counts[i, mask][keep])
-            wr = (fr - counts[ref_idx, mask][keep]) / (fr * counts[ref_idx, mask][keep])
+            # edgeR delta method 近似方差：Var(M) ≈ 1/ci + 1/cr
+            wi = 1.0 / counts[i, mask][keep]
+            wr = 1.0 / counts[ref_idx, mask][keep]
             weights = 1.0 / (wi + wr + 1e-30)
             factors[i] = 2 ** (-np.average(Mi[keep], weights=weights))
 
@@ -284,13 +299,24 @@ def _rlog_transform(counts, size_factors, prior_mean=None):
     return np.nan_to_num(rlog, nan=0.0, posinf=0.0, neginf=0.0)
 
 
+def _sanitize(arr, label='data'):
+    """替换 inf/NaN 为 0 并记录警告。"""
+    n_bad = int(np.sum(~np.isfinite(arr)))
+    if n_bad > 0:
+        logger.warning(f"[bulk_normalize] {label}: {n_bad} 个 inf/NaN 值被替换为 0")
+    return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def _estimate_size_factors(raw_counts):
     """DESeq2 中位比率法计算 size factors。raw_counts: (n_samples, n_genes)."""
     from scipy.stats import gmean
-    # 用所有样本（不过滤全零样本）
+    # 仅使用所有样本中都非零的基因计算几何均值
     nonzero_all = (raw_counts > 0).all(axis=0)
-    if nonzero_all.sum() == 0:
-        geo_means = np.exp(np.log(raw_counts + 1).mean(axis=0))
+    n_usable = int(nonzero_all.sum())
+    if n_usable == 0:
+        # 无全非零基因时，使用 log-几何均值近似（加 1 避免 log(0)）
+        geo_means = gmean(raw_counts + 1, axis=0)
+        logger.warning(f"[bulk_normalize] 无全非零基因，使用 log-几何均值近似计算 size factors")
     else:
         geo_means = np.ones(raw_counts.shape[1])
         geo_means[nonzero_all] = gmean(raw_counts[:, nonzero_all], axis=0)
