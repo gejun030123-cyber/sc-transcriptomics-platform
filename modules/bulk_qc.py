@@ -1,5 +1,4 @@
 import os
-import json
 import numpy as np
 import pandas as pd
 from modules.base import BaseAnalysis
@@ -33,15 +32,16 @@ class BulkQCAnalysis(BaseAnalysis):
         max_ribo_pct = float(self.params.get('max_ribo_pct', 40.0))
         min_gini = float(self.params.get('min_gini', 0))
         min_sample_expr = int(self.params.get('min_sample_expr', 0))
+        min_count_threshold = int(self.params.get('min_count_threshold', 1))
         detect_outliers = self.params.get('detect_outliers', True)
         filter_strategy = self.params.get('filter_strategy', 'standard')
 
         # 过滤策略预设覆盖阈值
-        if filter_strategy == 'conservative':
-            min_counts = min(min_counts, 50000)
-            min_genes = min(min_genes, 3000)
-            max_mt_pct = max(max_mt_pct, 30.0)
-            max_ribo_pct = max(max_ribo_pct, 60.0)
+        if filter_strategy == 'strict':
+            min_counts = max(min_counts, 200000)
+            min_genes = max(min_genes, 8000)
+            max_mt_pct = min(max_mt_pct, 15.0)
+            max_ribo_pct = min(max_ribo_pct, 30.0)
 
         self.progress(20, "计算质控指标...")
         # 优先用 gene_name 检测线粒体基因（Ensembl ID 不以 MT- 开头）
@@ -108,6 +108,7 @@ class BulkQCAnalysis(BaseAnalysis):
             })
 
         adata_filtered = adata[mask].copy()
+        gini_filtered = gini_values[mask]
         n_after = adata_filtered.n_obs
 
         # 输出样本指标表和过滤日志
@@ -126,15 +127,12 @@ class BulkQCAnalysis(BaseAnalysis):
         result_files.append({'file_path': metrics_csv, 'file_type': 'csv', 'category': 'table', 'label': '样本 QC 指标'})
         result_files.append({'file_path': filter_log_csv, 'file_type': 'csv', 'category': 'table', 'label': '过滤日志'})
 
-        # 基因层面过滤
+        # 基因层面过滤（基于 raw count 阈值）
         genes_before_filter = adata_filtered.n_vars
         gene_filter_rows = []
         if min_sample_expr > 0:
             raw_filt = adata_filtered.X.toarray() if hasattr(adata_filtered.X, 'toarray') else np.asarray(adata_filtered.X)
-            lib_sizes_filt = raw_filt.sum(axis=1, keepdims=True)
-            lib_sizes_filt[lib_sizes_filt == 0] = 1
-            cpm = raw_filt / lib_sizes_filt * 1e6
-            expr_count_per_gene = (cpm > 1).sum(axis=0)
+            expr_count_per_gene = (raw_filt >= min_count_threshold).sum(axis=0)
             gene_mask = expr_count_per_gene >= min_sample_expr
 
             removed_indices = np.where(~gene_mask)[0]
@@ -181,13 +179,19 @@ class BulkQCAnalysis(BaseAnalysis):
         with open(fpath, 'w') as f: f.write(fig.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': '质控总览'})
 
-        # 样本相关性热图
-        norm_for_corr = adata_filtered.copy()
-        sc.pp.normalize_total(norm_for_corr, target_sum=1e6)
-        sc.pp.log1p(norm_for_corr)
-        corr_data = norm_for_corr.X if not hasattr(norm_for_corr.X, 'toarray') else norm_for_corr.X.toarray()
+        # 保存原始 counts 副本
+        adata_raw_filtered = adata_filtered.copy()
+
+        # 统一标准化一份副本，用于相关性热图和 PCA
+        self.progress(65, "标准化数据...")
+        adata_normed = adata_filtered.copy()
+        sc.pp.normalize_total(adata_normed, target_sum=1e6)
+        sc.pp.log1p(adata_normed)
+
+        self.progress(70, "生成相关性热图...")
+        corr_data = adata_normed.X if not hasattr(adata_normed.X, 'toarray') else adata_normed.X.toarray()
         corr_matrix = np.corrcoef(corr_data)
-        sample_labels_corr = norm_for_corr.obs.index.tolist()
+        sample_labels_corr = adata_normed.obs.index.tolist()
 
         # 分组颜色
         filtered_groups = [groups[sample_names.index(s)] for s in sample_labels_corr]
@@ -227,18 +231,13 @@ class BulkQCAnalysis(BaseAnalysis):
             with open(fpath, 'w') as f: f.write(fig_r.to_json(engine="json"))
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': '样本过滤结果'})
 
-        # 保存原始 counts 副本（PCA 前会标准化 adata_filtered）
-        adata_raw_filtered = adata_filtered.copy()
-
-        self.progress(80, "运行 PCA 离群检测...")
+        self.progress(75, "PCA 离群检测...")
         outlier_samples = []
-        sc.pp.normalize_total(adata_filtered, target_sum=1e6)
-        sc.pp.log1p(adata_filtered)
         n_comps = min(10, n_after - 1)
         if n_comps >= 2:
-            sc.pp.pca(adata_filtered, n_comps=n_comps)
-            pc = adata_filtered.obsm['X_pca']
-            filtered_sample_names = adata_filtered.obs.index.tolist()
+            sc.pp.pca(adata_normed, n_comps=n_comps)
+            pc = adata_normed.obsm['X_pca']
+            filtered_sample_names = adata_normed.obs.index.tolist()
             filtered_groups_pca = [groups[sample_names.index(s)] for s in filtered_sample_names]
             unique_groups_pca = sorted(set(filtered_groups_pca))
             group_color_map_pca = {g: f'hsl({i*360//max(1,len(unique_groups_pca))},70%,50%)' for i, g in enumerate(unique_groups_pca)}
@@ -272,36 +271,36 @@ class BulkQCAnalysis(BaseAnalysis):
             with open(fpath, 'w') as f: f.write(fig_pca.to_json(engine="json"))
             result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': '样本 PCA'})
 
-        # PCA 方差解释 elbow 图
-        if 'pca' in adata_filtered.uns and 'variance_ratio' in adata_filtered.uns['pca']:
-            pca_variance = adata_filtered.uns['pca']['variance_ratio']
-        else:
-            pca_var = np.var(adata_filtered.obsm['X_pca'], axis=0)
+        # PCA 方差解释 elbow 图（使用 scanpy 存储的 variance_ratio）
+        pca_variance = adata_normed.uns.get('pca', {}).get('variance_ratio', None)
+        if pca_variance is None and n_comps >= 2:
+            pca_var = np.var(pc, axis=0)
             pca_variance = pca_var / pca_var.sum()
-        n_pcs = len(pca_variance)
-        pc_labels = [f'PC{i+1}' for i in range(n_pcs)]
-        cumulative = np.cumsum(pca_variance).tolist()
-        fig_elbow = go.Figure()
-        fig_elbow.add_trace(go.Bar(x=pc_labels, y=pca_variance.tolist(),
-            marker_color='#1a237e', name='方差比例'))
-        fig_elbow.add_trace(go.Scatter(x=pc_labels, y=cumulative,
-            mode='lines+markers', marker_color='#e53935', name='累积比例', yaxis='y2'))
-        fig_elbow.update_layout(
-            title='PCA 方差解释比例',
-            xaxis_title='主成分', yaxis_title='方差解释比例',
-            yaxis2=dict(title='累积比例', overlaying='y', side='right', range=[0, 1.05]),
-            width=600, height=400, plot_bgcolor='white')
-        fpath = os.path.join(plots_dir, 'bulk_qc_pca_elbow.json')
-        with open(fpath, 'w') as f: f.write(fig_elbow.to_json(engine="json"))
-        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': 'PCA 方差解释'})
+        if pca_variance is not None and len(pca_variance) > 0:
+            n_pcs = len(pca_variance)
+            pc_labels = [f'PC{i+1}' for i in range(n_pcs)]
+            cumulative = np.cumsum(pca_variance).tolist()
+            fig_elbow = go.Figure()
+            fig_elbow.add_trace(go.Bar(x=pc_labels, y=pca_variance.tolist(),
+                marker_color='#1a237e', name='方差比例'))
+            fig_elbow.add_trace(go.Scatter(x=pc_labels, y=cumulative,
+                mode='lines+markers', marker_color='#e53935', name='累积比例', yaxis='y2'))
+            fig_elbow.update_layout(
+                title='PCA 方差解释比例',
+                xaxis_title='主成分', yaxis_title='方差解释比例',
+                yaxis2=dict(title='累积比例', overlaying='y', side='right', range=[0, 1.05]),
+                width=600, height=400, plot_bgcolor='white')
+            fpath = os.path.join(plots_dir, 'bulk_qc_pca_elbow.json')
+            with open(fpath, 'w') as f: f.write(fig_elbow.to_json(engine="json"))
+            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': 'PCA 方差解释'})
 
         # 组内 vs 组间距离箱线图
         if len(set(groups)) > 1 and n_after > 3:
-            norm_arr = norm_for_corr.X if not hasattr(norm_for_corr.X, 'toarray') else norm_for_corr.X.toarray()
+            norm_arr = adata_normed.X if not hasattr(adata_normed.X, 'toarray') else adata_normed.X.toarray()
             corr_mat_all = np.corrcoef(norm_arr)
             dist_mat = 1 - corr_mat_all
             intra_dists, inter_dists = [], []
-            filtered_sample_list = norm_for_corr.obs.index.tolist()
+            filtered_sample_list = adata_normed.obs.index.tolist()
             for i in range(n_after):
                 for j in range(i + 1, n_after):
                     gi = groups[sample_names.index(filtered_sample_list[i])]
@@ -397,7 +396,7 @@ class BulkQCAnalysis(BaseAnalysis):
             cv_labels = [f'{g} (CV={hk_cv[g]:.2f})' for g in hk_genes]
             fig_hk = go.Figure(data=go.Heatmap(
                 z=hk_data.T.tolist(), x=hk_samples, y=cv_labels,
-                colorscale='YlOrRd', colorbar=dict(title='log10(CPM+1)')))
+                colorscale='YlOrRd', colorbar=dict(title='ln(CPM+1)')))
             fig_hk.update_layout(title='管家基因表达稳定性',
                 width=max(400, len(hk_samples)*40+200),
                 height=max(200, len(hk_genes)*30+100))
@@ -436,7 +435,7 @@ class BulkQCAnalysis(BaseAnalysis):
                 'median_lib_size': int(np.median(adata_filtered.obs['total_counts'])),
                 'median_genes': int(np.median(adata_filtered.obs['n_genes_by_counts'])),
                 'median_ribo_pct': round(float(np.median(adata_filtered.obs['pct_counts_ribo'])), 2) if 'pct_counts_ribo' in adata_filtered.obs.columns else 0,
-                'median_gini': round(float(np.median([_gini(raw_counts[sample_names.index(s)]) for s in adata_filtered.obs.index.tolist()])), 4),
+                'median_gini': round(float(np.median(gini_filtered)), 4),
             }
         }
 

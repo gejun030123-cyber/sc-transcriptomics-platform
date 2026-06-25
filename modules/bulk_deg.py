@@ -120,6 +120,8 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
             regulation.append('NS')
 
     # Group means — 使用 dds 去重后的数据计算（避免重复基因均值错位）
+    if not hasattr(dds, 'data') or dds.data is None:
+        raise RuntimeError("pyDEG 去重后数据不可用，请检查 omicverse 版本")
     dedup_data = dds.data  # genes x samples DataFrame（去重后）
     g1_mask = dedup_data.columns.isin(group1_samples)
     g2_mask = dedup_data.columns.isin(group2_samples)

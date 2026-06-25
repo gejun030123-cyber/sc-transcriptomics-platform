@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
+from scipy.stats import ttest_ind
 from modules.base import BaseAnalysis
 
 
@@ -378,7 +379,7 @@ class BulkTimecourseAnalysis(BaseAnalysis):
                         vals_a = lognorm[a_idx, gi]
                         vals_b = lognorm[b_idx, gi]
                         try:
-                            tstat, pval = stats.ttest_ind(vals_a, vals_b, equal_var=False)
+                            tstat, pval = ttest_ind(vals_a, vals_b, equal_var=False)
                         except Exception:
                             tstat, pval = 0.0, 1.0
                         mean_a = vals_a.mean()
