@@ -56,12 +56,8 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
             validation_error = module.validate_input(adata)
             if validation_error:
                 raise ValueError(f"输入验证失败: {validation_error}")
-        except FileNotFoundError:
-            pass  # Input file may not exist yet for convert_10x
-        except Exception as ve:
-            if '输入验证失败' in str(ve):
-                raise  # Re-raise validation errors
-            # For other loading errors, skip validation and let run() handle it
+        except (FileNotFoundError, ImportError):
+            pass  # Input file may not exist yet for convert_10x; module deps may be missing
 
         result = module.run(input_path)
 
@@ -84,6 +80,9 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
 
     except Exception as e:
         print(f"[Worker] Task {task_id} failed:\n{traceback.format_exc()}", file=sys.stderr)
-        task.mark_failed(traceback.format_exc())
+        try:
+            task.mark_failed(traceback.format_exc())
+        except Exception as db_err:
+            print(f"[Worker] Failed to mark task {task_id} as failed: {db_err}", file=sys.stderr)
     finally:
         _active_futures.pop(task_id, None)
