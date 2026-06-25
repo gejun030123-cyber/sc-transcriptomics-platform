@@ -241,7 +241,7 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
                 gene_rnk=gene_rnk,
                 pathways_dict=pathways_dict,
                 processes=4,
-                permutation_num=100,
+                permutation_num=1000,
                 outdir=os.path.join(self.project_dir, 'enrichr_gsea_tmp')
             )
 
