@@ -57,6 +57,13 @@ def _run_analysis(args, project_id):
     if not input_path or not os.path.exists(input_path):
         return {"error": "未找到可用的输入文件，请先上传数据"}
 
+    # Validate input_path is within project directory
+    if input_path:
+        real_input = os.path.realpath(input_path)
+        real_project = os.path.realpath(project_dir)
+        if not real_input.startswith(real_project + os.sep) and real_input != real_project:
+            return {"error": "输入文件路径必须在项目目录内"}
+
     params = args.get("params", {})
     params, err = _validate_analysis_params(module_name, params)
     if err:

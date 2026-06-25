@@ -16,6 +16,9 @@ def active_count():
     return sum(1 for f in _active_futures.values() if not f.done())
 
 def submit_task(task_id, project_id, module_name, params, project_dir, input_path):
+    if task_id in _active_futures:
+        logger.warning(f"[Worker] Task {task_id} already submitted, skipping")
+        return
     future = _executor.submit(
         _run_task, task_id, project_id, module_name,
         params, project_dir, input_path
@@ -23,6 +26,7 @@ def submit_task(task_id, project_id, module_name, params, project_dir, input_pat
     _active_futures[task_id] = future
 
 def _run_task(task_id, project_id, module_name, params, project_dir, input_path):
+    task = None
     try:
         task = AnalysisTask.get_by_id(task_id)
         if not task:
@@ -67,7 +71,7 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
 
         result = module.run(input_path)
 
-        for rf in result.get('result_files', []):
+        for rf in (result.get('result_files') or []):
             try:
                 ResultFile.create(
                     task_id=task_id, project_id=project_id,
@@ -86,6 +90,8 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
 
     except Exception as e:
         logger.error(f"[Worker] Task {task_id} failed:\n{traceback.format_exc()}")
+        if task is None:
+            return
         try:
             task.mark_failed(traceback.format_exc())
         except Exception as db_err:
