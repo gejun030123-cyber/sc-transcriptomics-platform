@@ -3,10 +3,9 @@ import concurrent.futures
 import traceback
 import sys
 import json
-import sqlite3
 from datetime import datetime
-from config import Config
-from models import gen_id
+from database import get_conn
+from models import gen_id, AnalysisTask, ResultFile
 
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 _active_futures = {}
@@ -22,69 +21,69 @@ def submit_task(task_id, project_id, module_name, params, project_dir, input_pat
     _active_futures[task_id] = future
 
 def _run_task(task_id, project_id, module_name, params, project_dir, input_path):
-    # Worker uses its own DB connection to avoid conflicts with Flask thread
-    db = sqlite3.connect(Config.DB_PATH)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA foreign_keys=ON")
+    task = AnalysisTask.get_by_id(task_id)
+    if not task:
+        print(f"[Worker] Task {task_id} not found", file=sys.stderr)
+        return
+
+    proj_conn = get_conn()
     try:
-        # Debug: verify task and project exist
-        task_row = db.execute("SELECT id, project_id FROM analysis_tasks WHERE id=?", (task_id,)).fetchone()
-        proj_row = db.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
-        print(f"[Worker] task_id={task_id} exists={task_row is not None}, project_id={project_id} exists={proj_row is not None}", file=sys.stderr)
+        proj_row = proj_conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
+        print(f"[Worker] task_id={task_id} exists=True, project_id={project_id} exists={proj_row is not None}", file=sys.stderr)
+    finally:
+        proj_conn.close()
 
-        db.execute(
-            "UPDATE analysis_tasks SET status='running', started_at=CURRENT_TIMESTAMP WHERE id=?",
-            (task_id,)
-        )
-        db.commit()
+    task.mark_running()
 
-        progress_log = []
+    progress_log = []
 
-        def progress_cb(pct, message):
-            now = datetime.now().strftime('%H:%M:%S')
-            progress_log.append({'time': now, 'pct': pct, 'msg': message})
-            db.execute(
-                "UPDATE analysis_tasks SET progress=?, progress_message=?, log_text=? WHERE id=?",
-                (pct, message, json.dumps(progress_log, ensure_ascii=False), task_id)
-            )
-            db.commit()
+    def progress_cb(pct, message):
+        now = datetime.now().strftime('%H:%M:%S')
+        progress_log.append({'time': now, 'pct': pct, 'msg': message})
+        task.update_progress(pct, message, json.dumps(progress_log, ensure_ascii=False))
 
+    try:
         from modules import MODULE_REGISTRY
         cls = MODULE_REGISTRY.get(module_name)
         if not cls:
             raise ValueError(f"Unknown module: {module_name}")
 
         module = cls(project_dir=project_dir, params=params, progress_callback=progress_cb)
+
+        # Best-effort input validation before running
+        try:
+            adata = module.load_adata(input_path)
+            validation_error = module.validate_input(adata)
+            if validation_error:
+                raise ValueError(f"输入验证失败: {validation_error}")
+        except FileNotFoundError:
+            pass  # Input file may not exist yet for convert_10x
+        except Exception as ve:
+            if '输入验证失败' in str(ve):
+                raise  # Re-raise validation errors
+            # For other loading errors, skip validation and let run() handle it
+
         result = module.run(input_path)
 
         for rf in result.get('result_files', []):
             try:
-                db.execute(
-                    "INSERT INTO result_files (id, task_id, project_id, file_type, category, label, file_path) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (gen_id(), task_id, project_id,
-                     rf.get('file_type', ''), rf.get('category', ''), rf.get('label', ''), rf.get('file_path', ''))
+                ResultFile.create(
+                    task_id=task_id, project_id=project_id,
+                    file_type=rf.get('file_type', ''),
+                    category=rf.get('category', ''),
+                    label=rf.get('label', ''),
+                    file_path=rf.get('file_path', '')
                 )
-            except sqlite3.IntegrityError:
-                print(f"[Worker] Skipping result_files insert (FK constraint): {rf.get('file_path', '')}", file=sys.stderr)
+            except Exception as e:
+                print(f"[Worker] Skipping result_files insert: {rf.get('file_path', '')} ({e})", file=sys.stderr)
 
-        db.execute(
-            "UPDATE analysis_tasks SET status='completed', progress=100, "
-            "progress_message='已完成', finished_at=CURRENT_TIMESTAMP, "
-            "output_adata_path=?, result_json=? WHERE id=?",
-            (result.get('output_adata'), json.dumps(result.get('summary', {})), task_id)
+        task.mark_completed(
+            result.get('output_adata'),
+            json.dumps(result.get('summary', {}))
         )
-        db.commit()
 
     except Exception as e:
         print(f"[Worker] Task {task_id} failed:\n{traceback.format_exc()}", file=sys.stderr)
-        db.execute(
-            "UPDATE analysis_tasks SET status='failed', error_traceback=?, "
-            "progress_message='失败', finished_at=CURRENT_TIMESTAMP WHERE id=?",
-            (traceback.format_exc(), task_id)
-        )
-        db.commit()
+        task.mark_failed(traceback.format_exc())
     finally:
-        db.close()
         _active_futures.pop(task_id, None)
