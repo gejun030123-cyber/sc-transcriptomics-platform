@@ -40,7 +40,7 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
                            method, fc_threshold, pval_threshold, top_n, gene_id_to_name,
                            plots_dir, results_dir, suffix='', viz_params=None,
                            cooks_filter=True, independent_filter=True, padj_method='fdr_bh',
-                           base_mean_filter=0, regulation_filter='both'):
+                           base_mean_filter=0):
     """Run DEG for one comparison pair. Returns (deg_df, result_files, n_up, n_down)."""
     import plotly.graph_objects as go
     import omicverse as ov
@@ -59,7 +59,12 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
 
     # OmicVerse pyDEG analysis
     dds = ov.bulk.pyDEG(count_df)
+    n_before_dedup = count_df.shape[0]
     dds.drop_duplicates_index()
+    n_after_dedup = dds.deg_res.shape[0] if hasattr(dds, 'deg_res') and dds.deg_res is not None else n_before_dedup
+    if n_before_dedup != n_after_dedup:
+        import logging
+        logging.getLogger(__name__).warning(f"[bulk_deg] 去重: {n_before_dedup} → {n_after_dedup} 基因（移除 {n_before_dedup - n_after_dedup} 个重复）")
 
     method_map = {
         't-test': 'ttest', 'mann-whitney': 'wilcox',
@@ -73,12 +78,17 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         except ImportError:
             raise ImportError(f"方法 {method} 需要安装 inmoose: pip install inmoose patsy")
 
-    dds.normalize()
-    result = dds.deg_analysis(
-        group1_samples, group2_samples, method=ov_method,
-        cooks_filter=cooks_filter, independent_filter=independent_filter,
-        multipletests_method=padj_method
-    )
+    # 仅对简单统计方法调用 normalize；DESeq2/edgeR/limma 内部自行处理标准化
+    if ov_method in ('ttest', 'wilcox'):
+        dds.normalize()
+
+    # cooks_filter / independent_filter 仅对 DESeq2 有意义
+    deg_kwargs = {'multipletests_method': padj_method}
+    if ov_method == 'DEseq2':
+        deg_kwargs['cooks_filter'] = cooks_filter
+        deg_kwargs['independent_filter'] = independent_filter
+
+    result = dds.deg_analysis(group1_samples, group2_samples, method=ov_method, **deg_kwargs)
 
     # Extract results
     gene_ids_list = result.index.tolist()
@@ -88,12 +98,14 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         gene_names = gene_ids_list
     log2fc = result['log2FC'].values
     pvalues = result['pvalue'].values
+    # padj：优先用结果中的校正 p 值，否则自行校正
     if 'qvalue' in result.columns:
         padj = result['qvalue'].values
     elif 'padj' in result.columns:
         padj = result['padj'].values
     else:
-        padj = np.ones(len(result))
+        from statsmodels.stats.multitest import multipletests
+        _, padj, _, _ = multipletests(np.nan_to_num(pvalues, nan=1.0), method=padj_method)
     n_genes = len(gene_names)
 
     # Regulation direction
@@ -107,13 +119,16 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         else:
             regulation.append('NS')
 
-    # Group means — 按 var_names 顺序计算（与 result 对齐）
-    mask1_arr = np.array([s in group1_samples for s in adata.obs.index])
-    mask2_arr = np.array([s in group2_samples for s in adata.obs.index])
+    # Group means — 按 result.index（去重后基因名）精确匹配
+    mask1_arr = adata.obs.index.isin(group1_samples)
+    mask2_arr = adata.obs.index.isin(group2_samples)
     mean1_all = counts[mask1_arr].mean(axis=0)
     mean2_all = counts[mask2_arr].mean(axis=0)
-    mean1 = mean1_all[:n_genes] if len(mean1_all) >= n_genes else mean1_all
-    mean2 = mean2_all[:n_genes] if len(mean2_all) >= n_genes else mean2_all
+    # 构建基因名→均值映射，按 result.index 顺序提取
+    mean1_map = dict(zip(adata.var_names, mean1_all))
+    mean2_map = dict(zip(adata.var_names, mean2_all))
+    mean1 = np.array([mean1_map.get(g, 0.0) for g in result.index])
+    mean2 = np.array([mean2_map.get(g, 0.0) for g in result.index])
 
     deg_df = pd.DataFrame({
         'gene': gene_names,
@@ -126,6 +141,10 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     })
     deg_df = deg_df.sort_values('padj')
 
+    # n_up/n_down 基于过滤前完整数据计算
+    n_up = int((deg_df['regulation'] == 'Up').sum())
+    n_down = int((deg_df['regulation'] == 'Down').sum())
+
     # 保存过滤前的 top 基因用于火山图标注（与散点数据一致）
     top_genes_vol = deg_df[deg_df['regulation'] != 'NS'].head(top_n)
 
@@ -133,8 +152,6 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     if base_mean_filter > 0:
         base_mean = (deg_df['mean_group1'] + deg_df['mean_group2']) / 2
         deg_df = deg_df[base_mean >= base_mean_filter].copy()
-
-    # n_up/n_down will be calculated after filtering, before return
 
     # Volcano plot
     file_suffix = f'_{suffix}' if suffix else ''
@@ -208,16 +225,7 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     result_files.append({'file_path': top_csv, 'file_type': 'csv', 'category': 'table',
                          'label': f'Top {top_n} 差异基因 ({group1} vs {group2})'})
 
-    # n_up/n_down 基于完整结果计算（在方向过滤前）
-    n_up = int((deg_df['regulation'] == 'Up').sum())
-    n_down = int((deg_df['regulation'] == 'Down').sum())
-
-    # 差异方向过滤（仅影响返回的 deg_df，CSV 已保存完整结果）
-    if regulation_filter == 'up':
-        deg_df = deg_df[deg_df['regulation'] == 'Up'].copy()
-    elif regulation_filter == 'down':
-        deg_df = deg_df[deg_df['regulation'] == 'Down'].copy()
-
+    # 返回完整 deg_df（调用方负责按需过滤）
     return deg_df, result_files, n_up, n_down
 
 
@@ -228,38 +236,71 @@ def _run_lrt_test(adata, counts, groupby, method, pval_threshold, gene_id_to_nam
     from inmoose.edgepy import DGEList, glmLRT
     from patsy import dmatrix
     from statsmodels.stats.multitest import multipletests
+    import logging
+    logger = logging.getLogger(__name__)
 
     count_df = pd.DataFrame(counts.T, index=adata.var_names.tolist(), columns=adata.obs.index.tolist())
     dds = ov.bulk.pyDEG(count_df)
     dds.drop_duplicates_index()
-    dds.normalize()
 
-    # Build multi-group design
+    # Use deduplicated count matrix for DGEList
+    dedup_count_df = count_df.loc[~count_df.index.duplicated()]
+
     groups = adata.obs[groupby].astype(str)
     anno = pd.DataFrame({'group': groups.values}, index=groups.index)
     design = dmatrix("~C(group)", data=anno, return_type='dataframe')
 
-    var = pd.DataFrame(index=count_df.index)
+    var = pd.DataFrame(index=dedup_count_df.index)
     var.index.name = 'gene_id'
-    dge = DGEList(counts=count_df.values, samples=anno, group_col='group', genes=var)
+    dge = DGEList(counts=dedup_count_df.values, samples=anno, group_col='group', genes=var)
     dge.estimateGLMCommonDisp(design=design)
     fit = dge.glmFit(design=design)
-    lrt = glmLRT(fit)
-    lrt.index = var.index
+    n_coef = design.shape[1]
+    lrt = glmLRT(fit, coef=list(range(1, n_coef))) if n_coef > 1 else glmLRT(fit)
 
-    pvalues = lrt['pvalue'].values.reshape(-1)
-    _, qvalues, _, _ = multipletests(np.nan_to_num(pvalues, 0), method=padj_method)
+    # 提取结果：兼容不同 inmoose 版本的返回格式
+    try:
+        if hasattr(lrt, 'table'):
+            lrt_table = lrt.table
+            pvalues = lrt_table['PValue'].values if 'PValue' in lrt_table.columns else lrt_table['pvalue'].values
+            lrt_stat = lrt_table['F'].values if 'F' in lrt_table.columns else (lrt_table['LR'].values if 'LR' in lrt_table.columns else None)
+        elif hasattr(lrt, 'PValue'):
+            pvalues = np.asarray(lrt.PValue).flatten()
+            lrt_stat = np.asarray(lrt.F).flatten() if hasattr(lrt, 'F') else (np.asarray(lrt.LR).flatten() if hasattr(lrt, 'LR') else None)
+        elif hasattr(lrt, 'pvalue'):
+            pvalues = np.asarray(lrt.pvalue).flatten()
+            lrt_stat = None
+        else:
+            logger.warning("[bulk_deg] LRT: 无法提取 p 值")
+            pvalues = np.ones(dedup_count_df.shape[0])
+            lrt_stat = None
+    except Exception as e:
+        logger.warning(f"[bulk_deg] LRT 结果提取失败: {e}")
+        pvalues = np.ones(dedup_count_df.shape[0])
+        lrt_stat = None
 
-    result = pd.DataFrame({
-        'gene': [gene_id_to_name.get(g, g) if gene_id_to_name else g for g in lrt.index],
-        'LRT_stat': lrt.get('F', lrt.get('LR', pd.Series(0, index=lrt.index))).values if hasattr(lrt, 'columns') else np.zeros(len(lrt.index)),
+    gene_ids = var.index.tolist()
+    min_len = min(len(pvalues), len(gene_ids))
+    if len(pvalues) != len(gene_ids):
+        logger.warning(f"[bulk_deg] LRT 长度不匹配: pvalues={len(pvalues)}, genes={len(gene_ids)}，取交集对齐")
+        pvalues = pvalues[:min_len]
+        gene_ids = gene_ids[:min_len]
+    if lrt_stat is not None and len(lrt_stat) != len(gene_ids):
+        lrt_stat = lrt_stat[:min_len]
+
+    _, qvalues, _, _ = multipletests(np.nan_to_num(pvalues, nan=1.0), method=padj_method)
+
+    result_dict = {
+        'gene': [gene_id_to_name.get(g, g) if gene_id_to_name else g for g in gene_ids],
         'pvalue': pvalues,
         'padj': qvalues,
-    })
+    }
+    if lrt_stat is not None:
+        result_dict['LRT_stat'] = lrt_stat
+    result = pd.DataFrame(result_dict)
     result = result.sort_values('padj')
     result['significant'] = result['padj'] < pval_threshold
 
-    # Save
     lrt_csv = os.path.join(results_dir, 'bulk_deg_lrt_results.csv')
     result.to_csv(lrt_csv, index=False)
 
@@ -306,7 +347,6 @@ class BulkDEGAnalysis(BaseAnalysis):
             independent_filter = independent_filter.lower() in ('true', '1', 'yes', 'on')
         padj_method = self.params.get('padj_method', 'fdr_bh')
         base_mean_filter = float(self.params.get('base_mean_filter', 0))
-        regulation_filter = self.params.get('regulation_filter', 'both')
         auto_comparisons = self.params.get('auto_comparisons', 'manual')
         reference_group = self.params.get('reference_group', '').strip()
         test_type = self.params.get('test_type', 'pairwise')
@@ -322,7 +362,12 @@ class BulkDEGAnalysis(BaseAnalysis):
 
         # 构建 OmicVerse pyDEG 所需的 counts DataFrame（基因×样本）
         counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
-        counts = np.nan_to_num(counts.astype(float), nan=0.0, posinf=0.0, neginf=0.0)
+        counts = counts.astype(float)
+        n_inf = int(np.isinf(counts).sum())
+        if n_inf > 0:
+            import logging
+            logging.getLogger(__name__).warning(f"[bulk_deg] 输入数据含 {n_inf} 个 inf 值（可能来自除零），已替换为 0")
+        counts = np.nan_to_num(counts, nan=0.0, posinf=0.0, neginf=0.0)
 
         # 处理自动检测的分组
         if groupby == '_auto_group_':
@@ -368,6 +413,7 @@ class BulkDEGAnalysis(BaseAnalysis):
         # 自动生成比较列表
         if auto_comparisons in ('all_pairwise', 'vs_reference'):
             all_groups = sorted(adata.obs[groupby].astype(str).unique().tolist())
+            # 注意：sorted() 对时间序列分组（如 Treated_1h, Treated_10h）可能排序不符预期
             if auto_comparisons == 'vs_reference':
                 if not reference_group:
                     reference_group = all_groups[0]
@@ -411,6 +457,7 @@ class BulkDEGAnalysis(BaseAnalysis):
         if comparison_pairs:
             # 多组比较模式
             all_deg_dfs = []
+            valid_comparisons = []
             skipped = []
             for idx, (g1, g2) in enumerate(comparison_pairs):
                 pct = 25 + int(55 * idx / len(comparison_pairs))
@@ -428,9 +475,10 @@ class BulkDEGAnalysis(BaseAnalysis):
                     gene_id_to_name, plots_dir, results_dir, suffix=str(idx),
                     viz_params=self.params.get('_visualization', {}),
                     cooks_filter=cooks_filter, independent_filter=independent_filter,
-                    padj_method=padj_method, base_mean_filter=base_mean_filter,
-                    regulation_filter=regulation_filter)
+                    padj_method=padj_method, base_mean_filter=base_mean_filter)
+                deg_df['comparison'] = f'{g1}-vs-{g2}'
                 all_deg_dfs.append(deg_df)
+                valid_comparisons.append((g1, g2))
                 result_files.extend(files)
 
             if skipped:
@@ -449,9 +497,7 @@ class BulkDEGAnalysis(BaseAnalysis):
                     from plotly.subplots import make_subplots
 
                     # 构建 logFC + padj 矩阵
-                    comparison_names = [f'{g1}-vs-{g2}' for g1, g2 in comparison_pairs if
-                                        len(list(adata.obs.index[adata.obs[groupby] == g1])) >= 2 and
-                                        len(list(adata.obs.index[adata.obs[groupby] == g2])) >= 2]
+                    comparison_names = [f'{g1}-vs-{g2}' for g1, g2 in valid_comparisons]
                     # 构建 logFC + padj 矩阵（按 gene 列外连接，避免索引错位）
                     merged_matrix_df = all_deg_dfs[0][['gene']].copy()
                     for comp_name, deg_df in zip(comparison_names, all_deg_dfs):
@@ -495,9 +541,9 @@ class BulkDEGAnalysis(BaseAnalysis):
                     shared_down = 0
                     comparison_names = [f'{g1}-vs-{g2}' for g1, g2 in comparison_pairs]
 
-                # 箱线图（取第一个比较的结果生成）
+                # 箱线图（取第一个有效比较的结果生成）
                 first_deg = all_deg_dfs[0]
-                g1_first, g2_first = comparison_pairs[0]
+                g1_first, g2_first = valid_comparisons[0]
                 g1_samples = list(adata.obs.index[adata.obs[groupby] == g1_first])
                 g2_samples = list(adata.obs.index[adata.obs[groupby] == g2_first])
                 self._draw_boxplots(first_deg, g1_first, g2_first, g1_samples, g2_samples,
@@ -511,9 +557,7 @@ class BulkDEGAnalysis(BaseAnalysis):
             # 构建 per_comparison 统计
             per_comparison = {}
             for comp_name, deg_df in zip(
-                [f'{g1}-vs-{g2}' for g1, g2 in comparison_pairs if
-                 len(list(adata.obs.index[adata.obs[groupby] == g1])) >= 2 and
-                 len(list(adata.obs.index[adata.obs[groupby] == g2])) >= 2],
+                [f'{g1}-vs-{g2}' for g1, g2 in valid_comparisons],
                 all_deg_dfs):
                 per_comparison[comp_name] = {
                     'n_up': int((deg_df['regulation'] == 'Up').sum()),
@@ -539,9 +583,10 @@ class BulkDEGAnalysis(BaseAnalysis):
                 groups = adata.obs[groupby].unique().tolist()
                 if not group1 or group1 not in groups:
                     group1 = groups[0]
+                group2_label = group2
                 if group2 == 'rest' or (not group2 or group2 not in groups):
                     group2_samples = [s for s in adata.obs.index if adata.obs.loc[s, groupby] != group1]
-                    group2 = f'rest (n={len(group2_samples)})'
+                    group2_label = f'rest (n={len(group2_samples)})'
                 else:
                     group2_samples = list(adata.obs.index[adata.obs[groupby] == group2])
                 group1_samples = list(adata.obs.index[adata.obs[groupby] == group1])
@@ -553,30 +598,30 @@ class BulkDEGAnalysis(BaseAnalysis):
                 group1_samples = list(adata.obs.index[:half])
                 group2_samples = list(adata.obs.index[half:])
                 group1, group2 = "Group1", "Group2"
+                group2_label = group2
                 adata.obs[groupby] = pd.Series(
                     ['Group1']*half + ['Group2']*(n-half), index=adata.obs.index
                 )
 
             if len(group1_samples) < 2 or len(group2_samples) < 2:
-                raise ValueError(f"样本数不足：{group1}={len(group1_samples)}个, {group2}={len(group2_samples)}个。每组至少需要2个样本。")
+                raise ValueError(f"样本数不足：{group1}={len(group1_samples)}个, {group2_label}={len(group2_samples)}个。每组至少需要2个样本。")
 
-            self.progress(30, f"差异分析: {group1} vs {group2}...")
+            self.progress(30, f"差异分析: {group1} vs {group2_label}...")
             deg_df, files, n_up, n_down = _run_single_comparison(
-                adata, counts, group1_samples, group2_samples, group1, group2,
+                adata, counts, group1_samples, group2_samples, group1, group2_label,
                 method, fc_threshold, pval_threshold, top_n,
                 gene_id_to_name, plots_dir, results_dir,
                 viz_params=self.params.get('_visualization', {}),
                 cooks_filter=cooks_filter, independent_filter=independent_filter,
-                padj_method=padj_method, base_mean_filter=base_mean_filter,
-                regulation_filter=regulation_filter)
+                padj_method=padj_method, base_mean_filter=base_mean_filter)
             result_files.extend(files)
 
             # 箱线图
-            self._draw_boxplots(deg_df, group1, group2, group1_samples, group2_samples,
+            self._draw_boxplots(deg_df, group1, group2_label, group1_samples, group2_samples,
                                 gene_id_to_name, counts, adata, plots_dir, result_files)
 
             summary = {
-                'comparison': f'{group1} vs {group2}',
+                'comparison': f'{group1} vs {group2_label}',
                 'method': method,
                 'n_genes_total': len(deg_df),
                 'n_up': n_up,
@@ -586,8 +631,9 @@ class BulkDEGAnalysis(BaseAnalysis):
                 'lrt_n_sig': lrt_n_sig,
             }
 
-        # LRT 文件加入结果（单次比较模式）
-        result_files.extend(lrt_files)
+        # LRT 文件：多比较模式已在 line 551 添加，单次比较模式在此添加
+        if not comparison_pairs:
+            result_files.extend(lrt_files)
 
         self.progress(95, "保存 h5ad...")
         # 临时标记分组（不覆写已有 group 列，避免错误输入污染输出 h5ad）
@@ -610,13 +656,15 @@ class BulkDEGAnalysis(BaseAnalysis):
         import plotly.graph_objects as go
 
         boxplot_n = min(int(self.params.get('boxplot_n', 5)), 20)
+        # 预构建索引映射（O(1) 查找）
+        obs_idx = {s: i for i, s in enumerate(adata.obs.index)}
+        var_idx = {g: i for i, g in enumerate(adata.var_names)}
         # 构建双向映射：gene_name → gene_id（处理重名取首个）
         name_to_id = {}
         if gene_id_to_name:
             for gid, gname in gene_id_to_name.items():
                 if gname not in name_to_id:
                     name_to_id[gname] = gid
-        # 补充 adata.var['gene_name'] 映射（当 gene_id_to_name 不完整时）
         if 'gene_name' in adata.var.columns:
             for gid, gname in zip(adata.var_names, adata.var['gene_name']):
                 gname_str = str(gname).strip()
@@ -635,18 +683,22 @@ class BulkDEGAnalysis(BaseAnalysis):
 
         if plot_gene_list:
             self.progress(82, f"生成 {len(plot_gene_list)} 个基因箱线图...")
+        unmatched_genes = []
         for pg in plot_gene_list:
-            # 依次尝试：直接匹配 var_names → name_to_id 映射
             pg_id = pg if pg in adata.var_names else name_to_id.get(pg, pg)
-            if pg_id in adata.var_names:
-                fig_box = go.Figure()
-                for grp_name, samples in [(group1, group1_samples), (group2, group2_samples)]:
-                    sample_idx = [list(adata.obs.index).index(s) for s in samples if s in adata.obs.index]
-                    gene_idx = list(adata.var_names).index(pg_id)
-                    vals = counts[sample_idx, gene_idx]
-                    fig_box.add_trace(go.Box(y=vals, name=str(grp_name), boxpoints='all', jitter=0.3))
-                fig_box.update_layout(title=f'{pg} 表达', yaxis_title='Expression',
-                                     plot_bgcolor='white', width=400, height=350)
-                fpath = os.path.join(plots_dir, f'bulk_deg_box_{pg}.json')
-                with open(fpath, 'w') as f: f.write(fig_box.to_json(engine="json"))
-                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'boxplot', 'label': f'{pg} Boxplot'})
+            if pg_id not in var_idx:
+                unmatched_genes.append(pg)
+                continue
+            fig_box = go.Figure()
+            for grp_name, samples in [(group1, group1_samples), (group2, group2_samples)]:
+                sample_indices = [obs_idx[s] for s in samples if s in obs_idx]
+                vals = counts[sample_indices, var_idx[pg_id]]
+                fig_box.add_trace(go.Box(y=vals, name=str(grp_name), boxpoints='all', jitter=0.3))
+            fig_box.update_layout(title=f'{pg} 表达', yaxis_title='Expression',
+                                 plot_bgcolor='white', width=400, height=350)
+            fpath = os.path.join(plots_dir, f'bulk_deg_box_{pg}.json')
+            with open(fpath, 'w') as f: f.write(fig_box.to_json(engine="json"))
+            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'boxplot', 'label': f'{pg} Boxplot'})
+        if unmatched_genes:
+            import logging
+            logging.getLogger(__name__).warning(f"[bulk_deg] 以下基因未找到，已跳过箱线图: {', '.join(unmatched_genes)}")
