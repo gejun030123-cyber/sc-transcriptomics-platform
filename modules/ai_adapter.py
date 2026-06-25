@@ -220,8 +220,9 @@ def _chat_anthropic(messages, project_id, tool_calls_log):
                 api_messages.append({"role": "assistant", "content": response.content})
                 api_messages.append({"role": "user", "content": new_tool_results})
 
-            all_msgs = messages + [{"role": "assistant", "content": text_content}]
-            return {"reply": text_content, "tool_calls": tool_calls_log, "messages": all_msgs, "proposed_tools": proposed_tools}
+            reply_text = new_text or "工具调用已执行，但回复生成超出轮次限制。请查看任务状态了解结果。"
+            all_msgs = messages + [{"role": "assistant", "content": reply_text}]
+            return {"reply": reply_text, "tool_calls": tool_calls_log, "messages": all_msgs, "proposed_tools": proposed_tools}
 
         # 纯文本回复
         all_msgs = messages + [{"role": "assistant", "content": text_content}]

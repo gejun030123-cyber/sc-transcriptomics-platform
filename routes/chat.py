@@ -57,6 +57,9 @@ def chat_endpoint():
     if not message:
         return jsonify({"error": "消息不能为空"}), 400
 
+    if len(message) > 4000:
+        return jsonify({"error": "消息过长（最多 4000 字符），请缩短后重试"}), 400
+
     if not project_id:
         return jsonify({"error": "需要指定项目 ID"}), 400
 

@@ -5,8 +5,6 @@ import re
 class Config:
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-    _SECRET_FILE = os.path.join(_BASE_DIR, 'instance', '.secret_key')
-
     @staticmethod
     def _load_secret():
         key = os.environ.get('SECRET_KEY')

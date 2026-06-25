@@ -202,7 +202,8 @@ def _validate_analysis_params(module_name, params):
             expected_type = schema_entry.get('type', 'text')
             if expected_type == 'number':
                 try:
-                    cleaned[key] = float(value)
+                    fval = float(value)
+                    cleaned[key] = int(fval) if fval == int(fval) else fval
                 except (ValueError, TypeError):
                     return None, f"参数 '{key}' 应为数字，收到: {value}"
             elif expected_type == 'checkbox':
