@@ -116,8 +116,6 @@ def chat(messages, project_id=None):
     """
     与 LLM 对话，支持工具调用循环。自动检测 Anthropic / OpenAI 格式。
     """
-    from modules.ai_tools import execute_tool
-
     tool_calls_log = []
 
     if _is_anthropic():
@@ -129,6 +127,7 @@ def chat(messages, project_id=None):
 def _chat_anthropic(messages, project_id, tool_calls_log):
     """Anthropic API 格式对话"""
     import anthropic
+    from modules.ai_tools import execute_tool
 
     client = anthropic.Anthropic(
         base_url=Config.AI_API_URL,
@@ -235,6 +234,7 @@ def _chat_anthropic(messages, project_id, tool_calls_log):
 def _chat_openai(messages, project_id, tool_calls_log):
     """OpenAI 兼容 API 格式对话"""
     from openai import OpenAI
+    from modules.ai_tools import execute_tool
 
     client = OpenAI(
         base_url=Config.AI_API_URL,
