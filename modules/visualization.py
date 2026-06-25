@@ -18,23 +18,25 @@ def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title='
         coords = coords[idx]
     color_series = None
     if color_key and color_key in adata.obs.columns:
-        color_series = adata.obs[color_key]
+        color_series = adata.obs[color_key].iloc[idx]
+        if not hasattr(color_series.dtype, 'categories'):
+            color_series = color_series.astype('category')
     fig = go.Figure()
     if color_series is not None and hasattr(color_series, 'cat'):
-        color_vals = color_series.values[idx]
         for cat in color_series.cat.categories:
-            mask = np.array(color_series.iloc[idx] == cat)
+            mask = np.array(color_series == cat)
+            if mask.sum() == 0:
+                continue
             fig.add_trace(go.Scattergl(
                 x=coords[mask, 0], y=coords[mask, 1],
                 mode='markers', name=str(cat),
                 marker=dict(size=point_size, opacity=opacity),
             ))
     elif color_series is not None:
-        color_vals = np.asarray(color_series)[idx]
         fig.add_trace(go.Scattergl(
             x=coords[:, 0], y=coords[:, 1],
             mode='markers',
-            marker=dict(size=point_size, opacity=opacity, color=color_vals, colorscale='Viridis',
+            marker=dict(size=point_size, opacity=opacity, color=np.asarray(color_series), colorscale='Viridis',
                        colorbar=dict(title=color_key)),
         ))
     else:

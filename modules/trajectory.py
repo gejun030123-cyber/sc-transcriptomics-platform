@@ -15,6 +15,7 @@ class TrajectoryAnalysis(BaseAnalysis):
 
     def run(self, input_path):
         import scanpy as sc
+        import numpy as np
         from modules.visualization import umap_scatter
         import plotly.graph_objects as go
 

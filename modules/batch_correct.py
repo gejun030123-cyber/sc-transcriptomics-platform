@@ -31,13 +31,16 @@ class BatchCorrectAnalysis(BaseAnalysis):
             self.progress(20, "Running Harmony batch correction...")
             theta = float(self.params.get('harmony_theta', 2.0))
             lam = float(self.params.get('harmony_lambda', 1.0))
-            ov.single.batch_correction(adata, batch_key=batch_key, methods=['harmony'], n_comps=n_pcs)
-            adata.obsm['X_pca_harmony'] = adata.obsm['X_pca_harmony'].copy()
+            result = ov.single.batch_correction(adata, batch_key=batch_key, methods=['harmony'], n_comps=n_pcs)
+            if result is not None:
+                adata = result
             corrected_key = 'X_pca_harmony'
 
         elif method == 'combat':
             self.progress(20, "Running ComBat batch correction...")
-            ov.single.batch_correction(adata, batch_key=batch_key, methods=['combat'], n_comps=n_pcs)
+            result = ov.single.batch_correction(adata, batch_key=batch_key, methods=['combat'], n_comps=n_pcs)
+            if result is not None:
+                adata = result
             corrected_key = 'X_pca_combat'
 
         elif method == 'bbknn':
@@ -57,7 +60,6 @@ class BatchCorrectAnalysis(BaseAnalysis):
                 batches.append(adata[adata.obs[batch_key] == b])
             corrected = scanorama.integrate_scanpy(batches, dimred=n_pcs)
             # Reassemble
-            import scipy.sparse as sp
             all_corrected = np.vstack([c for c in corrected])
             adata.obsm['X_scanorama'] = all_corrected
             corrected_key = 'X_scanorama'
