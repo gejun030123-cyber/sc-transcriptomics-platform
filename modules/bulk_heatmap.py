@@ -59,9 +59,9 @@ class BulkHeatmapAnalysis(BaseAnalysis):
 
         if gene_import_source == 'manual' or (custom_genes_str and gene_import_source not in ('deg', 'expression_filter')):
             gene_list = [g.strip() for g in custom_genes_str.replace('\n', ',').split(',') if g.strip()]
-            var_names_list = list(adata.var_names)
-            top_idx = [var_names_list.index(g) for g in gene_list if g in var_names_list]
-            not_found = [g for g in gene_list if g not in var_names_list]
+            var_idx_map = {g: i for i, g in enumerate(adata.var_names)}
+            top_idx = [var_idx_map[g] for g in gene_list if g in var_idx_map]
+            not_found = [g for g in gene_list if g not in var_idx_map]
             if not top_idx:
                 raise ValueError(f"自定义基因列表中没有找到任何匹配基因。请检查基因名是否正确。")
             title = f'自定义基因热图 ({len(top_idx)} genes)'

@@ -29,6 +29,13 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
 
         self.progress(5, "加载基因列表...")
 
+        # Validate input_source path
+        if input_source:
+            real_input = os.path.realpath(input_source)
+            real_project = os.path.realpath(self.project_dir)
+            if not real_input.startswith(real_project + os.sep) and real_input != real_project:
+                raise ValueError("input_source 必须在项目目录内")
+
         # Load gene list from DEG CSV result
         deg_genes = []
         gene_rnk = None
@@ -67,8 +74,9 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
         # Download pathway databases if not present
         try:
             ov.utils.download_pathway_database()
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"通路数据库下载失败: {e}")
 
         db_path = f'genesets/{db_filename}.txt'
         if not os.path.exists(db_path):
@@ -80,6 +88,9 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
                 if os.path.exists(p):
                     db_path = p
                     break
+
+        if not os.path.exists(db_path):
+            raise FileNotFoundError(f"基因集数据库文件不存在: {db_path}")
 
         pathways_dict = ov.utils.geneset_prepare(db_path, organism=organism)
 
@@ -278,6 +289,14 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
             raise ValueError(f"不支持的富集方法: {method}")
 
         self.progress(90, "保存输出...")
+
+        # Clean up temporary enrichment directories
+        import shutil
+        for tmp_suffix in ['_tmp', '_up_tmp', '_down_tmp', '_gsea_tmp']:
+            tmp_dir = os.path.join(self.project_dir, f'enrichr{tmp_suffix}')
+            if os.path.isdir(tmp_dir):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
         self.progress(100, "完成")
 
         return {

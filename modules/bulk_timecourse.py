@@ -201,14 +201,15 @@ class BulkTimecourseAnalysis(BaseAnalysis):
         self.progress(60, "生成 Q-Q 图...")
         df1 = n_spline_cols
         df2 = max(n_obs - n_spline_cols - 1, 1)
-        sorted_obs = np.sort(F_stats)
-        n_pts = len(sorted_obs)
-        theoretical_q = np.array([
-            (i + 0.5) / n_pts for i in range(n_pts)
-        ])
-        theoretical_f = np.array([
-            __import__('scipy').stats.f.ppf(q, df1, df2) for q in theoretical_q
-        ])
+        valid_f = F_stats[np.isfinite(F_stats) & (F_stats > 0)]
+        if len(valid_f) < 10:
+            self.progress(-1, "有效 F 统计量不足，跳过 Q-Q 图")
+        else:
+            from scipy.stats import f as f_dist
+            sorted_obs = np.sort(valid_f)
+            n_pts = len(sorted_obs)
+            theoretical_q = np.array([(i + 0.5) / (n_pts + 1) for i in range(n_pts)])
+            theoretical_f = f_dist.ppf(theoretical_q, df1, df2)
         fig_qq = go.Figure()
         fig_qq.add_trace(go.Scatter(
             x=theoretical_f, y=sorted_obs, mode='markers',
