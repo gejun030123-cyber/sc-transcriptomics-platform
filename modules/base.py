@@ -195,8 +195,9 @@ class BaseAnalysis(ABC):
 
     def save_plotly_json(self, fig, plots_dir, filename, category, label):
         """将 Plotly figure 保存为 JSON 并返回 result_file dict。"""
-        import os
-        fpath = os.path.join(plots_dir, filename)
+        import os, re
+        safe_filename = re.sub(r'[^a-zA-Z0-9_.\-]', '_', filename)
+        fpath = os.path.join(plots_dir, safe_filename)
         fig.write_json(fpath)
         return {'file_path': fpath, 'file_type': 'plotly_json', 'category': category, 'label': label}
 
