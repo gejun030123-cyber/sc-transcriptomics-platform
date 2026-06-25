@@ -18,3 +18,24 @@ class Config:
     AI_API_KEY = os.environ.get('AI_API_KEY', '')
     AI_API_URL = os.environ.get('AI_API_URL', 'https://token-plan-cn.xiaomimimo.com/anthropic')
     AI_MODEL = os.environ.get('AI_MODEL', 'mimo-v2.5-pro')
+    AI_API_TOKEN = os.environ.get('AI_API_TOKEN', '')
+
+    @classmethod
+    def project_dir(cls, pid):
+        return os.path.join(cls.DATA_DIR, 'projects', pid)
+
+    @classmethod
+    def uploads_dir(cls, pid):
+        return os.path.join(cls.DATA_DIR, 'projects', pid, 'uploads')
+
+    @classmethod
+    def results_dir(cls, pid):
+        return os.path.join(cls.DATA_DIR, 'projects', pid, 'results')
+
+    @classmethod
+    def intermediate_dir(cls, pid):
+        return os.path.join(cls.DATA_DIR, 'projects', pid, 'intermediate')
+
+    @classmethod
+    def plots_dir(cls, pid):
+        return os.path.join(cls.DATA_DIR, 'projects', pid, 'plots')
