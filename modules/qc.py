@@ -1,23 +1,5 @@
 from modules.base import BaseAnalysis
-
-# Seurat cell cycle marker genes
-S_GENES = [
-    'MCM5', 'PCNA', 'TYMS', 'FEN1', 'MCM2', 'MCM4', 'RRM1', 'UNG', 'GINS2',
-    'MCM6', 'CDCA7', 'DTL', 'PRIM1', 'UHRF1', 'MLF1IP', 'HELLS', 'RFC2',
-    'RPA2', 'NASP', 'RAD51AP1', 'GMNN', 'WDR76', 'SLBP', 'CCNE2', 'UBR7',
-    'POLD3', 'MSH2', 'ATAD2', 'RAD51', 'RRM2', 'CDC45', 'CDC6', 'EXO1',
-    'TIPIN', 'DSCC1', 'BLM', 'CASP8AP2', 'USP1', 'CLSPN', 'POLA1', 'CHAF1B',
-    'BRIP1', 'E2F8',
-]
-G2M_GENES = [
-    'HMGB2', 'CDK1', 'NUSAP1', 'UBE2C', 'BIRC5', 'TPX2', 'TOP2A', 'NDC80',
-    'CKS2', 'NUF2', 'CKS1B', 'MKI67', 'TMPO', 'CENPF', 'TACC3', 'PIMREG',
-    'SMC4', 'CCNB2', 'CKAP2L', 'CKAP2', 'AURKB', 'BUB1', 'KIF11', 'ANP32E',
-    'TUBB4B', 'GTSE1', 'KIF20B', 'HJURP', 'CDCA3', 'CDC20', 'TTK', 'CDC25C',
-    'KIF2C', 'RANGAP1', 'NCAPD2', 'DLGAP5', 'CDCA2', 'CDCA8', 'ECT2',
-    'KIF23', 'HMMR', 'AURKA', 'PSRC1', 'ANLN', 'LBR', 'CKAP5', 'CENPE',
-    'CTCF', 'NEK2', 'G2E3', 'GAS2L3', 'CBX5', 'CENPA',
-]
+from modules.constants import S_GENES, G2M_GENES
 
 
 class QCAnalysis(BaseAnalysis):
@@ -25,9 +7,6 @@ class QCAnalysis(BaseAnalysis):
     DISPLAY_NAME = "质控"
     DESCRIPTION = "MT/ribo/hb 过滤 + Scrublet 双细胞 + 细胞周期评分 + 复杂度过滤"
     INPUT_REQUIRES = []
-
-    def validate_input(self, adata):
-        return None
 
     def run(self, input_path):
         import scanpy as sc
@@ -38,9 +17,7 @@ class QCAnalysis(BaseAnalysis):
         import os, json
 
         self.progress(5, "Loading data...")
-        adata = sc.read_h5ad(input_path)
-        from modules.io_utils import remap_var_names
-        adata = remap_var_names(adata)
+        adata = self.load_adata(input_path)
         # 应用自定义过滤规则
         adata = self.apply_filters(adata, 'qc')
 
@@ -66,8 +43,8 @@ class QCAnalysis(BaseAnalysis):
         # ── 2. Novelty score（复杂度）──────────────────────────────────────
         self.progress(18, "Calculating novelty score...")
         adata.obs['novelty_score'] = (
-            adata.obs['n_genes_by_counts'] / adata.obs['total_counts']
-        )
+            adata.obs['n_genes_by_counts'] / adata.obs['total_counts'].replace(0, np.nan)
+        ).fillna(0)
 
         # ── 3. 细胞周期评分 ─────────────────────────────────────────────
         self.progress(25, "Scoring cell cycle phases...")
@@ -122,7 +99,7 @@ class QCAnalysis(BaseAnalysis):
 
         adata = ov.pp.qc(
             adata,
-            tresh={
+            thresh={
                 'mito_perc': mito_perc,
                 'nUMIs': nUMIs_min,
                 'detected_genes': ngenes_min,
@@ -171,8 +148,7 @@ class QCAnalysis(BaseAnalysis):
 
         # ── 7. 生成图表 ─────────────────────────────────────────────────
         self.progress(60, "Generating QC plots...")
-        plots_dir = os.path.join(self.project_dir, 'plots')
-        os.makedirs(plots_dir, exist_ok=True)
+        plots_dir = self.ensure_plots_dir()
         result_files = []
 
         # QC Violin
@@ -197,9 +173,7 @@ class QCAnalysis(BaseAnalysis):
             ))
             fig_scatter.update_layout(title='QC: Counts vs Genes', xaxis_title='Total Counts',
                                      yaxis_title='Detected Genes', plot_bgcolor='white', width=600, height=400)
-            fpath = os.path.join(plots_dir, 'qc_scatter.json')
-            with open(fpath, 'w') as f: f.write(json.dumps(json.loads(fig_scatter.to_json())))
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'scatter', 'label': 'QC Scatter'})
+            result_files.append(self.save_plotly_json(fig_scatter, plots_dir, 'qc_scatter.json', 'scatter', 'QC Scatter'))
 
         # Novelty score 散点图
         if 'novelty_score' in adata.obs.columns:
@@ -215,9 +189,7 @@ class QCAnalysis(BaseAnalysis):
             fig_nov.update_layout(title='QC: Novelty Score vs Counts', xaxis_title='Total Counts',
                                   yaxis_title='Novelty Score (n_genes / total_counts)',
                                   plot_bgcolor='white', width=600, height=400)
-            fpath = os.path.join(plots_dir, 'qc_novelty.json')
-            with open(fpath, 'w') as f: f.write(json.dumps(json.loads(fig_nov.to_json())))
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'scatter', 'label': 'Novelty Score'})
+            result_files.append(self.save_plotly_json(fig_nov, plots_dir, 'qc_novelty.json', 'scatter', 'Novelty Score'))
 
         # 细胞周期散点图（S_score vs G2M_score，颜色 = phase）
         if cc_available and 'S_score' in adata.obs.columns:
@@ -239,9 +211,7 @@ class QCAnalysis(BaseAnalysis):
                                 yaxis_title='G2M_score', plot_bgcolor='white',
                                 width=600, height=400,
                                 legend=dict(title='Phase'))
-            fpath = os.path.join(plots_dir, 'qc_cell_cycle.json')
-            with open(fpath, 'w') as f: f.write(json.dumps(json.loads(fig_cc.to_json())))
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'scatter', 'label': 'Cell Cycle Scoring'})
+            result_files.append(self.save_plotly_json(fig_cc, plots_dir, 'qc_cell_cycle.json', 'scatter', 'Cell Cycle Scoring'))
 
         # UMAP（如有）
         if 'X_umap' in adata.obsm:
@@ -254,10 +224,7 @@ class QCAnalysis(BaseAnalysis):
 
         # ── 8. 保存输出 ─────────────────────────────────────────────────
         self.progress(85, "Saving output...")
-        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
-        os.makedirs(intermediate_dir, exist_ok=True)
-        output_path = os.path.join(intermediate_dir, 'qc_output.h5ad')
-        adata.write_h5ad(output_path)
+        output_path = self.save_output(adata, 'qc')
 
         # 汇总细胞周期比例
         phase_counts = {}

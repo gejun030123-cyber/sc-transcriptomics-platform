@@ -58,21 +58,13 @@ class AnnotationAnalysis(BaseAnalysis):
     DESCRIPTION = "基于 Marker 基因的细胞类型自动注释"
     INPUT_REQUIRES = ['leiden']
 
-    def validate_input(self, adata):
-        cluster_key = self.params.get('cluster_key', 'leiden')
-        if cluster_key not in adata.obs.columns:
-            return f"Column '{cluster_key}' not found in adata.obs."
-        return None
-
     def run(self, input_path):
         import scanpy as sc
         from modules.visualization import umap_scatter
         import json
 
         self.progress(5, "Loading data...")
-        adata = sc.read_h5ad(input_path)
-        from modules.io_utils import remap_var_names
-        adata = remap_var_names(adata)
+        adata = self.load_adata(input_path)
         cluster_key = self.params.get('cluster_key', 'leiden')
         resolution = self.params.get('resolution', '0.8')
         leiden_key = f'leiden_{resolution}' if f'leiden_{resolution}' in adata.obs.columns else cluster_key
@@ -203,13 +195,13 @@ class AnnotationAnalysis(BaseAnalysis):
                     for j in range(i + 1, len(clusters)):
                         corr = np.corrcoef(cluster_profiles[clusters[i]], cluster_profiles[clusters[j]])[0, 1]
                         if corr >= merge_similar_threshold:
-                            new_ct = adata.obs.loc[adata.obs[leiden_key] == clusters[i], 'celltype'].mode().iloc[0]
+                            new_ct = adata.obs.loc[adata.obs[leiden_key] == clusters[i], 'celltype'].mode()
+                            new_ct = new_ct.iloc[0] if not new_ct.empty else 'Unknown'
                             adata.obs.loc[adata.obs[leiden_key] == clusters[j], 'celltype'] = new_ct
                             self.progress(-1, f"合并簇 {clusters[j]} → {clusters[i]} (r={corr:.2f})")
 
         self.progress(70, "Generating dotplot and UMAP...")
-        plots_dir = os.path.join(self.project_dir, 'plots')
-        os.makedirs(plots_dir, exist_ok=True)
+        plots_dir = self.ensure_plots_dir()
         result_files = []
 
         # Dotplot for marker validation
@@ -242,10 +234,7 @@ class AnnotationAnalysis(BaseAnalysis):
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': 'UMAP by Cell Type'})
 
         self.progress(90, "Saving output...")
-        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
-        os.makedirs(intermediate_dir, exist_ok=True)
-        output_path = os.path.join(intermediate_dir, 'annotation_output.h5ad')
-        adata.write_h5ad(output_path)
+        output_path = self.save_output(adata, 'annotation')
 
         ct_counts = adata.obs['celltype'].value_counts().to_dict()
         self.progress(100, "Done")

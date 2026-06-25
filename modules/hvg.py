@@ -1,24 +1,5 @@
-import os
 from modules.base import BaseAnalysis
-
-# Seurat cell cycle genes for cc_scoring/regress
-S_GENES = [
-    'MCM5', 'PCNA', 'TYMS', 'FEN1', 'MCM2', 'MCM4', 'RRM1', 'UNG', 'GINS2',
-    'MCM6', 'CDCA7', 'DTL', 'PRIM1', 'UHRF1', 'MLF1IP', 'HELLS', 'RFC2',
-    'RPA2', 'NASP', 'RAD51AP1', 'GMNN', 'WDR76', 'SLBP', 'CCNE2', 'UBR7',
-    'POLD3', 'MSH2', 'ATAD2', 'RAD51', 'RRM2', 'CDC45', 'CDC6', 'EXO1',
-    'TIPIN', 'DSCC1', 'BLM', 'CASP8AP2', 'USP1', 'CLSPN', 'POLA1', 'CHAF1B',
-    'BRIP1', 'E2F8',
-]
-G2M_GENES = [
-    'HMGB2', 'CDK1', 'NUSAP1', 'UBE2C', 'BIRC5', 'TPX2', 'TOP2A', 'NDC80',
-    'CKS2', 'NUF2', 'CKS1B', 'MKI67', 'TMPO', 'CENPF', 'TACC3', 'PIMREG',
-    'SMC4', 'CCNB2', 'CKAP2L', 'CKAP2', 'AURKB', 'BUB1', 'KIF11', 'ANP32E',
-    'TUBB4B', 'GTSE1', 'KIF20B', 'HJURP', 'CDCA3', 'CDC20', 'TTK', 'CDC25C',
-    'KIF2C', 'RANGAP1', 'NCAPD2', 'DLGAP5', 'CDCA2', 'CDCA8', 'ECT2',
-    'KIF23', 'HMMR', 'AURKA', 'PSRC1', 'ANLN', 'LBR', 'CKAP5', 'CENPE',
-    'CTCF', 'NEK2', 'G2E3', 'GAS2L3', 'CBX5', 'CENPA',
-]
+from modules.constants import S_GENES, G2M_GENES
 
 
 class HVGAnalysis(BaseAnalysis):
@@ -27,18 +8,13 @@ class HVGAnalysis(BaseAnalysis):
     DESCRIPTION = "选择高变异基因（HVG），支持批次感知和基因过滤"
     INPUT_REQUIRES = []
 
-    def validate_input(self, adata):
-        return None
-
     def run(self, input_path):
         import scanpy as sc
         import numpy as np
         import json
 
         self.progress(5, "Loading data...")
-        adata = sc.read_h5ad(input_path)
-        from modules.io_utils import remap_var_names
-        adata = remap_var_names(adata)
+        adata = self.load_adata(input_path)
 
         n_hvg = int(self.params.get('n_top_genes', 2000))
         batch_key = self.params.get('batch_key', '').strip()
@@ -104,9 +80,7 @@ class HVGAnalysis(BaseAnalysis):
             g2m_in = [g for g in G2M_GENES if g in var_names_set]
             if len(s_in) >= 5 and len(g2m_in) >= 5:
                 adata_cc = adata.copy()
-                if not hasattr(adata_cc.X, 'toarray') and adata_cc.X.min() < 0:
-                    pass  # already log-transformed
-                else:
+                if 'log1p' not in adata_cc.uns:
                     sc.pp.normalize_total(adata_cc, target_sum=1e4)
                     sc.pp.log1p(adata_cc)
                 sc.tl.score_genes_cell_cycle(adata_cc, s_genes=s_in, g2m_genes=g2m_in)
@@ -124,8 +98,7 @@ class HVGAnalysis(BaseAnalysis):
         adata_hvg = adata[:, adata.var['highly_variable']].copy()
 
         self.progress(75, "Generating HVG plot...")
-        plots_dir = os.path.join(self.project_dir, 'plots')
-        os.makedirs(plots_dir, exist_ok=True)
+        plots_dir = self.ensure_plots_dir()
         result_files = []
 
         import plotly.graph_objects as go
@@ -143,15 +116,10 @@ class HVGAnalysis(BaseAnalysis):
             ))
             fig.update_layout(title='Highly Variable Genes', xaxis_title='Mean', yaxis_title=y_col,
                              plot_bgcolor='white', width=600, height=400)
-            fpath = os.path.join(plots_dir, 'hvg_scatter.json')
-            with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'scatter', 'label': 'Highly Variable Genes'})
+            result_files.append(self.save_plotly_json(fig, plots_dir, 'hvg_scatter.json', 'scatter', 'Highly Variable Genes'))
 
         self.progress(90, "Saving output...")
-        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
-        os.makedirs(intermediate_dir, exist_ok=True)
-        output_path = os.path.join(intermediate_dir, 'hvg_output.h5ad')
-        adata.write_h5ad(output_path)
+        output_path = self.save_output(adata, 'hvg')
 
         n_hvg_actual = int(adata.var['highly_variable'].sum()) if 'highly_variable' in adata.var.columns else n_hvg
         self.progress(100, "Done")
