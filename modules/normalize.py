@@ -1,4 +1,3 @@
-import os
 from modules.base import BaseAnalysis
 
 class NormalizeAnalysis(BaseAnalysis):
@@ -7,9 +6,6 @@ class NormalizeAnalysis(BaseAnalysis):
     DESCRIPTION = "数据标准化（log1p / Pearson 残差）"
     INPUT_REQUIRES = []
 
-    def validate_input(self, adata):
-        return None
-
     def run(self, input_path):
         import scanpy as sc
         import omicverse as ov
@@ -17,9 +13,7 @@ class NormalizeAnalysis(BaseAnalysis):
         import numpy as np
 
         self.progress(5, "Loading data...")
-        adata = sc.read_h5ad(input_path)
-        from modules.io_utils import remap_var_names
-        adata = remap_var_names(adata)
+        adata = self.load_adata(input_path)
         adata.layers["counts"] = adata.X.copy()
 
         method = self.params.get('method', 'log1p')
@@ -39,11 +33,15 @@ class NormalizeAnalysis(BaseAnalysis):
                 sc.pp.normalize_total(adata, target_sum=target_sum)
                 sc.pp.log1p(adata)
         else:
-            adata = ov.pp.preprocess(adata, mode='shiftlog', target_sum=target_sum)
+            try:
+                adata = ov.pp.preprocess(adata, mode='shiftlog|seurat', target_sum=target_sum)
+            except Exception:
+                # omicverse 内部 HVG 绑定 bug 的回退方案
+                sc.pp.normalize_total(adata, target_sum=target_sum)
+                sc.pp.log1p(adata)
 
         self.progress(70, "Generating normalization plots...")
-        plots_dir = os.path.join(self.project_dir, 'plots')
-        os.makedirs(plots_dir, exist_ok=True)
+        plots_dir = self.ensure_plots_dir()
         result_files = []
 
         # Library size distribution before/after
@@ -58,15 +56,10 @@ class NormalizeAnalysis(BaseAnalysis):
         fig.update_layout(title='Library Size Distribution', xaxis_title='Total Counts',
                          yaxis_title='Frequency', barmode='overlay',
                          plot_bgcolor='white', width=600, height=400)
-        fpath = os.path.join(plots_dir, 'normalize_libsize.json')
-        with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
-        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'histogram', 'label': 'Library Size Distribution'})
+        result_files.append(self.save_plotly_json(fig, plots_dir, 'normalize_libsize.json', 'histogram', 'Library Size Distribution'))
 
         self.progress(90, "Saving output...")
-        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
-        os.makedirs(intermediate_dir, exist_ok=True)
-        output_path = os.path.join(intermediate_dir, 'normalize_output.h5ad')
-        adata.write_h5ad(output_path)
+        output_path = self.save_output(adata, 'normalize')
 
         self.progress(100, "Done")
         return {
