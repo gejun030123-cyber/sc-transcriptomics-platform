@@ -13,7 +13,14 @@ class Convert10x(BaseAnalysis):
         return None  # 不需要输入 adata
 
     def run(self, input_path):
-        mtx_dir = self.params['mtx_dir']
+        mtx_dir = self.params.get('mtx_dir', '')
+        if not mtx_dir:
+            return {
+                'output_adata': input_path,
+                'result_files': [],
+                'summary': {},
+                'error': '缺少 mtx_dir 参数，请提供 10x 数据目录路径',
+            }
         species = self.params.get('species')
         genome = self.params.get('genome')
 

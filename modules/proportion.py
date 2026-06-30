@@ -96,7 +96,10 @@ class ProportionAnalysis(BaseAnalysis):
         ))
         result_files.append(self.save_plotly_json(fig, plots_dir, 'proportion_stacked.json', 'bar', 'Cell Proportions (Stacked)'))
 
-        fig2 = make_subplots(rows=1, cols=len(ct.index), subplot_titles=[str(x) for x in ct.index])
+        n_batches = len(ct.index)
+        fig2 = make_subplots(rows=1, cols=n_batches,
+                             subplot_titles=[str(x) for x in ct.index],
+                             specs=[[{'type': 'domain'}] * n_batches])
         for i, idx in enumerate(ct.index, 1):
             fig2.add_trace(go.Pie(labels=[str(x) for x in ct.columns], values=ct.loc[idx].values, hole=0.3),
                           row=1, col=i)

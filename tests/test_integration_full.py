@@ -389,11 +389,7 @@ class TestSCModuleProportion:
             'groupby': 'celltype',
             'batch_key': 'batch',
         })
-        try:
-            result = mod.run(input_path)
-        except ValueError:
-            # Plotly make_subplots + Pie trace 域类型冲突，跳过 plotly 验证
-            pytest.skip("Proportion 模块 Plotly Pie/subplot 兼容问题")
+        result = mod.run(input_path)
         _assert_result_keys(result)
         _validate_result_files(result['result_files'])
         assert 'n_groups' in result['summary']
@@ -1154,10 +1150,7 @@ class TestSCModuleProportionDeepAssertions:
         mod = _instantiate(ProportionAnalysis, str(tmp_path), params={
             'groupby': 'celltype', 'batch_key': 'batch',
         })
-        try:
-            result = mod.run(input_path)
-        except ValueError:
-            pytest.skip("Proportion 模块 Plotly Pie/subplot 兼容问题")
+        result = mod.run(input_path)
 
         assert 'chi2' in result['summary']
         assert 'p_value' in result['summary']
@@ -1178,10 +1171,7 @@ class TestSCModuleProportionDeepAssertions:
         mod = _instantiate(ProportionAnalysis, str(tmp_path), params={
             'groupby': 'celltype', 'batch_key': 'batch',
         })
-        try:
-            result = mod.run(input_path)
-        except ValueError:
-            pytest.skip("Proportion 模块 Plotly Pie/subplot 兼容问题")
+        result = mod.run(input_path)
 
         csv_files = [rf for rf in result['result_files'] if rf['file_type'] == 'csv']
         assert len(csv_files) >= 2, "应有 cell_counts 和 cell_proportions CSV"
