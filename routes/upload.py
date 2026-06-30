@@ -84,7 +84,7 @@ def upload(pid):
         if ext not in ALLOWED_EXT and not fname.endswith('.mtx.gz') and not fname.endswith('.tsv.gz'):
             flash(f'不支持的文件格式: {ext}', 'danger')
             return redirect(url_for('upload.upload', pid=pid))
-        uploads_dir = os.path.join(Config.DATA_DIR, 'projects', pid, 'uploads')
+        uploads_dir = Config.uploads_dir(pid)
         os.makedirs(uploads_dir, exist_ok=True)
         fpath = os.path.join(uploads_dir, fname)
         file.save(fpath)
@@ -100,7 +100,7 @@ def check_10x(pid):
     p = Project.get_by_id(pid)
     if not p:
         return jsonify({'has_10x': False, 'error': '项目未找到'}), 404
-    uploads_dir = os.path.join(Config.DATA_DIR, 'projects', pid, 'uploads')
+    uploads_dir = Config.uploads_dir(pid)
     return jsonify(check_10x_files(uploads_dir))
 
 
@@ -114,7 +114,7 @@ def convert_10x(pid):
     if not p:
         return jsonify({'error': '项目未找到'}), 404
 
-    uploads_dir = os.path.join(Config.DATA_DIR, 'projects', pid, 'uploads')
+    uploads_dir = Config.uploads_dir(pid)
     check = check_10x_files(uploads_dir)
     if not check['has_10x']:
         return jsonify({'error': '未检测到完整的 10x 数据文件'}), 400
@@ -134,7 +134,7 @@ def convert_10x(pid):
     )
     task.save()
 
-    proj_dir = os.path.join(Config.DATA_DIR, 'projects', pid)
+    proj_dir = Config.project_dir(pid)
     submit_task(task.id, pid, 'convert_10x',
                 {'mtx_dir': uploads_dir, 'species': species, 'genome': genome},
                 proj_dir, uploads_dir)

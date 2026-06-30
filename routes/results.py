@@ -2,7 +2,7 @@ import json
 import os
 from flask import Blueprint, render_template, send_file, flash, redirect, url_for
 from models import Project, AnalysisTask, ResultFile
-from routes.analysis import MODULE_DISPLAY_MAP, STATUS_MAP
+from modules.schemas import MODULE_DISPLAY_MAP, STATUS_MAP
 from modules import PIPELINE_ORDER
 from config import Config
 

@@ -141,7 +141,9 @@ class ProportionAnalysis(BaseAnalysis):
                 safe_name = f'{group_a}_vs_{group_b}'.replace(' ', '_')
                 result_files.append(self.save_plotly_json(fig_sub, plots_dir, f'proportion_compare_{safe_name}.json', 'bar', f'{group_a} vs {group_b} 比例比较'))
 
-                ct_sub_abs.to_csv(os.path.join(results_dir, f'cell_counts_{safe_name}.csv'))
+                ct_sub_path = os.path.join(results_dir, f'cell_counts_{safe_name}.csv')
+                ct_sub_abs.to_csv(ct_sub_path)
+                result_files.append({'file_path': ct_sub_path, 'file_type': 'csv', 'category': 'table', 'label': f'{group_a} vs {group_b} 细胞计数'})
 
         self.progress(90, "Saving output...")
         output_path = self.save_output(adata, 'proportion')

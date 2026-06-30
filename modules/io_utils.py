@@ -44,6 +44,8 @@ def read_expression_matrix(file_path):
             df = pd.read_csv(file_path, sep='\t', index_col=0, nrows=5)
             if df.shape[1] > 0:
                 df = pd.read_csv(file_path, sep='\t', index_col=0)
+            else:
+                df = None
         except Exception:
             df = None
 
@@ -53,6 +55,8 @@ def read_expression_matrix(file_path):
             df = pd.read_csv(file_path, sep=None, engine='python', index_col=0, nrows=5)
             if df.shape[1] > 0:
                 df = pd.read_csv(file_path, sep=None, engine='python', index_col=0)
+            else:
+                df = None
         except Exception:
             df = None
 

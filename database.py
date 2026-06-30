@@ -1,20 +1,18 @@
 import sqlite3
-import os
 from config import Config
 
-_db = None
 
-def get_db():
-    global _db
-    if _db is None:
-        _db = sqlite3.connect(Config.DB_PATH, check_same_thread=False)
-        _db.row_factory = sqlite3.Row
-        _db.execute("PRAGMA journal_mode=WAL")
-        _db.execute("PRAGMA foreign_keys=ON")
-    return _db
+def get_conn():
+    """创建新的 SQLite 连接，设置 PRAGMA。每次调用返回新连接。"""
+    conn = sqlite3.connect(Config.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
 
 def init_db():
-    db = get_db()
+    db = get_conn()
     db.executescript("""
         CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY,
@@ -61,3 +59,4 @@ def init_db():
     db.execute("CREATE INDEX IF NOT EXISTS idx_result_files_task ON result_files(task_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_result_files_project ON result_files(project_id)")
     db.commit()
+    db.close()

@@ -1,4 +1,3 @@
-import os
 from modules.base import BaseAnalysis
 
 class ClusteringAnalysis(BaseAnalysis):
@@ -13,15 +12,14 @@ class ClusteringAnalysis(BaseAnalysis):
         return None
 
     def run(self, input_path):
+        import os
         import scanpy as sc
         from modules.visualization import umap_scatter
         import json
         import numpy as np
 
         self.progress(5, "Loading data...")
-        adata = sc.read_h5ad(input_path)
-        from modules.io_utils import remap_var_names
-        adata = remap_var_names(adata)
+        adata = self.load_adata(input_path)
         resolutions = [float(r.strip()) for r in str(self.params.get('resolutions', '0.6,0.8,1.0')).split(',')]
         n_neighbors = int(self.params.get('n_neighbors', 15))
         clustering_method = self.params.get('clustering_method', 'leiden')
@@ -55,8 +53,7 @@ class ClusteringAnalysis(BaseAnalysis):
             adata.obs['leiden'] = adata.obs[f'leiden_{resolutions[0]}'].copy()
 
         self.progress(75, "Generating cluster UMAP plots...")
-        plots_dir = os.path.join(self.project_dir, 'plots')
-        os.makedirs(plots_dir, exist_ok=True)
+        plots_dir = self.ensure_plots_dir()
         result_files = []
 
         for res in resolutions:
@@ -122,10 +119,7 @@ class ClusteringAnalysis(BaseAnalysis):
             pass  # Skip if annotation module not available
 
         self.progress(90, "Saving output...")
-        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
-        os.makedirs(intermediate_dir, exist_ok=True)
-        output_path = os.path.join(intermediate_dir, 'clustering_output.h5ad')
-        adata.write_h5ad(output_path)
+        output_path = self.save_output(adata, 'clustering')
 
         # Auto-select best resolution
         best_res = resolutions[0]

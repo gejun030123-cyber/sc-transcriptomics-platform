@@ -7,21 +7,13 @@ class CellCommunicationAnalysis(BaseAnalysis):
     DESCRIPTION = "基于 LIANA 的细胞间通讯分析"
     INPUT_REQUIRES = ['celltype']
 
-    def validate_input(self, adata):
-        cluster_key = self.params.get('cluster_key', 'celltype')
-        if cluster_key not in adata.obs.columns:
-            return f"Column '{cluster_key}' not found. Run annotation first."
-        return None
-
     def run(self, input_path):
         import scanpy as sc
         import json
         import pandas as pd
 
         self.progress(5, "Loading data...")
-        adata = sc.read_h5ad(input_path)
-        from modules.io_utils import remap_var_names
-        adata = remap_var_names(adata)
+        adata = self.load_adata(input_path)
 
         cluster_key = self.params.get('cluster_key', 'celltype')
         resource = self.params.get('resource', 'consensus')
@@ -53,9 +45,8 @@ class CellCommunicationAnalysis(BaseAnalysis):
         )
 
         result_files = []
-        plots_dir = os.path.join(self.project_dir, 'plots')
+        plots_dir = self.ensure_plots_dir()
         results_dir = os.path.join(self.project_dir, 'results')
-        os.makedirs(plots_dir, exist_ok=True)
         os.makedirs(results_dir, exist_ok=True)
 
         # Extract LIANA results
@@ -102,9 +93,7 @@ class CellCommunicationAnalysis(BaseAnalysis):
                              xaxis_title='Ligand-Receptor', yaxis_title='Source→Target',
                              plot_bgcolor='white', width=800, height=500,
                              xaxis=dict(tickangle=45))
-            fpath = os.path.join(plots_dir, 'cell_communication_bubble.json')
-            with open(fpath, 'w') as f: json.dump(json.loads(fig.to_json()), f)
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bubble', 'label': 'Communication Bubble Plot'})
+            result_files.append(self.save_plotly_json(fig, plots_dir, 'cell_communication_bubble.json', 'bubble', 'Communication Bubble Plot'))
         except Exception:
             pass
 
@@ -122,18 +111,13 @@ class CellCommunicationAnalysis(BaseAnalysis):
                     fig_hm.update_layout(title='Communication Counts Between Cell Types',
                                         xaxis_title='Target', yaxis_title='Source',
                                         width=600, height=500)
-                    fpath = os.path.join(plots_dir, 'cell_communication_heatmap.json')
-                    with open(fpath, 'w') as f: json.dump(json.loads(fig_hm.to_json()), f)
-                    result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': 'Communication Heatmap'})
+                    result_files.append(self.save_plotly_json(fig_hm, plots_dir, 'cell_communication_heatmap.json', 'heatmap', 'Communication Heatmap'))
             except Exception:
                 pass
 
         # Save output
         self.progress(90, "Saving output...")
-        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
-        os.makedirs(intermediate_dir, exist_ok=True)
-        output_path = os.path.join(intermediate_dir, 'cell_communication_output.h5ad')
-        adata.write_h5ad(output_path)
+        output_path = self.save_output(adata, 'cell_communication')
 
         n_interactions = len(liana_results)
         n_cell_types = liana_results['source'].nunique() if 'source' in liana_results.columns else 0

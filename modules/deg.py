@@ -89,7 +89,7 @@ class DEGAnalysis(BaseAnalysis):
         deg_df = pd.DataFrame(deg_data)
         csv_path = os.path.join(results_dir, 'deg_results.csv')
         deg_df.to_csv(csv_path, index=False)
-        result_files.append({'file_path': csv_path, 'file_type': 'csv', 'category': 'table', 'label': 'DEG Results Table'})
+        result_files.append({'file_path': csv_path, 'file_type': 'csv', 'category': 'table', 'label': f'Top {n_genes} DEG per Cluster'})
 
         first_group = groups[0] if groups else None
         if first_group:

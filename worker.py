@@ -68,6 +68,10 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
             logger.debug(f"[Worker] Input file not found for validation: {input_path}")
         except ImportError as ie:
             logger.debug(f"[Worker] Module dependency missing for validation: {ie}")
+        except (OSError, ValueError) as e:
+            # 非 h5ad 文件（CSV/TSV/Excel）无法通过 load_adata 加载，
+            # 但模块内部的 run() 可能使用 read_expression_matrix() 正确处理
+            logger.debug(f"[Worker] Input validation skipped for {input_path}: {e}")
 
         result = module.run(input_path)
 

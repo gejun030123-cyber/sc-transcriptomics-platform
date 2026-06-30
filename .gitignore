@@ -13,3 +13,9 @@ data/
 genesets/
 .superpowers/
 cache/
+
+# Local configuration
+.claude/
+PROMPT.md
+STATE.md
+review_*.md

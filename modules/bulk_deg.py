@@ -148,13 +148,29 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     # 保存过滤前的 top 基因用于火山图标注（与散点数据一致）
     top_genes_vol = deg_df[deg_df['regulation'] != 'NS'].head(top_n)
 
-    # 基础表达量过滤
+    # 保存过滤前的完整 deg_df（用于 CSV，与火山图/MA图数据一致）
+    deg_df_full = deg_df
+
+    # 基础表达量过滤（仅影响下游箱线图，不影响 CSV 和火山图）
     if base_mean_filter > 0:
         base_mean = (deg_df['mean_group1'] + deg_df['mean_group2']) / 2
         deg_df = deg_df[base_mean >= base_mean_filter].copy()
 
     # Volcano plot
     file_suffix = f'_{suffix}' if suffix else ''
+
+    # Save individual CSV — 保存过滤前的完整结果
+    csv_path = os.path.join(results_dir, f'bulk_deg_results{file_suffix}.csv')
+    deg_df_full.to_csv(csv_path, index=False)
+    result_files.append({'file_path': csv_path, 'file_type': 'csv', 'category': 'table',
+                         'label': f'差异表达基因列表 ({group1} vs {group2})'})
+
+    top_genes = deg_df_full[deg_df_full['regulation'] != 'NS'].head(top_n)
+    top_csv = os.path.join(results_dir, f'bulk_deg_top_genes{file_suffix}.csv')
+    top_genes.to_csv(top_csv, index=False)
+    result_files.append({'file_path': top_csv, 'file_type': 'csv', 'category': 'table',
+                         'label': f'Top {top_n} 差异基因 ({group1} vs {group2})'})
+
     neg_log_padj = -np.log10(padj + 1e-300)
     color_map = {'Up': '#e53935', 'Down': '#1a237e', 'NS': '#bdbdbd'}
     fig_vol = go.Figure()
@@ -213,20 +229,8 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'ma',
                          'label': f'MA 图 ({group1} vs {group2})'})
 
-    # Save individual CSV (保存过滤前的完整结果)
-    csv_path = os.path.join(results_dir, f'bulk_deg_results{file_suffix}.csv')
-    deg_df.to_csv(csv_path, index=False)
-    result_files.append({'file_path': csv_path, 'file_type': 'csv', 'category': 'table',
-                         'label': f'差异表达基因列表 ({group1} vs {group2})'})
-
-    top_genes = deg_df[deg_df['regulation'] != 'NS'].head(top_n)
-    top_csv = os.path.join(results_dir, f'bulk_deg_top_genes{file_suffix}.csv')
-    top_genes.to_csv(top_csv, index=False)
-    result_files.append({'file_path': top_csv, 'file_type': 'csv', 'category': 'table',
-                         'label': f'Top {top_n} 差异基因 ({group1} vs {group2})'})
-
-    # 返回完整 deg_df（调用方负责按需过滤）
-    return deg_df, result_files, n_up, n_down
+    # 返回完整 deg_df 用于箱线图，过滤后 deg_df 用于下游分析
+    return deg_df_full, result_files, n_up, n_down
 
 
 def _run_lrt_test(adata, counts, groupby, method, pval_threshold, gene_id_to_name,
@@ -568,7 +572,7 @@ class BulkDEGAnalysis(BaseAnalysis):
                 'method': method,
                 'test_type': test_type,
                 'n_comparisons': len(all_deg_dfs),
-                'comparisons': [f'{g1}-vs-{g2}' for g1, g2 in comparison_pairs],
+                'comparisons': [f'{g1}-vs-{g2}' for g1, g2 in valid_comparisons],
                 'per_comparison': per_comparison,
                 'shared_up_genes': shared_up,
                 'shared_down_genes': shared_down,

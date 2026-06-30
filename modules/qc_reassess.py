@@ -11,21 +11,13 @@ class QCReassessAnalysis(BaseAnalysis):
     DESCRIPTION = "聚类后检查 doublet 和 QC 指标，标记低质量簇"
     INPUT_REQUIRES = ['leiden']
 
-    def validate_input(self, adata):
-        cluster_key = self.params.get('cluster_key', 'leiden')
-        if cluster_key not in adata.obs.columns:
-            return f"Column '{cluster_key}' not found."
-        return None
-
     def run(self, input_path):
         import scanpy as sc
         import plotly.graph_objects as go
         from modules.visualization import umap_scatter
 
         self.progress(5, "加载数据...")
-        adata = sc.read_h5ad(input_path)
-        from modules.io_utils import remap_var_names
-        adata = remap_var_names(adata)
+        adata = self.load_adata(input_path)
 
         cluster_key = self.params.get('cluster_key', 'leiden')
         doublet_threshold = float(self.params.get('doublet_threshold', 0.3))
@@ -36,9 +28,8 @@ class QCReassessAnalysis(BaseAnalysis):
 
         self.progress(20, "计算各簇 QC 指标...")
         result_files = []
-        plots_dir = os.path.join(self.project_dir, 'plots')
+        plots_dir = self.ensure_plots_dir()
         results_dir = os.path.join(self.project_dir, 'results')
-        os.makedirs(plots_dir, exist_ok=True)
         os.makedirs(results_dir, exist_ok=True)
 
         # 计算每个簇的统计
@@ -145,15 +136,10 @@ class QCReassessAnalysis(BaseAnalysis):
                 xaxis_title='UMAP1', yaxis_title='UMAP2',
                 plot_bgcolor='white', width=700, height=500,
             )
-            fpath = os.path.join(plots_dir, 'qc_reassess_clusters_umap.json')
-            with open(fpath, 'w') as f: f.write(fig.to_json(engine="json"))
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': '聚类 UMAP（低质量簇高亮）'})
+            result_files.append(self.save_plotly_json(fig, plots_dir, 'qc_reassess_clusters_umap.json', 'umap', '聚类 UMAP（低质量簇高亮）'))
 
         self.progress(90, "保存输出...")
-        intermediate_dir = os.path.join(self.project_dir, 'intermediate')
-        os.makedirs(intermediate_dir, exist_ok=True)
-        output_path = os.path.join(intermediate_dir, 'qc_reassess_output.h5ad')
-        adata.write_h5ad(output_path)
+        output_path = self.save_output(adata, 'qc_reassess')
 
         self.progress(100, "完成")
         return {

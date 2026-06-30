@@ -50,12 +50,13 @@ MODULE_REGISTRY = {
 PIPELINE_ORDER = [
     'qc', 'normalize', 'hvg', 'dimred', 'batch_correct', 'clustering',
     'qc_reassess', 'annotation', 'deg', 'trajectory', 'proportion', 'cell_communication',
-    'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca', 'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
+    'bulk_qc', 'bulk_normalize', 'bulk_pca', 'bulk_deg', 'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
     'bulk_deg_integration',
 ]
 
 # 模块依赖约束：value 中的模块必须在 key 之前执行
 PIPELINE_DEPS = {
+    # 单细胞
     'normalize': ['qc'],
     'hvg': ['normalize'],
     'dimred': ['hvg'],
@@ -67,6 +68,14 @@ PIPELINE_DEPS = {
     'trajectory': ['clustering'],
     'proportion': ['clustering'],
     'cell_communication': ['annotation'],
+    # Bulk RNA-seq
+    'bulk_normalize': ['bulk_qc'],
+    'bulk_pca': ['bulk_normalize'],
+    'bulk_deg': ['bulk_normalize'],
+    'bulk_heatmap': ['bulk_deg'],
+    'bulk_enrichment': ['bulk_deg'],
+    'bulk_timecourse': ['bulk_normalize'],
+    'bulk_deg_integration': ['bulk_deg'],
 }
 
 def validate_pipeline_order(modules):
