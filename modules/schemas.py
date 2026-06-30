@@ -17,14 +17,14 @@ SC_MODULE_LIST = [
 ]
 
 BULK_MODULE_LIST = [
-    {'name': 'bulk_qc', 'display': '数据质控', 'desc': '文库大小、基因检测、离群值过滤'},
+    {'name': 'bulk_qc', 'display': 'Bulk RNA-seq 质控', 'desc': '文库大小、基因检测、离群值过滤'},
     {'name': 'bulk_normalize', 'display': '数据标准化', 'desc': 'DESeq2 / CPM / 分位数标准化'},
     {'name': 'bulk_pca', 'display': 'PCA / UMAP', 'desc': 'PCA 和 UMAP 降维可视化，检查样本分组和批次效应'},
     {'name': 'bulk_deg', 'display': '差异表达分析', 'desc': '组间差异基因检测（火山图、MA图）'},
-    {'name': 'bulk_heatmap', 'display': '热图分析', 'desc': 'Top 差异基因热图、样本相关性热图'},
+    {'name': 'bulk_heatmap', 'display': 'Bulk 热图可视化', 'desc': 'Top 差异基因热图、样本相关性热图'},
     {'name': 'bulk_enrichment', 'display': '通路富集', 'desc': 'GO/KEGG/WikiPathways 通路富集分析（ORA / GSEA）'},
     {'name': 'bulk_timecourse', 'display': '时序分析（可选）', 'desc': '多时间点差异基因检测 + 轨迹聚类（仅时序实验需要）'},
-    {'name': 'bulk_deg_integration', 'display': '多组差异整合（可选）', 'desc': '多组比较结果整合：Upset 图、一致性评分、logFC 矩阵分析（仅多组比较需要）'},
+    {'name': 'bulk_deg_integration', 'display': '多组差异整合分析', 'desc': '多组比较结果整合：Upset 图、一致性评分、logFC 矩阵分析（仅多组比较需要）'},
 ]
 
 MODULE_LIST = SC_MODULE_LIST + BULK_MODULE_LIST

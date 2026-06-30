@@ -1,6 +1,9 @@
 import os
 import json
+import logging
 from modules.base import BaseAnalysis
+
+logger = logging.getLogger(__name__)
 
 class TrajectoryAnalysis(BaseAnalysis):
     MODULE_NAME = "trajectory"
@@ -79,8 +82,8 @@ class TrajectoryAnalysis(BaseAnalysis):
                 fig_paga.update_layout(title='PAGA Trajectory', xaxis_title='UMAP1', yaxis_title='UMAP2',
                                       plot_bgcolor='white', width=600, height=500)
                 result_files.append(self.save_plotly_json(fig_paga, plots_dir, 'trajectory_paga.json', 'paga', 'PAGA Trajectory'))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("生成 PAGA 轨迹图失败: %s", e)
 
         if 'X_diffmap' in adata.obsm:
             dc = adata.obsm['X_diffmap'][:, :2]

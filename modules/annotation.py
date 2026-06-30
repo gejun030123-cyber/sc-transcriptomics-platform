@@ -96,7 +96,7 @@ class AnnotationAnalysis(BaseAnalysis):
                 method = 'auto_marker'
 
         if method == 'celltypist':
-            self.progress(30, "Running CellTypist annotation...")
+            self.progress(46, "Running CellTypist annotation...")
             try:
                 import celltypist
                 from celltypist import annotate
@@ -113,10 +113,10 @@ class AnnotationAnalysis(BaseAnalysis):
                 adata.obs['celltype'] = adata.obs['celltype'].astype('category')
                 markers = {}
             except ImportError:
-                self.progress(35, "celltypist not installed, falling back to auto_marker...")
+                self.progress(47, "celltypist not installed, falling back to auto_marker...")
                 method = 'auto_marker'
             except Exception as e:
-                self.progress(35, f"CellTypist failed: {e}, falling back to auto_marker...")
+                self.progress(47, f"CellTypist failed: {e}, falling back to auto_marker...")
                 method = 'auto_marker'
 
         if method == 'auto_marker':

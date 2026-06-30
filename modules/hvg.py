@@ -1,5 +1,8 @@
 from modules.base import BaseAnalysis
 from modules.constants import S_GENES, G2M_GENES
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class HVGAnalysis(BaseAnalysis):
@@ -47,8 +50,8 @@ class HVGAnalysis(BaseAnalysis):
                         batch_hvgs = batch_hvgs | batch_hvgs_batch
                     else:  # intersection
                         batch_hvgs = batch_hvgs & batch_hvgs_batch
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("批次 %s 的 HVG 选择失败: %s", batch_val, e)
 
             if batch_hvgs:
                 adata.var['highly_variable'] = adata.var_names.isin(batch_hvgs)

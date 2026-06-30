@@ -256,7 +256,7 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
                 outdir=os.path.join(self.project_dir, 'enrichr_gsea_tmp')
             )
 
-            self.progress(60, "处理 GSEA 结果...")
+            self.progress(71, "处理 GSEA 结果...")
             enr = pre_res.res2d
             enr_sig = enr[enr['fdr'] < pvalue_cutoff].copy()
 
@@ -264,7 +264,7 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
             enr.to_csv(csv_path, index=False)
             result_files.append({'file_path': csv_path, 'file_type': 'csv', 'category': 'table', 'label': 'GSEA 富集结果'})
 
-            self.progress(70, "生成 GSEA 图表...")
+            self.progress(75, "生成 GSEA 图表...")
             if len(enr_sig) > 0:
                 top_gsea = enr_sig.head(top_n)
                 fig_bar = go.Figure()

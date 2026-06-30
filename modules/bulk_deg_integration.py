@@ -1,8 +1,11 @@
 # modules/bulk_deg_integration.py
 import os
+import logging
 import numpy as np
 import pandas as pd
 from modules.base import BaseAnalysis
+
+logger = logging.getLogger(__name__)
 
 
 def _load_comparison_labels(project_dir):
@@ -28,8 +31,8 @@ def _load_comparison_labels(project_dir):
                     # Normalize: "moclel vs hmc3" → "moclel-vs-hmc3"
                     lbl = lbl.replace(' vs ', '-vs-').strip()
                     label_map[fname] = lbl
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("解析文件标签失败: %s", e)
     return label_map
 
 

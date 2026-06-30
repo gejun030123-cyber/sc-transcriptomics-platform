@@ -1,4 +1,7 @@
 from modules.base import BaseAnalysis
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ClusteringAnalysis(BaseAnalysis):
     MODULE_NAME = "clustering"
@@ -115,8 +118,8 @@ class ClusteringAnalysis(BaseAnalysis):
                     with open(fpath, 'w') as f:
                         json.dump({'data': [{'type': 'image', 'source': f'data:image/png;base64,{img_b64}', 'xref': 'paper', 'yref': 'paper', 'x': 0, 'y': 1, 'sizex': 1, 'sizey': 1, 'sizing': 'stretch'}], 'layout': {'width': 800, 'height': 500, 'title': f'Marker Dotplot ({first_key})'}}, f)
                     result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'dotplot', 'label': f'Marker Dotplot'})
-        except Exception:
-            pass  # Skip if annotation module not available
+        except Exception as e:
+            logger.warning("生成 marker dotplot 失败（注释模块可能不可用）: %s", e)
 
         self.progress(90, "Saving output...")
         output_path = self.save_output(adata, 'clustering')
@@ -144,8 +147,8 @@ class ClusteringAnalysis(BaseAnalysis):
                     if score > best_score:
                         best_score = score
                         best_res = res
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("自动选择分辨率失败: %s", e)
 
         self.progress(100, "Done")
         summary = {f'n_clusters_{res}': int(adata.obs[f'leiden_{res}'].nunique()) for res in resolutions if f'leiden_{res}' in adata.obs.columns}

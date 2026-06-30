@@ -1,5 +1,8 @@
 import os
+import logging
 from modules.base import BaseAnalysis
+
+logger = logging.getLogger(__name__)
 
 class CellCommunicationAnalysis(BaseAnalysis):
     MODULE_NAME = "cell_communication"
@@ -26,7 +29,7 @@ class CellCommunicationAnalysis(BaseAnalysis):
         try:
             import liana as li
         except ImportError:
-            self.progress(100, "LIANA not installed")
+            self.progress(-1, "LIANA 未安装，跳过细胞通讯分析")
             return {
                 'output_adata': input_path,
                 'result_files': [],
@@ -52,7 +55,7 @@ class CellCommunicationAnalysis(BaseAnalysis):
         # Extract LIANA results
         liana_results = adata.uns.get('liana_res', pd.DataFrame())
         if liana_results.empty:
-            self.progress(100, "No interactions found")
+            self.progress(-1, "未检测到细胞间相互作用")
             return {
                 'output_adata': input_path,
                 'result_files': [],
@@ -94,8 +97,8 @@ class CellCommunicationAnalysis(BaseAnalysis):
                              plot_bgcolor='white', width=800, height=500,
                              xaxis=dict(tickangle=45))
             result_files.append(self.save_plotly_json(fig, plots_dir, 'cell_communication_bubble.json', 'bubble', 'Communication Bubble Plot'))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("生成气泡图失败: %s", e)
 
         # Heatmap of interaction counts between cell types
         if show_heatmap:
@@ -112,8 +115,8 @@ class CellCommunicationAnalysis(BaseAnalysis):
                                         xaxis_title='Target', yaxis_title='Source',
                                         width=600, height=500)
                     result_files.append(self.save_plotly_json(fig_hm, plots_dir, 'cell_communication_heatmap.json', 'heatmap', 'Communication Heatmap'))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("生成热图失败: %s", e)
 
         # Save output
         self.progress(90, "Saving output...")
