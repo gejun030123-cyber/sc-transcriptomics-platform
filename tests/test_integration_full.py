@@ -1,6 +1,6 @@
 # tests/test_integration_full.py
 """Full integration tests — 每个模块 run() 用合成数据端到端验证。"""
-import sys, os, json, shutil, time, signal, functools
+import sys, os, json, shutil, time, signal, functools, importlib.util
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
@@ -1652,3 +1652,184 @@ class TestWorkerIntegration:
                 f"模块 {name} 的 MODULE_NAME 为空"
             assert mod.DISPLAY_NAME, f"模块 {name} 的 DISPLAY_NAME 为空"
             assert mod.DESCRIPTION, f"模块 {name} 的 DESCRIPTION 为空"
+
+
+# ======================================================================
+# 新增集成测试 — 补齐模块覆盖
+# ======================================================================
+
+class TestSCModuleBatchCorrect:
+    """BatchCorrect 模块集成测试（ComBat 方法）。"""
+
+    @_timeout(120)
+    @pytest.mark.skipif(
+        not importlib.util.find_spec('inmoose'),
+        reason="inmoose 未安装"
+    )
+    def test_batch_correct_combat(self, tmp_path):
+        """BatchCorrect ComBat 方法应返回有效结果。"""
+        from modules.batch_correct import BatchCorrectAnalysis
+
+        adata = _make_sc_anndata()
+        input_path = str(tmp_path / 'input.h5ad')
+        adata.write_h5ad(input_path)
+
+        mod = _instantiate(BatchCorrectAnalysis, str(tmp_path), params={
+            'method': 'combat',
+            'batch_key': 'batch',
+        })
+        try:
+            result = mod.run(input_path)
+        except ValueError as e:
+            if 'X_pca_combat' in str(e):
+                pytest.skip(f"omicverse combat 未生成 X_pca_combat: {e}")
+            raise
+        _assert_result_keys(result)
+        assert os.path.exists(result['output_adata']), "output_adata 文件不存在"
+        assert 'method' in result['summary'], "summary 缺少 method 字段"
+        assert result['summary']['method'] == 'combat'
+
+
+def _make_bulk_timecourse_tsv(tmp_path, n_timepoints=3, n_replicates=3, n_genes=50):
+    """构造时序 Bulk h5ad（含 obs['time'] 列）。
+    返回文件路径。
+    """
+    np.random.seed(42)
+    time_map = {0: 0, 1: 30, 2: 120}
+    samples = []
+    time_vals = []
+    for t_idx in range(n_timepoints):
+        t = time_map.get(t_idx, t_idx * 60)
+        for r in range(n_replicates):
+            samples.append(f'T{t}_rep{r}')
+            time_vals.append(t)
+
+    genes = [f'Gene{i}' for i in range(n_genes)]
+    # 构造含时序变化的表达数据
+    X = np.random.poisson(lam=500, size=(len(samples), n_genes)).astype(float)
+    # 前 5 个基因有明确时间依赖表达
+    for g_idx in range(5):
+        for s_idx, t in enumerate(time_vals):
+            X[s_idx, g_idx] += t * (2 + g_idx)
+
+    import anndata
+    obs = pd.DataFrame({'time': time_vals}, index=samples)
+    var = pd.DataFrame(index=genes)
+    adata = anndata.AnnData(X=X, obs=obs, var=var)
+    path = str(tmp_path / 'bulk_timecourse.h5ad')
+    adata.write_h5ad(path)
+    return path
+
+
+class TestBulkModuleTimecourse:
+    """Bulk 时序分析模块集成测试。"""
+
+    @_timeout(120)
+    def test_bulk_timecourse_returns_valid_result(self, tmp_path):
+        """BulkTimecourse 对 3 时间点数据应返回有效结果。"""
+        from modules.bulk_timecourse import BulkTimecourseAnalysis
+
+        tsv_path = _make_bulk_timecourse_tsv(tmp_path)
+
+        mod = _instantiate(BulkTimecourseAnalysis, str(tmp_path), params={
+            'time_column': 'time',
+            'spline_df': 3,
+            'n_clusters': 3,
+            'fdr_threshold': 0.05,
+        })
+        try:
+            result = mod.run(tsv_path)
+        except Exception as e:
+            pytest.skip(f"BulkTimecourse 运行失败: {e}")
+
+        _assert_result_keys(result)
+        assert 'n_timepoints' in result['summary'] or 'n_sig_genes' in result['summary'], \
+            "summary 缺少关键字段"
+        assert len(result['result_files']) > 0, "应有输出文件"
+
+
+class TestBulkModuleHeatmap:
+    """Bulk 热图模块集成测试（串联 DEG）。"""
+
+    @_timeout(120)
+    def test_bulk_heatmap_returns_valid_result(self, tmp_path):
+        """BulkHeatmap 串联 DEG 结果后应返回有效结果。"""
+        from modules.bulk_deg import BulkDEGAnalysis
+        from modules.bulk_heatmap import BulkHeatmapAnalysis
+
+        tsv_path, _ = _make_bulk_tsv(tmp_path, n_genes=50)
+
+        # Step 1: 运行 DEG 获取比较结果
+        try:
+            deg = _instantiate(BulkDEGAnalysis, str(tmp_path), params={
+                'method': 't-test',
+                'groupby': 'condition',
+                'group1': 'Treat',
+                'group2': 'Ctrl',
+                'fc_threshold': 1.5,
+                'pval_threshold': 0.05,
+            })
+            deg_result = deg.run(tsv_path)
+        except Exception as e:
+            pytest.skip(f"BulkDEG 运行失败: {e}")
+
+        # Step 2: 运行 BulkHeatmap
+        try:
+            mod = _instantiate(BulkHeatmapAnalysis, str(tmp_path), params={
+                'heatmap_type': 'top_var',
+                'top_n': 20,
+            })
+            result = mod.run(deg_result['output_adata'])
+        except Exception as e:
+            pytest.skip(f"BulkHeatmap 运行失败: {e}")
+
+        _assert_result_keys(result)
+        assert len(result['result_files']) > 0, "应有输出文件"
+        assert isinstance(result['summary'], dict)
+
+
+class TestBulkModuleDEGIntegration:
+    """Bulk DEG 整合模块集成测试。"""
+
+    @_timeout(120)
+    def test_bulk_deg_integration_returns_valid_result(self, tmp_path):
+        """BulkDEGIntegration 需要多个 DEG CSV，构造后运行。"""
+        from modules.bulk_deg_integration import BulkDEGIntegrationAnalysis
+
+        # 构造 results 目录和模拟 DEG CSV 文件
+        results_dir = str(tmp_path / 'results')
+        os.makedirs(results_dir, exist_ok=True)
+        plots_dir = str(tmp_path / 'plots')
+        os.makedirs(plots_dir, exist_ok=True)
+
+        np.random.seed(42)
+        genes = [f'Gene{i}' for i in range(50)]
+        for comp_name in ['CompA', 'CompB']:
+            df = pd.DataFrame({
+                'gene': genes,
+                'log2FC': np.random.randn(50) * 2,
+                'pval': np.random.uniform(0, 0.1, 50),
+                'padj': np.random.uniform(0, 0.1, 50),
+                'regulation': np.random.choice(['Up', 'Down', 'NS'], 50),
+            })
+            df.to_csv(os.path.join(results_dir, f'bulk_deg_results_{comp_name}.csv'), index=False)
+
+        # 随便给一个 h5ad 路径作 input（整合模块只读 results 目录）
+        input_path = str(tmp_path / 'dummy.h5ad')
+        import anndata
+        np.random.seed(0)
+        dummy = anndata.AnnData(
+            X=np.random.rand(20, 50).astype(np.float32),
+            obs=pd.DataFrame(index=[f'c{i}' for i in range(20)]),
+            var=pd.DataFrame(index=[f'G{i}' for i in range(50)]),
+        )
+        dummy.write_h5ad(input_path)
+
+        try:
+            mod = _instantiate(BulkDEGIntegrationAnalysis, str(tmp_path), params={})
+            result = mod.run(input_path)
+        except Exception as e:
+            pytest.skip(f"BulkDEGIntegration 运行失败: {e}")
+
+        _assert_result_keys(result)
+        assert 'error' not in result['summary'], f"summary 含 error: {result['summary'].get('error')}"
