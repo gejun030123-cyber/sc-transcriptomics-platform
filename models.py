@@ -290,3 +290,144 @@ class ResultFile:
         if row:
             return cls(**dict(row))
         return None
+
+
+class PipelineRun:
+    def __init__(self, id=None, project_id='', name='', analysis_type='',
+                 status='pending', current_module='', progress=0, input_path='',
+                 modules_json='[]', params_json='{}', task_ids_json='[]',
+                 error_traceback=None, started_at=None, finished_at=None,
+                 log_text=''):
+        self.id = id or gen_id()
+        self.project_id = project_id
+        self.name = name
+        self.analysis_type = analysis_type
+        self.status = status
+        self.current_module = current_module
+        self.progress = progress
+        self.input_path = input_path
+        self.modules_json = modules_json
+        self.params_json = params_json
+        self.task_ids_json = task_ids_json
+        self.error_traceback = error_traceback
+        self.started_at = started_at
+        self.finished_at = finished_at
+        self.log_text = log_text
+
+    def save(self):
+        conn = get_conn()
+        try:
+            conn.execute(
+                "INSERT INTO pipeline_runs "
+                "(id, project_id, name, analysis_type, status, current_module, progress, "
+                "input_path, modules_json, params_json, task_ids_json, error_traceback, "
+                "started_at, finished_at, log_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, "
+                "name=excluded.name, analysis_type=excluded.analysis_type, "
+                "status=excluded.status, current_module=excluded.current_module, "
+                "progress=excluded.progress, input_path=excluded.input_path, "
+                "modules_json=excluded.modules_json, params_json=excluded.params_json, "
+                "task_ids_json=excluded.task_ids_json, error_traceback=excluded.error_traceback, "
+                "started_at=excluded.started_at, finished_at=excluded.finished_at, "
+                "log_text=excluded.log_text",
+                (self.id, self.project_id, self.name, self.analysis_type, self.status,
+                 self.current_module, self.progress, self.input_path, self.modules_json,
+                 self.params_json, self.task_ids_json, self.error_traceback,
+                 self.started_at, self.finished_at, self.log_text)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def mark_running(self):
+        conn = get_conn()
+        try:
+            cursor = conn.execute(
+                "UPDATE pipeline_runs SET status='running', started_at=CURRENT_TIMESTAMP "
+                "WHERE id=? AND status='pending'",
+                (self.id,)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    def update_progress(self, pct, current_module='', log_text=None):
+        conn = get_conn()
+        try:
+            conn.execute(
+                "UPDATE pipeline_runs SET progress=?, current_module=?, log_text=? WHERE id=?",
+                (pct, current_module, log_text, self.id)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def mark_completed(self):
+        conn = get_conn()
+        try:
+            conn.execute(
+                "UPDATE pipeline_runs SET status='completed', progress=100, "
+                "finished_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'",
+                (self.id,)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def mark_failed(self, error_traceback):
+        conn = get_conn()
+        try:
+            conn.execute(
+                "UPDATE pipeline_runs SET status='failed', error_traceback=?, "
+                "finished_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('pending', 'running')",
+                (error_traceback, self.id)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def to_dict(self):
+        try:
+            modules = json.loads(self.modules_json) if self.modules_json else []
+        except (json.JSONDecodeError, ValueError):
+            modules = []
+        try:
+            params = json.loads(self.params_json) if self.params_json else {}
+        except (json.JSONDecodeError, ValueError):
+            params = {}
+        try:
+            task_ids = json.loads(self.task_ids_json) if self.task_ids_json else []
+        except (json.JSONDecodeError, ValueError):
+            task_ids = []
+        return {
+            'id': self.id, 'project_id': self.project_id, 'name': self.name,
+            'analysis_type': self.analysis_type, 'status': self.status,
+            'current_module': self.current_module, 'progress': self.progress,
+            'input_path': self.input_path, 'modules': modules, 'params': params,
+            'task_ids': task_ids, 'error_traceback': self.error_traceback,
+            'started_at': self.started_at, 'finished_at': self.finished_at
+        }
+
+    @classmethod
+    def get_by_id(cls, rid):
+        conn = get_conn()
+        try:
+            row = conn.execute("SELECT * FROM pipeline_runs WHERE id=?", (rid,)).fetchone()
+        finally:
+            conn.close()
+        if row:
+            return cls(**dict(row))
+        return None
+
+    @classmethod
+    def get_by_project(cls, project_id):
+        conn = get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM pipeline_runs WHERE project_id=? ORDER BY started_at DESC",
+                (project_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        return [cls(**dict(r)) for r in rows]

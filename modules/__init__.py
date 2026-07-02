@@ -19,6 +19,7 @@ from .bulk_enrichment import BulkEnrichmentAnalysis
 from .bulk_timecourse import BulkTimecourseAnalysis
 from .bulk_deg_integration import BulkDEGIntegrationAnalysis
 from .convert_10x import Convert10x
+from .schemas import SC_MODULE_NAMES, BULK_MODULE_NAMES
 
 MODULE_REGISTRY = {
     # 单细胞分析模块

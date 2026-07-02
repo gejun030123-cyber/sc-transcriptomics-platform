@@ -114,3 +114,60 @@ class TestResultFileModel:
         d = rf.to_dict()
         assert d['file_type'] == 'csv'
         assert d['file_path'] == '/tmp/test.csv'
+
+
+class TestPipelineRunModel:
+    """测试 PipelineRun 模型。"""
+
+    def test_default_values(self):
+        """默认值正确。"""
+        from models import PipelineRun
+        pr = PipelineRun(project_id='proj-1', name='测试流程')
+        assert pr.project_id == 'proj-1'
+        assert pr.name == '测试流程'
+        assert pr.status == 'pending'
+        assert pr.progress == 0
+        assert pr.analysis_type == ''
+        assert pr.modules_json == '[]'
+        assert pr.params_json == '{}'
+        assert pr.task_ids_json == '[]'
+
+    def test_to_dict_parses_json(self):
+        """to_dict 正确解析 JSON 字段。"""
+        import json
+        from models import PipelineRun
+        pr = PipelineRun(
+            project_id='proj-1',
+            name='测试流程',
+            analysis_type='sc',
+            modules_json=json.dumps(['qc', 'normalize', 'hvg']),
+            params_json=json.dumps({'qc': {'mito_perc': 0.2}}),
+            task_ids_json=json.dumps(['task-1', 'task-2'])
+        )
+        d = pr.to_dict()
+        assert d['modules'] == ['qc', 'normalize', 'hvg']
+        assert d['params'] == {'qc': {'mito_perc': 0.2}}
+        assert d['task_ids'] == ['task-1', 'task-2']
+        assert d['analysis_type'] == 'sc'
+
+    def test_to_dict_handles_invalid_json(self):
+        """to_dict 处理无效 JSON。"""
+        from models import PipelineRun
+        pr = PipelineRun(
+            project_id='proj-1',
+            name='测试流程',
+            modules_json='invalid',
+            params_json='invalid',
+            task_ids_json='invalid'
+        )
+        d = pr.to_dict()
+        assert d['modules'] == []
+        assert d['params'] == {}
+        assert d['task_ids'] == []
+
+    def test_auto_id(self):
+        """未指定 id 时自动生成。"""
+        from models import PipelineRun
+        pr = PipelineRun(project_id='proj-1', name='测试')
+        assert pr.id is not None
+        assert len(pr.id) == 12

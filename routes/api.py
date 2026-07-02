@@ -543,3 +543,149 @@ def delete_preset(preset_id):
         os.remove(fpath)
         return jsonify({'message': '预设已删除'})
     return jsonify({'error': '预设不存在'}), 404
+
+
+# ============ Pipeline Run API ============
+
+@api_bp.route('/projects/<pid>/pipeline-runs', methods=['POST'])
+def create_pipeline_run(pid):
+    """创建并启动 pipeline run。"""
+    from modules import MODULE_REGISTRY, SC_MODULE_NAMES, BULK_MODULE_NAMES, validate_pipeline_order
+    from models import PipelineRun
+    from worker import submit_pipeline_run
+
+    # 校验项目
+    p = Project.get_by_id(pid)
+    if not p:
+        return jsonify({'error': '项目不存在'}), 404
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': '请求体为空'}), 400
+
+    # 解析参数
+    name = data.get('name', '').strip()
+    analysis_type = data.get('analysis_type', '').strip()
+    modules = data.get('modules', [])
+    params = data.get('params', {})
+    input_path = data.get('input_path', '').strip()
+
+    # 校验必填字段
+    if not name:
+        return jsonify({'error': '缺少流程名称'}), 400
+    if not analysis_type:
+        return jsonify({'error': '缺少分析类型'}), 400
+    if not modules:
+        return jsonify({'error': '模块列表为空'}), 400
+    if not input_path:
+        return jsonify({'error': '缺少输入文件路径'}), 400
+
+    # 校验 analysis_type
+    if analysis_type not in ('sc', 'bulk'):
+        return jsonify({'error': 'analysis_type 必须是 sc 或 bulk'}), 400
+
+    # 校验模块类型
+    module_set = SC_MODULE_NAMES if analysis_type == 'sc' else BULK_MODULE_NAMES
+    for mod in modules:
+        if mod not in MODULE_REGISTRY:
+            return jsonify({'error': f'未知模块: {mod}'}), 400
+        if mod not in module_set:
+            return jsonify({'error': f'模块 {mod} 不属于 {analysis_type} 类型'}), 400
+
+    # 校验依赖顺序
+    is_valid, errors = validate_pipeline_order(modules)
+    if not is_valid:
+        return jsonify({'error': '模块顺序不满足依赖约束', 'details': errors}), 400
+
+    # 校验输入文件路径
+    abs_input = os.path.abspath(input_path)
+    project_dir = os.path.abspath(Config.project_dir(pid))
+    if not abs_input.startswith(project_dir + os.sep):
+        return jsonify({'error': '输入文件不在项目目录内'}), 400
+    if os.path.islink(abs_input):
+        return jsonify({'error': '输入文件不能是符号链接'}), 400
+    if not os.path.isfile(abs_input):
+        return jsonify({'error': '输入文件不存在'}), 400
+
+    # 构建参数（从 schema 默认值 + 请求参数合并）
+    from modules.schemas import PARAM_SCHEMAS
+    params_by_module = {}
+    for mod in modules:
+        # 从 schema 获取默认值
+        schema = PARAM_SCHEMAS.get(mod, [])
+        default_params = {}
+        for field in schema:
+            key = field['key']
+            default = field.get('default')
+            if field.get('type') == 'select' and 'options' in field:
+                opts = field['options']
+                if default not in opts and opts:
+                    default = opts[0]
+            default_params[key] = default
+        # 合并请求参数（新形态：按模块名分组）
+        if mod in params:
+            module_params = params[mod]
+            if isinstance(module_params, dict):
+                default_params.update(module_params)
+        # 兼容旧形态：扁平参数应用到所有匹配的模块
+        for key, val in params.items():
+            if key not in ('qc', 'normalize', 'hvg', 'dimred', 'batch_correct',
+                          'clustering', 'qc_reassess', 'annotation', 'deg',
+                          'trajectory', 'proportion', 'cell_communication',
+                          'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca',
+                          'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
+                          'bulk_deg_integration', 'convert_10x'):
+                if isinstance(val, (str, int, float, bool)):
+                    # 检查该模块的 schema 是否有这个 key
+                    schema_keys = {f['key'] for f in PARAM_SCHEMAS.get(mod, [])}
+                    if key in schema_keys and key not in default_params:
+                        default_params[key] = val
+        params_by_module[mod] = default_params
+
+    # 创建 PipelineRun
+    pipeline_run = PipelineRun(
+        project_id=pid,
+        name=name,
+        analysis_type=analysis_type,
+        input_path=input_path,
+        modules_json=json.dumps(modules),
+        params_json=json.dumps(params_by_module, ensure_ascii=False)
+    )
+    pipeline_run.save()
+
+    # 提交到线程池
+    submit_pipeline_run(
+        run_id=pipeline_run.id,
+        project_id=pid,
+        modules=modules,
+        params_by_module=params_by_module,
+        project_dir=project_dir,
+        input_path=abs_input
+    )
+
+    return jsonify({'id': pipeline_run.id, 'message': '流程已启动'}), 201
+
+
+@api_bp.route('/projects/<pid>/pipeline-runs')
+def list_pipeline_runs(pid):
+    """列出项目的所有 pipeline runs。"""
+    from models import PipelineRun
+
+    p = Project.get_by_id(pid)
+    if not p:
+        return jsonify({'error': '项目不存在'}), 404
+
+    runs = PipelineRun.get_by_project(pid)
+    return jsonify([r.to_dict() for r in runs])
+
+
+@api_bp.route('/pipeline-runs/<run_id>/status')
+def pipeline_run_status(run_id):
+    """查询 pipeline run 状态。"""
+    from models import PipelineRun
+
+    run = PipelineRun.get_by_id(run_id)
+    if not run:
+        return jsonify({'error': 'Pipeline run 不存在'}), 404
+
+    return jsonify(run.to_dict())

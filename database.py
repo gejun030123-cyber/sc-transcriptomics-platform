@@ -53,10 +53,30 @@ def init_db():
             FOREIGN KEY (task_id) REFERENCES analysis_tasks(id),
             FOREIGN KEY (project_id) REFERENCES projects(id)
         );
+
+        CREATE TABLE IF NOT EXISTS pipeline_runs (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            analysis_type TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            current_module TEXT DEFAULT '',
+            progress INTEGER DEFAULT 0,
+            input_path TEXT DEFAULT '',
+            modules_json TEXT DEFAULT '[]',
+            params_json TEXT DEFAULT '{}',
+            task_ids_json TEXT DEFAULT '[]',
+            error_traceback TEXT,
+            started_at DATETIME,
+            finished_at DATETIME,
+            log_text TEXT DEFAULT '',
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_project ON analysis_tasks(project_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON analysis_tasks(status)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_result_files_task ON result_files(task_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_result_files_project ON result_files(project_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_runs_project ON pipeline_runs(project_id)")
     db.commit()
     db.close()
