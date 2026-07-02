@@ -295,6 +295,7 @@ def main():
         elif step_name == 'bulk_heatmap':
             params['groupby'] = args.groupby
             params['gene_import_source'] = args.heatmap_source
+            params['heatmap_type'] = args.heatmap_source
 
         elif step_name == 'bulk_enrichment':
             params['organism'] = args.organism
