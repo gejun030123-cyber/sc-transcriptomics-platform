@@ -151,7 +151,75 @@
 
 **图例**: ✅ 已覆盖 | ⏭️ 需环境变量/依赖 | — 未覆盖
 
+## Bulk Reference Runner
+
+**脚本**: `scripts/run_bulk_reference.py`
+**创建日期**: 2026-06-30
+**用途**: 用指定参考表达矩阵跑通完整 Bulk RNA-seq 流水线，无需启动 Flask 服务或数据库
+
+### 执行流水线
+
+```
+bulk_qc → bulk_normalize → bulk_pca → bulk_deg → bulk_heatmap
+                                                  ├→ bulk_enrichment
+                                                  ├→ bulk_timecourse    (--time-column)
+                                                  └→ bulk_deg_integration (--comparisons 多组)
+```
+
+### 设计要点
+
+- **复用模块契约**: 实例化 MODULE_REGISTRY 中的 BaseAnalysis 子类，调用 `.run(input_path)`
+- **参数构建**: 从 PARAM_SCHEMAS 读取默认值，CLI 参数覆盖
+- **链式传递**: 每步 `result['output_adata']` 作为下一步输入
+- **错误处理**: 核心步骤失败停止，可选步骤失败跳过继续
+- **输出报告**: `bulk_reference_report.json` 记录每步 status/summary/result_files
+
+### CLI 参数
+
+| 参数 | 必需 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--input` | ✅ | — | 输入表达矩阵（CSV/TSV/h5ad/xls） |
+| `--dataset-label` | ❌ | — | 数据集标签（如 dataset_a） |
+| `--project-name` | ❌ | bulk_reference_run | 项目目录名 |
+| `--groupby` | ❌ | `_auto_group` | 分组列名 |
+| `--group1` / `--group2` | ❌ | — | 单组比较 |
+| `--comparisons` | ❌ | 自动推断 | 多组比较，如 `A-vs-B;C-vs-D` |
+| `--time-column` | ❌ | — | 有则跑 bulk_timecourse |
+| `--output-dir` | ❌ | ./bulk_reference_output | 输出根目录 |
+| `--method` | ❌ | t-test | DEG 统计方法 |
+| `--normalize-method` | ❌ | deseq2 | 归一化方法 |
+| `--organism` | ❌ | Human | 物种 |
+| `--run-optional` | ❌ | False | 运行可选步骤（enrichment/timecourse/deg_integration） |
+| `--heatmap-source` | ❌ | top_var | 热图基因来源（top_var 或 deg） |
+
+**自动推断比较**: 未传 `--comparisons` 时根据输入文件名自动设置：
+- `all.fpkm_anno.xls` → `hmc3-vs-ctrl;moclel-vs-ctrl;rapa-vs-ctrl`
+- `all.genes.expression.anno.xls` → `NH4Cl-vs-Ctr;PEA-vs-Ctr;TMAO-vs-Ctr`
+
 ## 运行历史
+
+### 迭代 17 (2026-07-02)
+- **目标**: 可选模块验收 + deg_integration 修复 + DEG 热图验收
+- **修复**: `bulk_deg_integration.selected_comparisons` 改为留空（模块自动使用所有 DEG CSV）
+- **新增参数**: `--heatmap-source`（top_var/deg）
+- **Dataset A (--run-optional)**: 7/7 模块全部 completed，deg_integration 解析 3 个比较
+- **Dataset A (--heatmap-source deg)**: DEG 热图验收通过
+- **环境**: 安装 omicverse 2.2.3, pydeseq2 0.5.4
+
+### 迭代 16 (2026-07-02)
+- **目标**: 核心双文件跑通验收
+- **修复**: 5 个阻塞问题（--dataset-label, --run-optional, 自动推断比较, selected_comparisons 类型, enrichment input_source）
+- **Dataset A**: 5/5 核心模块 completed，3 比较完成
+- **Dataset B**: 5/5 核心模块 completed，3 比较完成
+- **环境**: 安装 plotly 6.8.0, omicverse 2.2.3, pydeseq2 0.5.4
+
+### 迭代 15 (2026-06-30)
+- **目标**: 实现 Bulk Reference Runner 脚本
+- **新增文件**: `scripts/run_bulk_reference.py`（CLI 脚本，跑通完整 Bulk 流水线）
+- **设计**: 直接模块调用（MODULE_REGISTRY → BaseAnalysis.run），不依赖 Flask/DB
+- **功能**: 支持 --input/--groupby/--group1/--group2/--comparisons/--time-column 等参数
+- **输出**: bulk_reference_report.json（每步 status/summary/result_files/output_adata_path）
+- **测试**: 运行 bulk 相关测试验证模块完整性
 
 ### 迭代 14 (2026-06-29)
 - **目标**: 21/21 模块集成测试 + 运行时语义全覆盖
