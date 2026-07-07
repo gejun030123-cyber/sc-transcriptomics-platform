@@ -54,6 +54,8 @@ PARAM_SCHEMAS = {
         {'key': 'batch_adaptive_qc', 'label': '批次自适应 QC', 'type': 'checkbox', 'default': False, 'help': '按批次独立计算 MAD 阈值过滤，适用于批次间质量差异大的数据。'},
         {'key': 'mad_multiplier', 'label': 'MAD 倍数', 'type': 'number', 'default': 3.0, 'step': 0.5, 'help': '批次自适应 QC 的 MAD 倍数。越大越宽松。默认 3.0（约对应 3σ）。'},
         {'key': 'save_counts_layer', 'label': '保存原始 counts 层', 'type': 'checkbox', 'default': True, 'help': '在 QC 过滤前将原始表达矩阵保存到 adata.layers["counts"]，供下游标准化使用。'},
+        {'key': 'show_qc_filter_summary', 'label': '生成过滤前后 QC 对比图', 'type': 'checkbox', 'default': True, 'help': '输出 QC 过滤前后细胞数、基因数和核心 QC 指标的对比图，用于检查过滤强度是否合理。'},
+        {'key': 'show_doublet_histogram', 'label': '生成 Doublet score 直方图', 'type': 'checkbox', 'default': True, 'help': '输出 Scrublet doublet score 分布图，用于判断双细胞阈值和残留双细胞风险。'},
     ],
     'normalize': [
         {'key': 'method', 'label': '标准化方法', 'type': 'select', 'options': ['log1p', 'pearson_residuals'], 'default': 'log1p', 'help': 'log1p：标准 log1p CPM（shiftlog），适合大多数分析。pearson_residuals：Pearson 残差标准化，对技术噪声更鲁棒。'},
@@ -107,6 +109,9 @@ PARAM_SCHEMAS = {
         {'key': 'use_corrected', 'label': '使用校正后表示', 'type': 'checkbox', 'default': True, 'help': '优先使用批次校正后的嵌入（如有）。'},
         {'key': 'auto_select_resolution', 'label': '自动选择最优分辨率', 'type': 'checkbox', 'default': False, 'help': '使用聚类质量指标自动选择最优分辨率。'},
         {'key': 'resolution_metric', 'label': '评估指标', 'type': 'select', 'options': ['silhouette', 'calinski', 'davies_bouldin'], 'default': 'silhouette', 'help': '自动选择分辨率时的质量评估指标。'},
+        {'key': 'primary_resolution', 'label': '主分辨率（可选）', 'type': 'text', 'default': '', 'help': '指定最终写入 leiden 的主分辨率，例如 0.8。留空则使用首个分辨率或自动选择结果。'},
+        {'key': 'show_labeled_umap', 'label': '生成带标签 Cluster UMAP', 'type': 'checkbox', 'default': True, 'help': '在主分辨率 UMAP 上显示 cluster 编号，便于人工复核分群是否符合预期。'},
+        {'key': 'show_resolution_sankey', 'label': '生成分辨率流向图', 'type': 'checkbox', 'default': True, 'help': '用 Sankey 图展示不同 Leiden 分辨率之间的簇拆分关系，辅助选择合适分辨率。'},
     ],
     'qc_reassess': [
         {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于评估的聚类列名。'},
@@ -115,12 +120,13 @@ PARAM_SCHEMAS = {
         {'key': 'ribosomal_threshold', 'label': '核糖体比例阈值（0 = 不检查）', 'type': 'number', 'default': 0, 'step': 1.0, 'help': '平均核糖体比例高于此值的簇标记为低质量。0 表示不检查。'},
         {'key': 'min_cells_per_cluster', 'label': '最小细胞数', 'type': 'number', 'default': 10, 'help': '细胞数低于此值的簇标记为低质量。'},
         {'key': 'auto_remove', 'label': '自动移除低质量簇', 'type': 'checkbox', 'default': False, 'help': '自动从数据中移除标记为低质量的簇。'},
+        {'key': 'show_qc_umap_panel', 'label': '生成 QC 指标 UMAP 面板', 'type': 'checkbox', 'default': True, 'help': '把 MT%、检测基因数、总 counts 和 doublet score 映射到 UMAP，用于定位低质量区域或疑似污染簇。'},
     ],
     'annotation': [
         {'key': 'method', 'label': '注释方法', 'type': 'select', 'options': ['auto_marker', 'manual', 'celltypist'], 'default': 'auto_marker', 'help': 'auto_marker：使用 marker 基因自动打分。manual：手动指定 ClusterID:CellType 映射。celltypist：使用 CellTypist 预训练模型。'},
         {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于分组的聚类列名。'},
         {'key': 'resolution', 'label': 'Leiden 分辨率', 'type': 'text', 'default': '0.8', 'help': '对应的 Leiden 分辨率，用于定位正确的聚类列。'},
-        {'key': 'marker_set', 'label': 'Marker 基因集', 'type': 'select', 'options': ['TME', 'Immune', 'Blood'], 'default': 'TME', 'help': '内置 marker 基因集。'},
+        {'key': 'marker_set', 'label': 'Marker 基因集', 'type': 'select', 'options': ['TME', 'Immune', 'Blood', 'PBMC'], 'default': 'TME', 'help': '内置 marker 基因集。PBMC 适合经典外周血单细胞教程数据。'},
         {'key': 'custom_markers', 'label': '自定义 Marker（可选）', 'type': 'textarea', 'default': '', 'help': 'auto_marker 模式：CellType:GENE1,GENE2 格式。manual 模式：ClusterID:CellType 格式。'},
         {'key': 'celltypist_model', 'label': 'CellTypist 模型', 'type': 'select', 'options': ['Immune_All_Low', 'Immune_All_High', 'Adult_COVID19_PBMC', 'Adult_Human_Pancreas'], 'default': 'Immune_All_Low', 'help': 'CellTypist 预训练模型。仅 celltypist 方法生效。'},
         {'key': 'celltypist_threshold', 'label': 'CellTypist 概率阈值', 'type': 'number', 'default': 0.5, 'step': 0.05, 'help': 'CellTypist 预测概率阈值。低于此值标为 Unknown。'},
@@ -128,6 +134,8 @@ PARAM_SCHEMAS = {
         {'key': 'confidence_method', 'label': '置信度方法', 'type': 'select', 'options': ['none', 'entropy', 'score_margin'], 'default': 'none', 'help': '注释置信度评估方法。entropy：基于评分熵。score_margin：基于最高分与次高分差距。'},
         {'key': 'mark_unknown', 'label': '低置信度标 Unknown', 'type': 'checkbox', 'default': True, 'help': '将低置信度的注释标记为 Unknown。'},
         {'key': 'merge_similar_threshold', 'label': '相似簇合并阈值（0 = 不合并）', 'type': 'number', 'default': 0, 'step': 0.05, 'help': '相似度高于此值的相邻簇合并为同一细胞类型。0 表示不合并。'},
+        {'key': 'show_marker_expression_violin', 'label': '生成 Marker 表达验证图', 'type': 'checkbox', 'default': True, 'help': '按注释细胞类型展示核心 marker 表达分布，用于人工确认注释是否符合生物学预期。'},
+        {'key': 'show_annotation_score_umap', 'label': '生成注释置信度 UMAP', 'type': 'checkbox', 'default': True, 'help': '把 annotation confidence 或 score margin 映射到 UMAP，用于定位低置信度区域和可能需要重分群的细胞。'},
     ],
     'deg': [
         {'key': 'groupby', 'label': '分组依据', 'type': 'text', 'default': '', 'help': '差异分析的分组依据列名。留空则自动使用 leiden。'},
@@ -143,6 +151,8 @@ PARAM_SCHEMAS = {
         {'key': 'correction_method', 'label': '多重检验校正', 'type': 'select', 'options': ['benjamini_hochberg', 'bonferroni', 'BY'], 'default': 'benjamini_hochberg', 'help': '多重检验校正方法。'},
         {'key': 'volcano_top_n', 'label': '火山图标注基因数', 'type': 'number', 'default': 10, 'help': '火山图上自动标注的 Top N 基因数。'},
         {'key': 'volcano_genes', 'label': '火山图自定义标注基因', 'type': 'textarea', 'default': '', 'help': '火山图上自定义标注的基因名。'},
+        {'key': 'show_marker_heatmap', 'label': '生成 Cluster marker 热图', 'type': 'checkbox', 'default': True, 'help': '展示每个簇 Top marker 在各簇中的平均表达 z-score，便于检查分群和注释一致性。'},
+        {'key': 'marker_heatmap_top_n', 'label': '热图每簇 Top marker 数', 'type': 'number', 'default': 3, 'help': '每个簇纳入 marker 热图的 Top 基因数量。数值越大热图越全面但也越拥挤。'},
     ],
     'trajectory': [
         {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于轨迹推断和可视化的聚类列名。'},

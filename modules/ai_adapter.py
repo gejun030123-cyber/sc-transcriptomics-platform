@@ -65,6 +65,189 @@ TOOLS_ANTHROPIC = [
             },
             "required": []
         }
+    },
+    {
+        "name": "inspect_analysis_state",
+        "description": "[只读] 检查项目当前分析状态：最新 h5ad、已完成任务、可用聚类键、可用嵌入、细胞数等。用于了解分析进展。",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "inspect_adata",
+        "description": "[只读] 检查指定 AnnData 文件的详细结构：obs/var 列、嵌入键、聚类键、数据维度。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "adata_path": {
+                    "type": "string",
+                    "description": "h5ad 文件路径。留空则自动查找最新文件。"
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_cluster_summary",
+        "description": "[只读] 获取指定聚类键的每个 cluster 概况：细胞数、UMAP中心、batch分布、QC均值。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "adata_path": {
+                    "type": "string",
+                    "description": "h5ad 文件路径"
+                },
+                "cluster_key": {
+                    "type": "string",
+                    "description": "聚类键，如 leiden, louvain。默认 leiden。"
+                }
+            },
+            "required": ["adata_path"]
+        }
+    },
+    {
+        "name": "score_cell_type_signature",
+        "description": "[只读] 基于 marker 基因对每个 cluster 进行细胞类型签名评分。返回最佳 cluster 及置信度。用于寻找最接近特定细胞类型的分群。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "adata_path": {
+                    "type": "string",
+                    "description": "h5ad 文件路径。留空则自动查找最新。"
+                },
+                "cluster_key": {
+                    "type": "string",
+                    "description": "聚类键，默认 leiden"
+                },
+                "target_cell_type": {
+                    "type": "string",
+                    "description": "目标细胞类型：microglia, t_cell, b_cell, nk, monocyte, macrophage, dendritic_cell, epithelial, endothelial, fibroblast, astrocyte, oligodendrocyte"
+                },
+                "positive_markers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "用户自定义 positive marker 基因（优先于内置库）"
+                },
+                "negative_markers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "用户自定义 negative marker 基因（优先于内置库）"
+                }
+            },
+            "required": ["target_cell_type"]
+        }
+    },
+    {
+        "name": "list_builtin_markers",
+        "description": "[只读] 列出所有内置细胞类型及其 marker 基因定义。",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "propose_parameter_sweep",
+        "description": "[需确认] 为优化特定细胞类型分群生成参数搜索候选列表。基于当前分析状态智能选择参数空间。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "goal_type": {
+                    "type": "string",
+                    "description": "目标类型，如 target_cluster_refinement",
+                    "default": "target_cluster_refinement"
+                },
+                "target_cell_type": {
+                    "type": "string",
+                    "description": "目标细胞类型，如 microglia"
+                },
+                "max_candidates": {
+                    "type": "integer",
+                    "description": "最大候选数，默认6，上限12"
+                }
+            },
+            "required": ["target_cell_type"]
+        }
+    },
+    {
+        "name": "run_parameter_sweep",
+        "description": "[需确认] 执行参数搜索：创建候选分支、运行聚类、自动评分。需要 goal_id 和候选列表。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "goal_id": {
+                    "type": "string",
+                    "description": "目标 ID（来自 start_goal_agent 的返回值）"
+                },
+                "base_checkpoint": {
+                    "type": "string",
+                    "description": "基础 h5ad 路径（所有候选的起点）"
+                },
+                "candidates": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "候选参数列表（来自 propose_parameter_sweep）"
+                }
+            },
+            "required": ["goal_id", "base_checkpoint", "candidates"]
+        }
+    },
+    {
+        "name": "start_goal_agent",
+        "description": "[需确认] 启动目标驱动的分析 Agent 会话。自动检查当前分群状态、评分、决定是否需要参数搜索。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "target_cell_type": {
+                    "type": "string",
+                    "description": "目标细胞类型：microglia, t_cell, b_cell, nk, monocyte, macrophage, dendritic_cell, epithelial, endothelial, fibroblast, astrocyte, oligodendrocyte"
+                },
+                "goal_type": {
+                    "type": "string",
+                    "description": "目标类型，默认 target_cluster_refinement",
+                    "default": "target_cluster_refinement"
+                },
+                "positive_markers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "用户自定义 positive marker 基因"
+                },
+                "negative_markers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "用户自定义 negative marker 基因"
+                },
+                "user_requirement": {
+                    "type": "string",
+                    "description": "用户自然语言需求（如'找到最接近小胶质细胞的分群'）"
+                },
+                "max_candidate_runs": {
+                    "type": "integer",
+                    "description": "最大候选运行数，默认6"
+                }
+            },
+            "required": ["target_cell_type"]
+        }
+    },
+    {
+        "name": "continue_goal_agent",
+        "description": "[需确认] 继续目标分析会话。支持指令：采用候选X、继续细分、不满意/更高resolution、停止。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "会话 ID"
+                },
+                "instruction": {
+                    "type": "string",
+                    "description": "用户指令：采用候选X / 继续细分 / 不满意，试试更高resolution / 停止 / 必须包含某基因 / 不用某方法"
+                }
+            },
+            "required": ["session_id", "instruction"]
+        }
     }
 ]
 
@@ -74,9 +257,16 @@ TOOLS_OPENAI = [
 ]
 
 # 自动执行的只读工具（无需用户确认）
-AUTO_EXEC_TOOLS = {'get_project_status', 'get_task_results', 'list_modules'}
+AUTO_EXEC_TOOLS = {
+    'get_project_status', 'get_task_results', 'list_modules',
+    'inspect_analysis_state', 'inspect_adata', 'get_cluster_summary',
+    'score_cell_type_signature', 'list_builtin_markers',
+}
 # 需要用户确认的工具
-CONFIRM_TOOLS = {'run_analysis'}
+CONFIRM_TOOLS = {'run_analysis', 'propose_parameter_sweep', 'run_parameter_sweep',
+                 'start_goal_agent', 'continue_goal_agent'}
+# 注：accept_branch 仅通过前端 Branch API 调用（POST /api/branches/<id>/accept），
+# 不作为 AI 工具暴露，确保用户在前端显式操作采纳。
 
 
 # System prompt
@@ -87,23 +277,29 @@ SYSTEM_PROMPT = """你是一个生信分析助手，帮助用户进行 RNA-seq �
 2. **结果解读**：用户问"哪些基因在所有药物中共同上调？"，你调用 get_task_results 查看结果并解读
 3. **参数建议**：用户问"用哪个方法好？"，你根据数据情况给出建议
 4. **项目概览**：用户问"现在分析到哪一步了？"，你调用 get_project_status 了解情况
+5. **分析状态检查**：使用 inspect_analysis_state 查看当前聚类/嵌入/注释信息
+6. **细胞类型打分**：使用 score_cell_type_signature 对已有分群进行 marker 评分
+7. **目标优化 Agent**：用户指定细胞类型，你使用 start_goal_agent 自动检查、生成候选参数、评分并推荐最佳分群
 
-## 可用模块
-- bulk_qc: 数据质控
-- bulk_normalize: 数据标准化 (DESeq2/TMM/CPM/VST/rlog)
-- bulk_deg: 差异表达分析 (t-test/mann-whitney/deseq2/edger/limma)
-- bulk_pca: PCA/UMAP 降维
-- bulk_heatmap: 热图可视化
-- bulk_enrichment: 通路富集 (GO/KEGG/WikiPathways)
-- bulk_timecourse: 时序分析
-- bulk_deg_integration: 多组差异整合
+## 目标优化 Agent 使用流程
+当用户表示对分群不满意或想找特定细胞类型时：
+1. 调用 start_goal_agent(target_cell_type="microglia", user_requirement="用户原话")
+2. 如果返回 needs_confirmation，解释当前评分和建议的候选参数，请用户确认
+3. 用户确认后，调用 run_parameter_sweep 执行搜索
+4. 展示结果：最佳候选、评分、推荐 cluster
+5. 用户选择采纳 branch 或继续调整
+
+## 可用模块（完整列表）
+单细胞：qc, normalize, hvg, dimred, batch_correct, clustering, qc_reassess, annotation, deg, trajectory, proportion, cell_communication
+Bulk：bulk_qc, bulk_normalize, bulk_deg, bulk_pca, bulk_heatmap, bulk_enrichment, bulk_timecourse, bulk_deg_integration
 
 ## 回复规则
 - 用中文回复
 - 简洁明了，不啰嗦
-- 执行分析时，先确认参数再执行（如"我将用 DESeq2 方法对 hmc3 vs ctrl 进行差异分析，FC 阈值 2.0，padj 阈值 0.05，确认执行吗？"）
+- 执行分析/参数搜索等写操作时，先确认参数再执行
 - 分析完成后，简要总结关键结果
-- 如果用户要求不明确，主动询问关键参数"""
+- 如果用户要求不明确，主动询问关键参数
+- 对需要确认的工具调用，明确告知用户需要批准才能执行"""
 
 
 def _is_anthropic():

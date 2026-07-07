@@ -72,3 +72,30 @@ class Config:
     def plots_dir(cls, pid):
         cls._validate_pid(pid)
         return os.path.join(cls.DATA_DIR, 'projects', pid, 'plots')
+
+    @classmethod
+    def branches_dir(cls, pid):
+        """候选分支输出目录，隔离于主线 intermediate/."""
+        cls._validate_pid(pid)
+        return os.path.join(cls.DATA_DIR, 'projects', pid, 'branches')
+
+    @classmethod
+    def branch_dir(cls, pid, branch_id):
+        """单个候选分支目录."""
+        cls._validate_pid(pid)
+        return os.path.join(cls.DATA_DIR, 'projects', pid, 'branches', branch_id)
+
+    @classmethod
+    def _validate_path(cls, path, pid):
+        """验证路径在项目目录内，拒绝符号链接。返回 (is_valid: bool, error: str|None)."""
+        cls._validate_pid(pid)
+        proj_dir = os.path.realpath(cls.project_dir(pid))
+        try:
+            real_path = os.path.realpath(path)
+        except (OSError, ValueError) as e:
+            return False, f"路径解析失败: {e}"
+        if os.path.islink(path):
+            return False, "不支持符号链接文件"
+        if not real_path.startswith(proj_dir + os.sep) and real_path != proj_dir:
+            return False, f"路径不在项目目录内: {path}"
+        return True, None

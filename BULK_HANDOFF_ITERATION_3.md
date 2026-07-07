@@ -11,11 +11,13 @@
 
 ## 最新审查结论
 
-最新结论: **通过 - Bulk 核心双文件流程已验收完成**。
+最新结论: **通过 - Bulk 核心双文件流程、Dataset A 可选模块与 DEG 热图报告一致性均已验收完成**。
 
 已确认:
 - Dataset A 核心流程完成: `bulk_qc -> bulk_normalize -> bulk_pca -> bulk_deg -> bulk_heatmap`
 - Dataset B 核心流程完成: `bulk_qc -> bulk_normalize -> bulk_pca -> bulk_deg -> bulk_heatmap`
+- Dataset A 可选流程完成: `bulk_deg_integration -> bulk_enrichment`
+- Dataset A `--heatmap-source deg` 实际输出为差异基因热图，且 `bulk_heatmap.summary.heatmap_type` 已为 `deg`
 - 两个 `bulk_reference_report.json` 均存在并可解析
 - 两个 `中文运行报告.md` 均存在
 - 核心输出 `.h5ad` 均存在并可读取
@@ -28,7 +30,7 @@
 - `bulk_reference_output/bulk_dataset_b/bulk_reference_report.json`
 - `bulk_reference_output/bulk_dataset_b/中文运行报告.md`
 
-说明: 下方“当前结论/阻塞问题”是 Iteration 3 的历史审查上下文，不是最新状态。最终审查结果见文档末尾 `Codex Review - Iteration 4 Final`。
+说明: 下方“当前结论/阻塞问题”是 Iteration 3 的历史审查上下文，不是最新状态。最终审查结果见文档末尾 `Codex Review - Iteration 7`。Iteration 7 已关闭上一轮的非阻塞报告字段一致性清理项。
 
 ## 后续协作规则
 
@@ -539,3 +541,130 @@ Dataset B 核心结果:
   - `bulk_reference_output/bulk_dataset_a/中文运行报告.md`
 - 已知问题: `matplotlib_venn` 未安装，Venn 图跳过（非阻塞）
 - 请求 Codex 审查: 是，请审查最终验收
+
+## Codex Review - Iteration 6
+
+审查结论: **通过 - 最终验收完成；仅剩一个非阻塞报告字段一致性清理项**。
+
+Codex 已复跑和核对:
+
+```bash
+python -m py_compile scripts/run_bulk_reference.py
+python -m pytest tests/test_bulk_deg.py tests/test_bulk_qc_helpers.py tests/test_p3_modules.py tests/test_pipeline.py tests/test_schemas.py -q
+```
+
+测试结果:
+
+```text
+93 passed, 1 warning
+```
+
+产物验证:
+- `bulk_reference_output/bulk_dataset_a/bulk_reference_report.json` 可解析，整体状态为 `completed`
+- Dataset A 本轮 7 个模块均为 `completed`: `bulk_qc`, `bulk_normalize`, `bulk_pca`, `bulk_deg`, `bulk_heatmap`, `bulk_deg_integration`, `bulk_enrichment`
+- `bulk_deg_integration` 已解析 3 个比较结果，输出 `deg_integration_consistency.csv` 和 `deg_integration_comparison_counts.csv`
+- `deg_integration_consistency.csv` 非空，形状为 `(10, 4)`
+- `deg_integration_comparison_counts.csv` 非空，形状为 `(3, 4)`
+- `bulk_enrichment` ORA 完成，`enrichment_ora_results.csv` 非空，形状为 `(21, 12)`
+- `deg_integration_upset.json`, `enrichment_ora_bar.json`, `bulk_heatmap.json` 均可作为 Plotly JSON 解析
+- DEG 热图实际输出标题和注册 label 为 `Top 50 差异基因热图 (both)`
+
+发现的问题:
+
+1. 非阻塞: `bulk_heatmap` 报告 summary 仍显示 `heatmap_type: top_var`。
+
+   复核结果显示，实际热图文件和中文 label 已经是 DEG 热图，但 JSON 报告的 summary 内仍为:
+
+   ```json
+   {
+     "heatmap_type": "top_var",
+     "n_genes_shown": 50,
+     "n_samples": 12,
+     "groupby": "_auto_group"
+   }
+   ```
+
+   原因判断: runner 设置的是 `gene_import_source=args.heatmap_source`，而 `modules/bulk_heatmap.py` 的 summary 使用 `heatmap_type` 参数默认值。建议下一轮只做小修: 当 `--heatmap-source deg` 时，同步设置 `heatmap_type=deg`，或在模块 summary 中明确输出 `gene_import_source`。
+
+下一轮要求:
+- 不需要重新跑完整双文件核心验收。
+- 若继续清理，请只修复 `bulk_heatmap` summary 字段与中文报告展示的一致性，然后重跑 Dataset A:
+
+```bash
+env NUMBA_CACHE_DIR=/tmp/numba_cache MPLCONFIGDIR=/tmp/mplconfig \
+python scripts/run_bulk_reference.py \
+  --input /home/oelab/data/GJ/all.fpkm_anno.xls \
+  --dataset-label dataset_a \
+  --project-name bulk_dataset_a \
+  --groupby _auto_group \
+  --heatmap-source deg \
+  --run-optional
+```
+
+验收标准:
+- `bulk_reference_report.json` 中 `bulk_heatmap.summary.heatmap_type` 或等价字段能准确表达 DEG 来源
+- `bulk_heatmap.json` 仍可解析
+- targeted tests 仍为通过
+
+## Implementer Reply - Iteration 7
+
+- 已读取要求: 是
+- 修改内容: `bulk_heatmap` summary 同步 `heatmap_type` 与 `gene_import_source`
+- 执行命令:
+  ```bash
+  env NUMBA_CACHE_DIR=/tmp/numba_cache MPLCONFIGDIR=/tmp/mplconfig \
+  python scripts/run_bulk_reference.py \
+    --input /home/oelab/data/GJ/all.fpkm_anno.xls \
+    --dataset-label dataset_a \
+    --project-name bulk_dataset_a \
+    --groupby _auto_group \
+    --heatmap-source deg \
+    --run-optional
+  ```
+- 结果: ✅ 7/7 模块全部 completed
+  - `bulk_heatmap.summary.heatmap_type`: `deg`（修复前为 `top_var`）
+  - `bulk_heatmap.json` 可解析
+  - targeted tests 93 passed
+- 已知问题: 无
+- Git commit: `a00df38` — fix: bulk_heatmap summary同步heatmap_type与gene_import_source
+- 请求 Codex 审查: 是，请确认最终清理项通过
+
+## Codex Review - Iteration 7
+
+审查结论: **通过 - 最终清理项已关闭**。
+
+Codex 已复跑和核对:
+
+```bash
+python -m py_compile scripts/run_bulk_reference.py modules/bulk_heatmap.py
+python -m pytest tests/test_bulk_deg.py tests/test_bulk_qc_helpers.py tests/test_p3_modules.py tests/test_pipeline.py tests/test_schemas.py -q
+```
+
+测试结果:
+
+```text
+93 passed, 1 warning
+```
+
+代码审查:
+- `a00df38` 只修改 `scripts/run_bulk_reference.py`
+- 当前 runner 在 `bulk_heatmap` 步骤中同时设置:
+
+```python
+params['gene_import_source'] = args.heatmap_source
+params['heatmap_type'] = args.heatmap_source
+```
+
+产物验证:
+- `bulk_reference_output/bulk_dataset_a/bulk_reference_report.json` 可解析
+- 整体状态为 `completed`
+- Dataset A 本轮 7 个模块均为 `completed`
+- `bulk_heatmap.summary.heatmap_type` 已从上一轮的 `top_var` 修正为 `deg`
+- 注册的 Plotly 文件位于 `bulk_reference_output/bulk_dataset_a/plots/`
+- `bulk_heatmap.json`, `bulk_heatmap_annotation__auto_group.json`, `bulk_corr_heatmap.json` 均可解析
+- 主热图标题为 `Top 50 差异基因热图 (both)`
+
+结论:
+- 上一轮唯一遗留问题已解决
+- 不需要继续重跑完整双文件核心验收
+- 当前 Bulk RNA reference runner 可作为本阶段通过版本

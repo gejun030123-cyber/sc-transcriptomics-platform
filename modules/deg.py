@@ -152,8 +152,8 @@ class DEGAnalysis(BaseAnalysis):
                     with open(fpath, 'w') as f:
                         json.dump({'data': [{'type': 'image', 'source': f'data:image/png;base64,{img_b64}', 'xref': 'paper', 'yref': 'paper', 'x': 0, 'y': 1, 'sizex': 1, 'sizey': 1, 'sizing': 'stretch'}], 'layout': {'width': 900, 'height': 500, 'title': 'DEG Dotplot'}}, f)
                     result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'dotplot', 'label': dotplot_label})
-            except Exception:
-                pass
+            except Exception as e:
+                self.progress(-1, f"DEG dotplot generation failed: {e}")
 
         # Gene expression UMAP
         plot_genes_umap = self.params.get('plot_genes_umap', '').strip()
@@ -176,6 +176,57 @@ class DEGAnalysis(BaseAnalysis):
             full_csv = os.path.join(results_dir, 'sc_deg_full_results.csv')
             all_deg_df.to_csv(full_csv, index=False)
             result_files.append({'file_path': full_csv, 'file_type': 'csv', 'category': 'table', 'label': '完整 DEG 结果'})
+
+        # Cluster marker heatmap
+        if self.params.get('show_marker_heatmap', True) and not deg_df.empty:
+            try:
+                heatmap_top_n = int(self.params.get('marker_heatmap_top_n', 3))
+                heatmap_genes = []
+                for g in groups:
+                    cluster_genes = deg_df.loc[deg_df['cluster'] == g, 'gene'].astype(str).tolist()
+                    heatmap_genes.extend(cluster_genes[:max(1, heatmap_top_n)])
+                heatmap_genes = [g for g in dict.fromkeys(heatmap_genes) if g in adata.var_names][:60]
+                if heatmap_genes:
+                    expr = adata[:, heatmap_genes].X
+                    if hasattr(expr, 'toarray'):
+                        expr = expr.toarray()
+                    expr = np.asarray(expr, dtype=float)
+                    group_labels = adata.obs[groupby].astype(str)
+                    group_order = [str(g) for g in groups]
+                    mean_matrix = []
+                    for g in group_order:
+                        mask = (group_labels == g).values
+                        if mask.sum() == 0:
+                            mean_matrix.append(np.zeros(len(heatmap_genes)))
+                        else:
+                            mean_matrix.append(expr[mask, :].mean(axis=0))
+                    mean_matrix = np.asarray(mean_matrix).T
+                    row_mean = mean_matrix.mean(axis=1, keepdims=True)
+                    row_std = mean_matrix.std(axis=1, keepdims=True) + 1e-10
+                    z = np.clip((mean_matrix - row_mean) / row_std, -3, 3)
+                    fig_heat = go.Figure(data=go.Heatmap(
+                        z=z,
+                        x=group_order,
+                        y=heatmap_genes,
+                        colorscale='RdBu',
+                        zmid=0,
+                        colorbar=dict(title='Row z-score'),
+                        hovertemplate='Group: %{x}<br>Gene: %{y}<br>z-score: %{z:.2f}<extra></extra>',
+                    ))
+                    fig_heat.update_layout(
+                        title=f'Top Marker Heatmap by {groupby}',
+                        xaxis_title=groupby,
+                        yaxis_title='Marker genes',
+                        plot_bgcolor='white',
+                        width=max(650, 80 * len(group_order)),
+                        height=max(450, 18 * len(heatmap_genes)),
+                    )
+                    result_files.append(self.save_plotly_json(
+                        fig_heat, plots_dir, 'deg_marker_heatmap.json',
+                        'heatmap', 'Cluster Marker Heatmap'
+                    ))
+            except Exception as e:
+                self.progress(-1, f"Marker heatmap generation failed: {e}")
 
         self.progress(90, "Saving output...")
         output_path = self.save_output(adata, 'deg')

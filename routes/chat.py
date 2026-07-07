@@ -1,22 +1,10 @@
 # routes/chat.py
 """AI 对话 API"""
-from functools import wraps
 from flask import Blueprint, request, jsonify
 from config import Config
+from routes.auth import require_ai_token
 
 chat_bp = Blueprint('chat', __name__)
-
-
-def require_ai_token(f):
-    """API Token 认证装饰器。AI_API_TOKEN 为空时跳过认证。"""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if Config.AI_API_TOKEN:
-            auth = request.headers.get('Authorization', '')
-            if not auth.startswith('Bearer ') or auth[7:] != Config.AI_API_TOKEN:
-                return jsonify({"error": "认证失败，无效的 API Token"}), 401
-        return f(*args, **kwargs)
-    return decorated
 
 
 MAX_HISTORY_PER_PROJECT = 50
@@ -78,6 +66,7 @@ def chat_endpoint():
         return jsonify({
             "reply": result["reply"],
             "tool_calls": result["tool_calls"],
+            "proposed_tools": result.get("proposed_tools", []),
         })
     except Exception as e:
         return jsonify({"error": f"AI 调用失败: {str(e)}"}), 500

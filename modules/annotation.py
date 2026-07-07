@@ -46,10 +46,22 @@ DEFAULT_BLOOD_MARKERS = {
     'pDC': ['GZMB', 'IL3RA', 'COBLL1', 'TCF4', 'IRF7'],
 }
 
+DEFAULT_PBMC_MARKERS = {
+    'CD4 T cells': ['IL7R', 'LTB', 'CCR7', 'TCF7', 'MALAT1'],
+    'CD14+ Monocytes': ['CD14', 'LYZ', 'S100A8', 'S100A9', 'LGALS3', 'FCN1'],
+    'B cells': ['MS4A1', 'CD79A', 'CD79B', 'CD74', 'HLA-DRA'],
+    'CD8 T cells': ['CD8A', 'CD8B', 'CCL5', 'GZMK', 'GZMA'],
+    'NK cells': ['GNLY', 'NKG7', 'KLRD1', 'PRF1', 'CTSW'],
+    'FCGR3A+ Monocytes': ['FCGR3A', 'MS4A7', 'LST1', 'FCER1G', 'AIF1'],
+    'Dendritic cells': ['FCER1A', 'CST3', 'HLA-DRA', 'HLA-DPA1', 'HLA-DPB1'],
+    'Megakaryocytes': ['PPBP', 'PF4', 'SDPR', 'GNG11', 'NRGN'],
+}
+
 MARKER_SETS = {
     'TME': DEFAULT_TME_MARKERS,
     'Immune': DEFAULT_IMMUNE_MARKERS,
     'Blood': DEFAULT_BLOOD_MARKERS,
+    'PBMC': DEFAULT_PBMC_MARKERS,
 }
 
 class AnnotationAnalysis(BaseAnalysis):
@@ -62,6 +74,8 @@ class AnnotationAnalysis(BaseAnalysis):
         import scanpy as sc
         from modules.visualization import umap_scatter
         import json
+        import numpy as np
+        import plotly.graph_objects as go
 
         self.progress(5, "Loading data...")
         adata = self.load_adata(input_path)
@@ -154,6 +168,7 @@ class AnnotationAnalysis(BaseAnalysis):
                 adata.obs['celltype'] = adata.obs[leiden_key].astype(str)
 
         # 置信度评估
+        confidence_col = None
         if confidence_method != 'none' and 'celltype' in adata.obs.columns:
             self.progress(60, f"Computing annotation confidence ({confidence_method})...")
             score_cols = [c for c in adata.obs.columns if c.startswith('score_')]
@@ -165,17 +180,21 @@ class AnnotationAnalysis(BaseAnalysis):
                 entropy = -np.sum(probs * np.log(probs + 1e-10), axis=1)
                 max_entropy = np.log(len(score_cols)) if len(score_cols) > 1 else 1
                 adata.obs['annotation_confidence'] = 1 - entropy / (max_entropy + 1e-10)
+                confidence_col = 'annotation_confidence'
             elif confidence_method == 'score_margin' and score_cols:
                 import numpy as np
                 score_matrix = adata.obs[score_cols].values
                 sorted_scores = np.sort(score_matrix, axis=1)
                 if sorted_scores.shape[1] >= 2:
-                    adata.obs['annotation_confidence'] = sorted_scores[:, -1] - sorted_scores[:, -2]
+                    adata.obs['annotation_score_margin'] = sorted_scores[:, -1] - sorted_scores[:, -2]
                 else:
-                    adata.obs['annotation_confidence'] = sorted_scores[:, -1]
+                    adata.obs['annotation_score_margin'] = sorted_scores[:, -1]
+                confidence_col = 'annotation_score_margin'
 
-            if mark_unknown and 'annotation_confidence' in adata.obs.columns:
-                low_conf_mask = adata.obs['annotation_confidence'] < 0.2
+            if mark_unknown and confidence_col in adata.obs.columns:
+                low_conf_mask = adata.obs[confidence_col] < 0.2
+                if hasattr(adata.obs['celltype'], 'cat') and 'Unknown' not in adata.obs['celltype'].cat.categories:
+                    adata.obs['celltype'] = adata.obs['celltype'].cat.add_categories(['Unknown'])
                 adata.obs.loc[low_conf_mask, 'celltype'] = 'Unknown'
                 n_unknown = low_conf_mask.sum()
                 if n_unknown > 0:
@@ -225,13 +244,92 @@ class AnnotationAnalysis(BaseAnalysis):
                 with open(fpath, 'w') as f:
                     json.dump({'data': [{'type': 'image', 'source': f'data:image/png;base64,{img_b64}', 'xref': 'paper', 'yref': 'paper', 'x': 0, 'y': 1, 'sizex': 1, 'sizey': 1, 'sizing': 'stretch'}], 'layout': {'width': 800, 'height': 500, 'title': 'Cell Type Marker Dotplot'}}, f)
                 result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'dotplot', 'label': 'Cell Type Dotplot'})
-            except Exception:
-                pass
+            except Exception as e:
+                self.progress(-1, f"Annotation dotplot generation failed: {e}")
+
+        # Marker expression box/violin plot for validating annotations
+        if self.params.get('show_marker_expression_violin', True) and dotplot_genes and 'celltype' in adata.obs.columns:
+            try:
+                marker_genes = dotplot_genes[:8]
+                idx = np.arange(adata.n_obs)
+                if adata.n_obs > 5000:
+                    rng = np.random.default_rng(0)
+                    idx = np.sort(rng.choice(adata.n_obs, 5000, replace=False))
+                expr = adata[idx, marker_genes].X
+                if hasattr(expr, 'toarray'):
+                    expr = expr.toarray()
+                expr = np.asarray(expr)
+                celltypes = adata.obs['celltype'].astype(str).iloc[idx].values
+                fig_marker = go.Figure()
+                for gi, gene in enumerate(marker_genes):
+                    fig_marker.add_trace(go.Box(
+                        x=celltypes,
+                        y=expr[:, gi],
+                        name=gene,
+                        boxpoints=False,
+                    ))
+                fig_marker.update_layout(
+                    title='Marker Expression by Cell Type',
+                    xaxis_title='Cell type',
+                    yaxis_title='Expression',
+                    boxmode='group',
+                    plot_bgcolor='white',
+                    width=max(850, 90 * max(1, adata.obs['celltype'].nunique())),
+                    height=480,
+                    xaxis=dict(tickangle=35),
+                )
+                result_files.append(self.save_plotly_json(
+                    fig_marker, plots_dir, 'annotation_marker_expression_box.json',
+                    'boxplot', 'Marker 表达验证图'
+                ))
+            except Exception as e:
+                self.progress(-1, f"Marker expression plot generation failed: {e}")
 
         fig_json = json.dumps(umap_scatter(adata, 'celltype', title='UMAP by Cell Type'))
         fpath = os.path.join(plots_dir, 'annotation_umap_celltype.json')
         with open(fpath, 'w') as f: f.write(fig_json)
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': 'UMAP by Cell Type'})
+
+        # Annotation score margin / confidence UMAP
+        if self.params.get('show_annotation_score_umap', True) and 'X_umap' in adata.obsm:
+            score_col = None
+            score_label = None
+            if 'annotation_score_margin' in adata.obs.columns:
+                score_col = 'annotation_score_margin'
+                score_label = 'Annotation score margin'
+            elif 'annotation_confidence' in adata.obs.columns:
+                score_col = 'annotation_confidence'
+                score_label = 'Annotation confidence'
+            if score_col:
+                coords = adata.obsm['X_umap'][:, :2]
+                vals = adata.obs[score_col].astype(float).values
+                fig_score = go.Figure()
+                fig_score.add_trace(go.Scattergl(
+                    x=coords[:, 0],
+                    y=coords[:, 1],
+                    mode='markers',
+                    marker=dict(
+                        size=4,
+                        color=vals,
+                        colorscale='Viridis',
+                        opacity=0.75,
+                        colorbar=dict(title=score_label),
+                    ),
+                    text=adata.obs_names.tolist(),
+                    hovertemplate='%{text}<br>' + score_label + ': %{marker.color:.3f}<extra></extra>',
+                ))
+                fig_score.update_layout(
+                    title=score_label + ' on UMAP',
+                    xaxis_title='UMAP-1',
+                    yaxis_title='UMAP-2',
+                    plot_bgcolor='white',
+                    width=700,
+                    height=520,
+                )
+                result_files.append(self.save_plotly_json(
+                    fig_score, plots_dir, 'annotation_score_umap.json',
+                    'umap', score_label + ' UMAP'
+                ))
 
         self.progress(90, "Saving output...")
         output_path = self.save_output(adata, 'annotation')
@@ -249,5 +347,8 @@ class AnnotationAnalysis(BaseAnalysis):
             }
         }
         if 'annotation_confidence' in adata.obs.columns:
-            result['summary']['mean_confidence'] = round(float(adata.obs['annotation_confidence'].mean()), 3)
+            confidence_value = round(float(adata.obs['annotation_confidence'].mean()), 3)
+            result['summary']['mean_confidence'] = confidence_value
+        if 'annotation_score_margin' in adata.obs.columns:
+            result['summary']['mean_score_margin'] = round(float(adata.obs['annotation_score_margin'].mean()), 3)
         return result

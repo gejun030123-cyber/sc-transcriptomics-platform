@@ -349,6 +349,97 @@ function loadAdataInfo() {
     </div>
 </div>
 
+<!-- Agent 实验面板 -->
+<style>
+#agent-panel-toggle {
+    position: fixed; bottom: 92px; right: 24px; z-index: 9998;
+    width: 48px; height: 48px; border-radius: 50%;
+    background: #e65100; color: white; border: none;
+    cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; transition: transform 0.2s;
+}
+#agent-panel-toggle:hover { transform: scale(1.1); }
+#agent-panel {
+    position: fixed; bottom: 90px; right: 84px; z-index: 9998;
+    width: 440px; height: 520px; background: white;
+    border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+    display: none; flex-direction: column; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+#agent-header {
+    background: #e65100; color: white; padding: 10px 14px;
+    display: flex; justify-content: space-between; align-items: center;
+    font-weight: 600; font-size: 13px;
+}
+#agent-content {
+    flex: 1; overflow-y: auto; padding: 12px;
+    background: #fafafa; font-size: 12px;
+}
+#agent-content .empty-state { text-align: center; color: #999; padding: 30px 10px; }
+#agent-content .goal-header { background: #fff3e0; padding: 10px; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid #e65100; }
+#agent-content .goal-header .goal-title { font-weight: 600; color: #e65100; }
+#agent-content .branch-card {
+    background: white; border: 1px solid #e0e0e0; border-radius: 8px;
+    padding: 10px; margin-bottom: 8px;
+}
+#agent-content .branch-card.best { border-color: #4caf50; background: #f1f8e9; }
+#agent-content .branch-card.accepted { border-color: #1a237e; background: #e8eaf6; }
+#agent-content .branch-card.failed { border-color: #f44336; background: #ffebee; opacity: 0.8; }
+#agent-content .branch-name { font-weight: 600; color: #333; }
+#agent-content .branch-score { font-size: 18px; font-weight: 700; }
+#agent-content .branch-score.high { color: #4caf50; }
+#agent-content .branch-score.medium { color: #ff9800; }
+#agent-content .branch-score.low { color: #f44336; }
+#agent-content .branch-params { color: #666; font-size: 11px; margin: 4px 0; }
+#agent-content .branch-actions { display: flex; gap: 6px; margin-top: 8px; }
+#agent-content .btn-accept {
+    background: #1a237e; color: white; border: none; border-radius: 4px;
+    padding: 4px 10px; font-size: 11px; cursor: pointer;
+}
+#agent-content .btn-accept:hover { background: #283593; }
+#agent-content .btn-refine {
+    background: #fff3e0; color: #e65100; border: 1px solid #e65100;
+    border-radius: 4px; padding: 4px 10px; font-size: 11px; cursor: pointer;
+}
+#agent-content .btn-reject {
+    background: #f5f5f5; color: #666; border: 1px solid #ccc;
+    border-radius: 4px; padding: 4px 10px; font-size: 11px; cursor: pointer;
+}
+#agent-content .evidence-list { font-size: 11px; color: #555; margin: 4px 0; }
+#agent-content .evidence-item { padding: 2px 0; display: flex; align-items: center; gap: 6px; }
+#agent-input-area {
+    display: flex; padding: 8px; border-top: 1px solid #e0e0e0; background: white;
+}
+#agent-input {
+    flex: 1; border: 1px solid #ddd; border-radius: 16px;
+    padding: 6px 12px; font-size: 12px; outline: none;
+}
+#agent-input-area button {
+    margin-left: 6px; background: #e65100; color: white;
+    border: none; border-radius: 16px; padding: 6px 12px; cursor: pointer; font-size: 12px;
+}
+</style>
+
+<button id="agent-panel-toggle" onclick="toggleAgentPanel()" title="Agent 实验面板">🧪</button>
+<div id="agent-panel">
+    <div id="agent-header">
+        <span>🧪 Agent 实验面板</span>
+        <button onclick="toggleAgentPanel()" style="background:none;border:none;color:white;cursor:pointer;">✕</button>
+    </div>
+    <div id="agent-content">
+        <div class="empty-state">
+            <p>在 AI 助手中输入目标开始实验</p>
+            <p style="font-size:11px;color:#aaa;">例如："帮我找到最接近小胶质细胞的分群"</p>
+        </div>
+    </div>
+    <div id="agent-input-area">
+        <input type="text" id="agent-input" placeholder="对 AI 助手说目标..." onkeydown="if(event.key==='Enter'){document.getElementById('chat-input').value=document.getElementById('agent-input').value;sendChat();document.getElementById('agent-input').value='';}">
+        <button onclick="document.getElementById('chat-input').value=document.getElementById('agent-input').value;sendChat();document.getElementById('agent-input').value='';">发送</button>
+        <button onclick="loadAgentState()" style="background:#4caf50;" title="刷新">🔄</button>
+    </div>
+</div>
+
 <script>
 const PROJECT_ID = '{{ project.id }}';
 
@@ -356,6 +447,194 @@ function toggleChat() {
     const panel = document.getElementById('chat-panel');
     panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
 }
+
+function toggleAgentPanel() {
+    const panel = document.getElementById('agent-panel');
+    panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
+}
+
+async function loadAgentState() {
+    const content = document.getElementById('agent-content');
+    content.innerHTML = '<div class="text-center py-3"><div class="spinner-border spinner-border-sm"></div> 加载中...</div>';
+
+    try {
+        const [ctxResp, sessResp, branchResp, jobResp] = await Promise.all([
+            fetch('/api/projects/' + PROJECT_ID + '/current-context'),
+            fetch('/api/projects/' + PROJECT_ID + '/agent/sessions'),
+            fetch('/api/projects/' + PROJECT_ID + '/branches'),
+            fetch('/api/projects/' + PROJECT_ID + '/agent/jobs'),
+        ]);
+        const ctx = await ctxResp.json();
+        const sessions = (await sessResp.json()).sessions || [];
+        const branches = (await branchResp.json()).branches || [];
+        const jobs = (await jobResp.json()).jobs || [];
+
+        let html = '';
+
+        // F1: 当前分析基线
+        if (ctx.source && ctx.source !== 'none') {
+            const srcLabels = {accepted_branch:'已采纳候选', main_task:'主线任务', intermediate:'中间文件', upload:'上传文件'};
+            const srcLabel = srcLabels[ctx.source] || ctx.source;
+            html += '<div style="background:#e8f5e9;padding:8px 10px;border-radius:6px;margin-bottom:10px;border-left:3px solid #4caf50;">';
+            html += '<div style="font-weight:600;font-size:12px;">📌 当前分析基线: ' + srcLabel + '</div>';
+            if (ctx.branch_name) html += '<div style="font-size:10px;color:#666;">来源: ' + escapeHtml(ctx.branch_name) + '</div>';
+            html += '<div style="font-size:10px;color:#666;word-break:break-all;">' + escapeHtml(ctx.current_adata_path || '') + '</div>';
+            if (ctx.source === 'accepted_branch') html += '<div style="font-size:10px;color:#4caf50;">✅ 后续 AI 分析将从此结果继续</div>';
+            html += '</div>';
+        }
+
+        // F2: 活跃 jobs（sweep 进度）
+        const activeJobs = jobs.filter(j => j.status === 'running' || j.status === 'pending');
+        if (activeJobs.length > 0) {
+            html += '<div style="font-weight:600;margin-bottom:6px;">🔄 运行中的任务 (' + activeJobs.length + ')</div>';
+            for (const job of activeJobs) {
+                html += '<div style="background:#e3f2fd;padding:8px 10px;border-radius:6px;margin-bottom:8px;border-left:3px solid #2196f3;">';
+                html += '<div style="font-weight:600;font-size:11px;">参数搜索</div>';
+                html += '<div style="font-size:10px;color:#666;">' + escapeHtml(job.current_step || '准备中...') + '</div>';
+                html += '<div style="background:#e0e0e0;border-radius:4px;height:6px;margin:4px 0;">';
+                html += '<div style="background:#2196f3;height:6px;border-radius:4px;width:' + (job.progress || 0) + '%;"></div></div>';
+                html += '<div style="font-size:10px;color:#888;">' + (job.progress || 0) + '%</div>';
+                html += '</div>';
+            }
+        }
+
+        // 活跃 sessions
+        for (const s of sessions) {
+            if (s.status === 'active') {
+                html += '<div class="goal-header">';
+                html += '<div class="goal-title">🎯 ' + escapeHtml(s.goal_summary || '目标分析中') + '</div>';
+                html += '</div>';
+            }
+        }
+
+        // F3: Branch 比较视图
+        if (branches.length > 0) {
+            branches.sort((a, b) => (b.accepted || 0) - (a.accepted || 0));
+            html += '<div style="font-weight:600;margin-bottom:6px;">候选分支 (' + branches.length + ')</div>';
+
+            for (const b of branches) {
+                let cardClass = 'branch-card';
+                if (b.accepted) cardClass += ' accepted';
+                else if (b.status === 'failed') cardClass += ' failed';
+
+                html += '<div class="' + cardClass + '">';
+                html += '<div class="d-flex justify-content-between">';
+                html += '<span class="branch-name">' + escapeHtml(b.branch_name) + '</span>';
+
+                let statusBadge = '';
+                if (b.accepted) statusBadge = '<span style="background:#1a237e;color:white;padding:1px 6px;border-radius:3px;font-size:10px;">已采纳</span>';
+                else if (b.status === 'completed') statusBadge = '<span style="background:#4caf50;color:white;padding:1px 6px;border-radius:3px;font-size:10px;">完成</span>';
+                else if (b.status === 'running') statusBadge = '<span style="background:#2196f3;color:white;padding:1px 6px;border-radius:3px;font-size:10px;">运行中</span>';
+                else if (b.status === 'failed') statusBadge = '<span style="background:#f44336;color:white;padding:1px 6px;border-radius:3px;font-size:10px;">失败</span>';
+                else statusBadge = '<span style="background:#9e9e9e;color:white;padding:1px 6px;border-radius:3px;font-size:10px;">等待</span>';
+                html += statusBadge + '</div>';
+
+                html += '<div class="branch-params">' + escapeHtml(b.purpose || '无描述') + '</div>';
+
+                if (b.status === 'completed') {
+                    try {
+                        const scoreResp = await fetch('/api/projects/' + PROJECT_ID + '/branches/' + b.id);
+                        const scoreData = await scoreResp.json();
+                        const scores = scoreData.scores || [];
+
+                        for (const s of scores) {
+                            const scoreClass = s.total_score >= 0.75 ? 'high' : (s.total_score >= 0.5 ? 'medium' : 'low');
+                            const confLabel = s.score && s.score.confidence ? ' (' + s.score.confidence + ')' : '';
+                            html += '<div style="margin-top:4px;">';
+                            html += '<span class="branch-score ' + scoreClass + '">' + (s.total_score != null ? (s.total_score * 100).toFixed(0) + '%' : 'N/A') + '</span>';
+                            html += '<span style="font-size:10px;color:#888;">' + escapeHtml(s.recommendation || '') + confLabel + '</span>';
+                            html += '</div>';
+
+                            if (s.score && s.score.cluster_scores && s.score.cluster_scores.length > 0) {
+                                const top = s.score.cluster_scores[0];
+                                html += '<div class="evidence-list">';
+                                html += '<div class="evidence-item">📊 cluster ' + escapeHtml(top.cluster) + ': ' + top.n_cells + ' 细胞 (' + (top.pct_cells*100).toFixed(1) + '%)</div>';
+                                html += '<div class="evidence-item">✅ pos: ' + (top.positive_score*100).toFixed(0) + '% | spec: ' + (top.specificity_score*100).toFixed(0) + '% | size: ' + (top.size_score*100).toFixed(0) + '%</div>';
+                                html += '<div class="evidence-item">⚠️ neg: ' + (top.negative_score*100).toFixed(0) + '% | batch penalty: ' + (top.batch_penalty*100).toFixed(0) + '%</div>';
+                                if (top.detected_positive_markers && top.detected_positive_markers.length) {
+                                    html += '<div class="evidence-item">🧬 命中: ' + escapeHtml(top.detected_positive_markers.join(', ')) + '</div>';
+                                }
+                                if (top.missing_positive_markers && top.missing_positive_markers.length) {
+                                    html += '<div class="evidence-item">❓ 缺失: ' + escapeHtml(top.missing_positive_markers.join(', ')) + '</div>';
+                                }
+                                html += '</div>';
+                            }
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+
+                if (b.error_traceback) {
+                    html += '<div style="font-size:10px;color:#f44336;margin-top:4px;max-height:60px;overflow-y:auto;">' + escapeHtml(b.error_traceback.substring(0, 200)) + '</div>';
+                }
+
+                // F4: 操作按钮（采纳需确认）
+                if (b.status === 'completed' && !b.accepted) {
+                    html += '<div class="branch-actions">';
+                    html += '<button class="btn-accept" onclick="acceptBranch(\'' + b.id + '\', \'' + escapeHtml(b.branch_name) + '\')">✓ 采用此候选</button>';
+                    html += '<button class="btn-reject" onclick="deleteBranch(\'' + b.id + '\')">✕ 丢弃</button>';
+                    html += '</div>';
+                }
+
+                // F5: 继续优化入口（已采纳或 best candidate）
+                if (b.accepted || b.status === 'completed') {
+                    html += '<div class="branch-actions" style="margin-top:4px;">';
+                    html += '<button class="btn-refine" onclick="refineBranch(\'' + b.branch_name + '\', \'继续细分\')">🔍 继续细分</button>';
+                    html += '<button class="btn-refine" onclick="refineBranch(\'' + b.branch_name + '\', \'更高resolution\')">📈 更高resolution</button>';
+                    html += '<button class="btn-refine" onclick="refineBranch(\'' + b.branch_name + '\', \'增加约束\')">🎯 增加约束</button>';
+                    html += '</div>';
+                }
+
+                html += '</div>';
+            }
+        }
+
+        content.innerHTML = html || '<div class="empty-state"><p>暂无 Agent 实验数据</p><p style="font-size:11px;color:#aaa;">在 AI 助手中输入目标开始实验</p></div>';
+    } catch (e) {
+        content.innerHTML = '<div class="text-danger small">加载失败: ' + escapeHtml(e.message) + '</div>';
+    }
+}
+
+// F5: 继续优化 — 给 chat 输入模板
+function refineBranch(branchName, action) {
+    const input = document.getElementById('chat-input');
+    input.value = '基于 "' + branchName + '" 的结果，' + action;
+    document.getElementById('chat-panel').style.display = 'flex';
+    input.focus();
+}
+
+// F4: 增强采纳确认
+async function acceptBranch(branchId, branchName) {
+    const msg = '采纳 "' + branchName + '" 后，后续分析将从此候选的 h5ad 继续。\n原主线结果不会删除。\n\n确认采纳？';
+    if (!confirm(msg)) return;
+    try {
+        const r = await fetch('/api/projects/' + PROJECT_ID + '/branches/' + branchId + '/accept', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirm: true }),
+        });
+        const data = await r.json();
+        if (data.error) {
+            alert('采纳失败: ' + data.error);
+        } else {
+            loadAgentState();
+        }
+    } catch (e) {
+        alert('网络错误: ' + e.message);
+    }
+}
+
+async function deleteBranch(branchId) {
+    if (!confirm('确认丢弃此候选分支？此操作不可撤销。')) return;
+    try {
+        await fetch('/api/projects/' + PROJECT_ID + '/branches/' + branchId + '/delete', { method: 'POST' });
+        loadAgentState();
+    } catch (e) {
+        alert('网络错误: ' + e.message);
+    }
+}
+
+// 初始加载 agent 状态
+setTimeout(loadAgentState, 500);
 
 function addMessage(role, content) {
     const div = document.createElement('div');
