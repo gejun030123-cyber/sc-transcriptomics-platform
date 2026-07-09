@@ -22,7 +22,7 @@ SKIP_FILES = {
 }
 
 # 允许的 file_type 值
-VALID_FILE_TYPES = {'csv', 'plotly_json', 'png', 'svg', 'info', 'json', 'txt'}
+VALID_FILE_TYPES = {'csv', 'plotly_json', 'png', 'svg', 'info', 'json', 'txt', 'h5ad'}
 
 # 允许的 category 值
 VALID_CATEGORIES = {
@@ -30,7 +30,7 @@ VALID_CATEGORIES = {
     'qc', 'dotplot', 'boxplot', 'enrichment', 'info',
     'violin', 'scatter', 'histogram', 'tsne', 'pie', 'bubble',
     'paga', 'diffusion_map', 'gene_expression', 'cluster_centers',
-    'qq', 'venn', 'tree', 'annotation',
+    'qq', 'venn', 'tree', 'annotation', 'data',
 }
 
 
@@ -39,7 +39,11 @@ def _get_module_files():
     files = []
     for f in sorted(os.listdir(MODULES_DIR)):
         if f.endswith('.py') and f not in SKIP_FILES:
-            files.append(os.path.join(MODULES_DIR, f))
+            filepath = os.path.join(MODULES_DIR, f)
+            with open(filepath, 'r', encoding='utf-8') as fh:
+                source = fh.read()
+            if re.search(r'class\s+\w+\s*\(.*BaseAnalysis.*\)', source):
+                files.append(filepath)
     return files
 
 

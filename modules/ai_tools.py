@@ -216,7 +216,7 @@ def _list_modules(pipeline_type="all"):
 
 def _validate_analysis_params(module_name, params):
     """校验 AI 传入的分析参数，移除未知键，返回 (cleaned_params, error_msg)。"""
-    from modules.schemas import PARAM_SCHEMAS
+    from modules.schemas import PARAM_SCHEMAS, filter_active_params
 
     schema_list = PARAM_SCHEMAS.get(module_name, [])
     valid_keys = {s['key'] for s in schema_list}
@@ -249,7 +249,7 @@ def _validate_analysis_params(module_name, params):
         else:
             cleaned[key] = value
 
-    return cleaned, None
+    return filter_active_params(schema_list, cleaned), None
 
 
 # ============================================================

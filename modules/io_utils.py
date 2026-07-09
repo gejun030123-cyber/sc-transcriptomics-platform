@@ -158,6 +158,155 @@ def read_expression_matrix(file_path):
     return adata
 
 
+def infer_sc_data_format(input_path):
+    """Infer supported single-cell input format from path."""
+    if not input_path:
+        return 'unknown'
+
+    lower = str(input_path).lower()
+    if os.path.isdir(input_path):
+        names = set(os.listdir(input_path))
+        if (
+            ('matrix.mtx' in names or 'matrix.mtx.gz' in names)
+            and ('barcodes.tsv' in names or 'barcodes.tsv.gz' in names)
+            and (
+                'features.tsv' in names or 'features.tsv.gz' in names
+                or 'genes.tsv' in names or 'genes.tsv.gz' in names
+            )
+        ):
+            return '10x_mtx'
+        if lower.endswith('.zarr'):
+            return 'zarr'
+        return 'directory'
+
+    if lower.endswith('.h5ad'):
+        return 'h5ad'
+    if lower.endswith(('.h5', '.hdf5')):
+        return '10x_h5'
+    if lower.endswith('.loom'):
+        return 'loom'
+    if lower.endswith('.zarr'):
+        return 'zarr'
+    if lower.endswith(('.csv', '.txt', '.tsv', '.xlsx', '.xls')):
+        return 'expression_matrix'
+    if lower.endswith(('.mtx', '.mtx.gz')):
+        return '10x_mtx'
+    return 'unknown'
+
+
+def _ensure_counts_layer(adata):
+    """Preserve raw/imported matrix in counts layer if absent."""
+    if 'counts' not in adata.layers:
+        adata.layers['counts'] = adata.X.copy()
+    return adata
+
+
+def _standardize_imported_adata(adata, input_format=None, species=None, genome=None):
+    """Apply lightweight AnnData normalization needed by downstream modules."""
+    if hasattr(adata, 'var_names_make_unique'):
+        adata.var_names_make_unique()
+    if hasattr(adata, 'obs_names_make_unique'):
+        adata.obs_names_make_unique()
+
+    adata = remap_var_names(adata)
+    adata = _ensure_counts_layer(adata)
+
+    if input_format:
+        adata.uns['input_format'] = input_format
+    if species:
+        adata.uns['species'] = species
+    if genome:
+        adata.uns['genome'] = genome
+    return adata
+
+
+def read_single_cell_data(input_path, input_format='auto', species=None, genome=None):
+    """
+    Read common single-cell input formats into AnnData.
+
+    Supported formats:
+      - h5ad
+      - 10x mtx directory or matrix.mtx path
+      - 10x h5
+      - loom
+      - zarr
+      - expression matrix csv/tsv/txt/xlsx/xls
+    """
+    import scanpy as sc
+
+    if not input_path:
+        raise ValueError("缺少输入路径")
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"输入路径不存在: {input_path}")
+
+    fmt = infer_sc_data_format(input_path) if input_format in ('', None, 'auto') else input_format
+    source_path = input_path
+
+    if fmt == 'h5ad':
+        adata = sc.read_h5ad(source_path)
+    elif fmt == '10x_mtx':
+        mtx_dir = source_path if os.path.isdir(source_path) else os.path.dirname(source_path)
+        if not mtx_dir:
+            mtx_dir = '.'
+        adata = sc.read_10x_mtx(mtx_dir, var_names='gene_symbols', cache=True)
+    elif fmt == '10x_h5':
+        adata = sc.read_10x_h5(source_path)
+    elif fmt == 'loom':
+        adata = sc.read_loom(source_path)
+    elif fmt == 'zarr':
+        import anndata as ad
+        adata = ad.read_zarr(source_path)
+    elif fmt == 'expression_matrix':
+        adata = read_expression_matrix(source_path)
+    else:
+        raise ValueError(
+            f"不支持的单细胞输入格式: {fmt}。"
+            "支持 h5ad、10x mtx、10x h5、loom、zarr、csv/tsv/xlsx 表达矩阵。"
+        )
+
+    return _standardize_imported_adata(adata, input_format=fmt, species=species, genome=genome)
+
+
+def write_single_cell_h5ad(input_path, output_path, input_format='auto', species=None, genome=None):
+    """Read a supported single-cell input and write a standardized h5ad."""
+    adata = read_single_cell_data(
+        input_path,
+        input_format=input_format,
+        species=species,
+        genome=genome,
+    )
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    if os.path.abspath(input_path) != os.path.abspath(output_path):
+        adata.write_h5ad(output_path)
+    return adata
+
+
+def summarize_adata_import(adata, input_format, output_path):
+    """Build a JSON-serializable import summary."""
+    total_elements = int(adata.n_obs) * int(adata.n_vars)
+    if total_elements > 0:
+        if hasattr(adata.X, 'nnz'):
+            nonzero = int(adata.X.nnz)
+        else:
+            nonzero = int(np.count_nonzero(adata.X))
+        sparsity = round((1 - nonzero / total_elements) * 100, 1)
+    else:
+        sparsity = 0.0
+
+    file_size_mb = round(os.path.getsize(output_path) / (1024 * 1024), 1) if os.path.exists(output_path) else 0.0
+    return {
+        'input_format': input_format,
+        'n_cells': int(adata.n_obs),
+        'n_genes': int(adata.n_vars),
+        'sparsity': sparsity,
+        'file_size_mb': file_size_mb,
+        'output_file': os.path.basename(output_path),
+        'obs_columns': list(map(str, adata.obs.columns[:20])),
+        'var_columns': list(map(str, adata.var.columns[:20])),
+        'layers': list(map(str, adata.layers.keys())),
+    }
+
+
 def remap_var_names(adata):
     """将 adata.var_names 从 Ensembl ID 映射为基因名，处理重复名。
     原始 ID 保存到 adata.var['gene_id']。

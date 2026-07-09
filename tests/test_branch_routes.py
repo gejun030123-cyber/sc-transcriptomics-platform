@@ -78,6 +78,7 @@ class TestBranchRouteAuth:
         ('GET', '/api/projects/{pid}/agent/sessions'),
         ('GET', '/api/projects/{pid}/agent/sessions/fake_sid'),
         ('GET', '/api/projects/{pid}/branches'),
+        ('GET', '/api/projects/{pid}/branches/compare'),
         ('GET', '/api/projects/{pid}/branches/fake_id'),
     ]
 
@@ -233,6 +234,9 @@ class TestBranchAcceptDelete:
         assert resp.status_code == 200
         data = resp.get_json()
         assert data.get('status') == 'accepted'
+        assert 'accepted_report' in data
+        assert os.path.isfile(data['accepted_report']['json_path'])
+        assert os.path.isfile(data['accepted_report']['markdown_path'])
 
     def test_delete_branch_soft_delete(self, auth_client):
         """删除branch应为软删除，branch task不失归属."""
@@ -325,3 +329,63 @@ class TestBranchAcceptDelete:
         ctx = resp.get_json()
         assert ctx['source'] == 'accepted_branch'
         assert ctx['accepted_branch_id'] == branch_id
+
+    def test_compare_branches_returns_scores_and_param_diff(self, auth_client):
+        """候选比较 API 应返回评分排序和参数差异."""
+        pid = _make_project(auth_client, 'compare_branch_project')
+        headers = {'Authorization': 'Bearer test-token-123'}
+
+        from config import Config
+        from models import AnalysisBranch, CandidateScore
+        os.makedirs(Config.project_dir(pid), exist_ok=True)
+        parent = os.path.join(Config.project_dir(pid), 'parent.h5ad')
+        with open(parent, 'w') as f:
+            f.write('mock')
+
+        b1 = AnalysisBranch(
+            project_id=pid,
+            parent_adata_path=parent,
+            branch_name='candidate_low',
+            params_json=json.dumps({'clustering': {'resolution': 0.6}}),
+            status='completed',
+            output_adata_path=parent,
+        )
+        b1.save()
+        b2 = AnalysisBranch(
+            project_id=pid,
+            parent_adata_path=parent,
+            branch_name='candidate_high',
+            params_json=json.dumps({'clustering': {'resolution': 1.2}}),
+            status='completed',
+            output_adata_path=parent,
+        )
+        b2.save()
+        CandidateScore(
+            branch_id=b1.id,
+            project_id=pid,
+            evaluator_name='sc_cluster_signature',
+            target_label='B cell:0',
+            score_json=json.dumps({'confidence': 'low', 'best_cluster': '0'}),
+            total_score=0.4,
+            recommendation='low score',
+        ).save()
+        CandidateScore(
+            branch_id=b2.id,
+            project_id=pid,
+            evaluator_name='sc_cluster_signature',
+            target_label='B cell:1',
+            score_json=json.dumps({'confidence': 'high', 'best_cluster': '1'}),
+            total_score=0.85,
+            recommendation='best score',
+        ).save()
+
+        resp = auth_client.get(
+            f'/api/projects/{pid}/branches/compare',
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['best_branch_id'] == b2.id
+        assert data['branches'][0]['branch_id'] == b2.id
+        assert data['branches'][0]['confidence'] == 'high'
+        assert any(d['param'] == 'clustering.resolution' for d in data['param_diff'])

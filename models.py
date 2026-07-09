@@ -403,6 +403,19 @@ class PipelineRun:
         finally:
             conn.close()
 
+    def update_task_ids(self, task_ids):
+        task_ids_json = json.dumps(task_ids)
+        conn = get_conn()
+        try:
+            conn.execute(
+                "UPDATE pipeline_runs SET task_ids_json=? WHERE id=?",
+                (task_ids_json, self.id)
+            )
+            conn.commit()
+            self.task_ids_json = task_ids_json
+        finally:
+            conn.close()
+
     def mark_completed(self):
         conn = get_conn()
         try:

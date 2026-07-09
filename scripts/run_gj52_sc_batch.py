@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download classic PBMC3k and run the platform scRNA gallery workflow."""
+"""Run GJ 52 organoid/tissue scRNA workflow with batch correction."""
 
 import json
 import os
@@ -12,21 +12,37 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-PROJECT_ID = "pbmc3k_classic"
-PROJECT_NAME = "Classic PBMC3k scRNA"
-REPORT_PATH = "PBMC3K_SC_RESULTS_20260707.md"
-GALLERY_NAME = "pbmc3k_plot_gallery.html"
+PROJECT_ID = "gj52_organoid_tissue_batch"
+PROJECT_NAME = "GJ52 organoid vs tissue scRNA"
+REPORT_PATH = "GJ52_SC_BATCH_RESULTS_20260707.md"
+GALLERY_NAME = "gj52_plot_gallery.html"
 
+SOURCE_DIRS = [
+    {
+        "path": "/home/oelab/data/GJ/000000/52alg_singlet_matrix",
+        "batch": "organoid",
+        "sample": "52alg_singlet_matrix",
+        "description": "类器官",
+    },
+    {
+        "path": "/home/oelab/data/GJ/000000/52tissue_singlet_matrix",
+        "batch": "tissue",
+        "sample": "52tissue_singlet_matrix",
+        "description": "对应组织",
+    },
+]
 
 PIPELINE = [
     ("qc", {
         "mito_perc": 0.20,
         "nUMIs": 500,
         "detected_genes": 200,
-        "max_detected_genes": 6000,
+        "max_detected_genes": 8000,
         "ribo_perc": 0,
         "hb_perc": 0,
-        "batch_key": "",
+        "batch_key": "batch",
+        "batch_adaptive_qc": True,
+        "mad_multiplier": 4.0,
         "save_counts_layer": True,
         "show_qc_filter_summary": True,
         "show_doublet_histogram": True,
@@ -37,31 +53,38 @@ PIPELINE = [
         "show_expression_distribution": True,
     }),
     ("hvg", {
-        "n_top_genes": 2000,
+        "n_top_genes": 3000,
         "hvg_flavor": "seurat_v3",
-        "batch_key": "",
+        "batch_key": "batch",
+        "batch_hvg_strategy": "union",
         "exclude_mt_genes": True,
         "show_hvg_rank_plot": True,
     }),
     ("dimred", {
         "n_comps": 50,
-        "umap_n_neighbors": 15,
-        "umap_min_dist": 0.5,
+        "umap_n_neighbors": 20,
+        "umap_min_dist": 0.4,
         "umap_metric": "euclidean",
         "enable_tsne": False,
         "show_pca_scatter": True,
     }),
+    ("batch_correct", {
+        "method": "combat",
+        "batch_key": "batch",
+        "n_pcs": 50,
+        "evaluate_correction": True,
+    }),
     ("clustering", {
-        "resolutions": "0.8,0.4,1.2",
+        "resolutions": "0.4,0.6,0.8,1.0,1.2",
         "primary_resolution": 0.8,
-        "n_neighbors": 15,
+        "n_neighbors": 20,
         "clustering_method": "leiden",
         "n_iterations": 2,
         "distance_metric": "euclidean",
-        "use_corrected": False,
-        "batch_key": "",
+        "use_corrected": True,
+        "batch_key": "batch",
         "show_cluster_size_bar": True,
-        "show_cluster_batch_composition": False,
+        "show_cluster_batch_composition": True,
         "show_labeled_umap": True,
         "show_resolution_sankey": True,
     }),
@@ -79,7 +102,7 @@ PIPELINE = [
         "method": "auto_marker",
         "cluster_key": "leiden",
         "resolution": "0.8",
-        "marker_set": "PBMC",
+        "marker_set": "TME",
         "confidence_method": "score_margin",
         "mark_unknown": True,
         "show_celltype_composition": True,
@@ -95,31 +118,22 @@ PIPELINE = [
         "show_dotplot": True,
         "show_deg_counts_bar": True,
         "show_top_marker_umap_panel": True,
-        "top_marker_umap_genes": 8,
+        "top_marker_umap_genes": 9,
         "show_marker_heatmap": True,
         "marker_heatmap_top_n": 3,
-        "plot_genes_umap": "IL7R,CD14,MS4A1,CD8A,GNLY",
+        "plot_genes_umap": "EPCAM,KRT8,KRT18,CD3D,NKG7,MS4A1,LYZ,COL1A1,PECAM1,MKI67",
         "pval_cutoff": 0.05,
         "logfc_cutoff": 0.25,
         "min_pct": 0.1,
     }),
-    ("trajectory", {
-        "cluster_key": "leiden",
-        "enable_paga": False,
-        "n_diffcomps": 15,
-        "start_cluster": "",
-        "n_dcs": 10,
-        "n_branchings": 0,
-        "show_pseudotime_distribution": True,
-    }),
     ("proportion", {
         "groupby": "celltype",
-        "batch_key": "phase",
+        "batch_key": "batch",
+        "compare_groups": "organoid-vs-tissue",
         "stat_test": "chi_square",
         "n_permutations": 1000,
         "min_cells_per_group": 1,
         "show_proportion_heatmap": True,
-        "compare_groups": "",
     }),
 ]
 
@@ -152,28 +166,52 @@ def ensure_project():
     project = Project(
         id=PROJECT_ID,
         name=PROJECT_NAME,
-        description="Classic 10x PBMC3k dataset downloaded via scanpy.datasets.pbmc3k()",
+        description="GJ 52 organoid and matched tissue 10x singlet matrices, integrated by batch.",
         status="processing",
-        metadata_json=json.dumps({"source": "scanpy.datasets.pbmc3k"}, ensure_ascii=False),
+        metadata_json=json.dumps({"source_dirs": SOURCE_DIRS}, ensure_ascii=False),
     )
     project.save()
     return project
 
 
-def download_pbmc3k():
+def build_merged_input():
     from config import Config
+    import anndata as ad
     import scanpy as sc
 
-    raw_path = os.path.join(Config.uploads_dir(PROJECT_ID), "pbmc3k_raw.h5ad")
-    if os.path.isfile(raw_path):
-        return raw_path, "cached"
+    out_path = os.path.join(Config.uploads_dir(PROJECT_ID), "gj52_organoid_tissue_raw.h5ad")
+    adatas = []
+    raw_stats = []
+    for item in SOURCE_DIRS:
+        matrix_dir = item["path"]
+        if not os.path.isdir(matrix_dir):
+            raise FileNotFoundError(f"10x directory not found: {matrix_dir}")
+        adata = sc.read_10x_mtx(matrix_dir, var_names="gene_symbols", cache=True)
+        adata.var_names_make_unique()
+        adata.obs["barcode"] = adata.obs_names.astype(str)
+        adata.obs["batch"] = item["batch"]
+        adata.obs["sample"] = item["sample"]
+        adata.obs["source_type"] = item["batch"]
+        adata.obs["source_description"] = item["description"]
+        adata.obs_names = [f"{item['batch']}:{bc}" for bc in adata.obs["barcode"].astype(str)]
+        adata.layers["counts"] = adata.X.copy()
+        raw_stats.append({
+            "batch": item["batch"],
+            "sample": item["sample"],
+            "path": matrix_dir,
+            "n_cells": int(adata.n_obs),
+            "n_genes": int(adata.n_vars),
+        })
+        adatas.append(adata)
 
-    sc.settings.datasetdir = os.path.join(Config.project_dir(PROJECT_ID), "download_cache")
-    os.makedirs(sc.settings.datasetdir, exist_ok=True)
-    adata = sc.datasets.pbmc3k()
-    adata.var_names_make_unique()
-    adata.write_h5ad(raw_path)
-    return raw_path, "downloaded"
+    merged = ad.concat(adatas, join="outer", merge="same", fill_value=0)
+    merged.obs["batch"] = merged.obs["batch"].astype("category")
+    merged.obs["sample"] = merged.obs["sample"].astype("category")
+    merged.obs["source_type"] = merged.obs["source_type"].astype("category")
+    merged.uns["source_dirs_json"] = json.dumps(SOURCE_DIRS, ensure_ascii=False)
+    merged.uns["raw_batch_stats_json"] = json.dumps(raw_stats, ensure_ascii=False)
+    merged.write_h5ad(out_path)
+    return out_path, raw_stats
 
 
 def run_module(module_name, params, input_path):
@@ -230,8 +268,7 @@ def run_module(module_name, params, input_path):
         task.result_json = result_json
         return task, result
     except Exception:
-        tb = traceback.format_exc()
-        task.mark_failed(tb)
+        task.mark_failed(traceback.format_exc())
         raise
 
 
@@ -251,9 +288,7 @@ def make_gallery(result_files):
                 fig = pio.from_json(handle.read())
             html = pio.to_html(fig, include_plotlyjs=("include" if first else False), full_html=False)
             first = False
-            sections.append(
-                f"<section><h2>{rf.get('label', os.path.basename(fpath))}</h2>{html}</section>"
-            )
+            sections.append(f"<section><h2>{rf.get('label', os.path.basename(fpath))}</h2>{html}</section>")
         except Exception as exc:
             sections.append(
                 f"<section><h2>{rf.get('label', os.path.basename(fpath))}</h2>"
@@ -261,42 +296,43 @@ def make_gallery(result_files):
             )
 
     doc = """<!doctype html>
-<html><head><meta charset="utf-8"><title>PBMC3k scRNA plot gallery</title>
+<html><head><meta charset="utf-8"><title>GJ52 scRNA batch-corrected gallery</title>
 <style>
 body{font-family:Arial,sans-serif;margin:24px;background:#f8f9fb;color:#1f2933}
 section{background:#fff;border:1px solid #dde3ea;border-radius:8px;margin:0 0 20px;padding:16px}
 h1{margin:0 0 8px} h2{font-size:16px;margin:0 0 12px}
 .meta{color:#667085;margin-bottom:20px}
 </style></head><body>
-<h1>PBMC3k scRNA Plot Gallery</h1>
-<div class="meta">Generated by scripts/run_pbmc3k_sc_reference.py</div>
+<h1>GJ52 scRNA Batch-Corrected Plot Gallery</h1>
+<div class="meta">Organoid and matched tissue integrated by batch. Generated by scripts/run_gj52_sc_batch.py</div>
 """ + "\n".join(sections or ["<p>No plot JSON files were produced.</p>"]) + "\n</body></html>\n"
     with open(out_path, "w", encoding="utf-8") as handle:
         handle.write(doc)
     return out_path
 
 
-def summarize(final_path, module_results, raw_path, download_status, gallery_path):
+def summarize(final_path, module_results, raw_path, raw_stats, gallery_path):
     import scanpy as sc
     from config import Config
     from models import Project
 
     adata = sc.read_h5ad(final_path)
-    cluster_counts = {}
-    if "leiden" in adata.obs.columns:
-        cluster_counts = adata.obs["leiden"].astype(str).value_counts().sort_index().to_dict()
-    celltypes = {}
-    if "celltype" in adata.obs.columns:
-        celltypes = adata.obs["celltype"].astype(str).value_counts().head(20).to_dict()
+    batch_counts = adata.obs["batch"].astype(str).value_counts().to_dict() if "batch" in adata.obs.columns else {}
+    cluster_counts = adata.obs["leiden"].astype(str).value_counts().sort_index().to_dict() if "leiden" in adata.obs.columns else {}
+    celltypes = adata.obs["celltype"].astype(str).value_counts().to_dict() if "celltype" in adata.obs.columns else {}
 
     rows = []
+    batch_summary = None
     for module_name, task, result in module_results:
+        summary = result.get("summary", {})
+        if module_name == "batch_correct":
+            batch_summary = summary
         rows.append(
             f"| `{module_name}` | `{task.status}` | `{task.output_adata_path}` | "
-            f"`{json.dumps(result.get('summary', {}), ensure_ascii=False)}` |"
+            f"`{json.dumps(summary, ensure_ascii=False)}` |"
         )
 
-    report = f"""# PBMC3k 单细胞分析结果
+    report = f"""# GJ52 类器官与对应组织单细胞分析结果
 
 生成时间：{datetime.now().isoformat(timespec='seconds')}
 
@@ -304,10 +340,15 @@ def summarize(final_path, module_results, raw_path, download_status, gallery_pat
 
 - 项目 ID：`{PROJECT_ID}`
 - 项目目录：`{Config.project_dir(PROJECT_ID)}`
-- 原始数据：`{raw_path}`
-- 下载状态：`{download_status}`
+- 原始合并 h5ad：`{raw_path}`
 - 最终 h5ad：`{final_path}`
 - 图表 HTML：`{gallery_path}`
+
+## 输入批次
+
+```json
+{json.dumps(raw_stats, ensure_ascii=False, indent=2)}
+```
 
 ## 流程
 
@@ -319,8 +360,14 @@ def summarize(final_path, module_results, raw_path, download_status, gallery_pat
 
 - 细胞数：{adata.n_obs}
 - 基因数：{adata.n_vars}
-- obs 列：`{', '.join(map(str, adata.obs.columns[:30]))}`
+- obs 列：`{', '.join(map(str, adata.obs.columns[:40]))}`
 - obsm：`{', '.join(map(str, adata.obsm.keys()))}`
+
+## 最终 batch 细胞数
+
+```json
+{json.dumps(batch_counts, ensure_ascii=False, indent=2)}
+```
 
 ## Leiden cluster 细胞数
 
@@ -328,29 +375,25 @@ def summarize(final_path, module_results, raw_path, download_status, gallery_pat
 {json.dumps(cluster_counts, ensure_ascii=False, indent=2)}
 ```
 
-## 注释结果（如有）
+## 自动注释结果
 
 ```json
 {json.dumps(celltypes, ensure_ascii=False, indent=2)}
 ```
 
-## Scanpy 教程对照与语义审计
+## 批次效应整合说明
 
-- 官方 Scanpy PBMC3k 教程使用同一经典 10x PBMC3k 数据，原始规模为 `2700 x 32738`，基础过滤后为 `2700 x 13714`，按 `n_genes_by_counts < 2500`、`n_genes_by_counts > 200`、`pct_counts_mt < 5` 后为 `2638 x 13714`。
-- 本平台流程不是逐行复刻官方教程：平台 QC 默认包含 Scrublet 双细胞处理、细胞周期评分和更宽松的 MT 阈值，因此最终为 `{adata.n_obs} x {adata.n_vars}`。报告不能声称与官方教程完全一致，只能声称使用同一数据并获得相近 PBMC 生物学结构。
-- 官方教程 Leiden `resolution=0.7` 得到 8 个群；本平台主聚类使用 `primary_resolution=0.8`，得到 `{len(cluster_counts)}` 个群，粒度接近官方教程。
-- 当前注释使用 `PBMC` marker set，覆盖官方教程中的 CD4 T、CD14+ Monocytes、B、CD8 T、NK、FCGR3A+ Monocytes、Dendritic 和 Megakaryocytes marker 结构。
-- QC summary 中 `cells_removed_by_qc_and_doublet` 表示 QC 与 doublet 过滤后的综合减少量，不再声称是纯 doublet 数。
-- annotation summary 中 `score_margin` 是 marker 分数差距，不是概率置信度；若使用该方法，报告字段应为 `mean_score_margin`。
-- `Unknown` 代表 marker 分数不足或冲突的细胞，不应解读为新的细胞类型。
-- 比例分析为了给 PBMC3k 单样本数据提供网页展示，使用 QC 生成的真实细胞周期列 `phase` 作为分组；这不是疾病/处理/批次差异分析。
-- PBMC3k 演示中比例分析不按细胞类型数量过滤小类，避免把 rare population 从最终 h5ad 和报告中删掉。
-- 拟时序图用于展示扩散图和 DPT 的探索性几何结构；PBMC3k 不是明确时间序列数据，不能解读为真实发育时间轴。
-- 本演示没有运行 cell communication，因为 PBMC3k 缺少实验条件对比，且配体受体分析依赖额外数据库/LIANA 环境；可作为后续真实项目的可选模块。
+- 本次将 `52alg_singlet_matrix` 标记为 `batch=organoid`，将 `52tissue_singlet_matrix` 标记为 `batch=tissue`。
+- 本次运行参数为 `method=combat`。当前环境中 OmicVerse ComBat 入口会触发 `unhashable type: 'list'`，因此平台批次校正模块自动回退到 Scanpy ComBat PCA，并在 `batch_correct` summary 的 `fallback` 字段记录。
+- 下游聚类使用校正后的 embedding：`{(batch_summary or {}).get('embedding_key', 'unknown')}`。
+- `organoid` 与 `tissue` 同时也是生物来源差异，不只是技术批次。批次校正后的 UMAP/cluster 用于共同嵌入和分群，不应单独作为消除全部生物差异的证据。
+- 自动注释使用内置 `TME` marker set，只能作为初步参考；关键细胞类型应结合 marker heatmap、dotplot、DEG 和原始文献/实验背景复核。
 
 ## 使用说明
 
-打开项目页面后进入 `Classic PBMC3k scRNA` 项目即可查看任务与结果。图表也可以直接打开：
+网页项目页：`/projects/{PROJECT_ID}`
+
+离线总画廊：
 
 `{gallery_path}`
 """
@@ -361,10 +404,11 @@ def summarize(final_path, module_results, raw_path, download_status, gallery_pat
     if project:
         project.status = "completed"
         project.metadata_json = json.dumps({
-            "source": "scanpy.datasets.pbmc3k",
+            "source_dirs": SOURCE_DIRS,
             "raw_path": raw_path,
             "final_adata_path": final_path,
             "gallery_path": gallery_path,
+            "batch_counts": batch_counts,
             "n_cells": int(adata.n_obs),
             "n_genes": int(adata.n_vars),
         }, ensure_ascii=False)
@@ -376,16 +420,15 @@ def summarize(final_path, module_results, raw_path, download_status, gallery_pat
         "final_path": final_path,
         "n_cells": int(adata.n_obs),
         "n_genes": int(adata.n_vars),
+        "batch_counts": batch_counts,
         "clusters": cluster_counts,
         "celltypes": celltypes,
     }
 
 
 def main():
-    from config import Config
-
     ensure_project()
-    raw_path, download_status = download_pbmc3k()
+    raw_path, raw_stats = build_merged_input()
 
     current_input = raw_path
     module_results = []
@@ -397,7 +440,7 @@ def main():
         current_input = result["output_adata"]
 
     gallery_path = make_gallery(all_result_files)
-    summary = summarize(current_input, module_results, raw_path, download_status, gallery_path)
+    summary = summarize(current_input, module_results, raw_path, raw_stats, gallery_path)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"Project URL: /projects/{PROJECT_ID}")
     print(f"Report: {os.path.abspath(REPORT_PATH)}")

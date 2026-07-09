@@ -120,7 +120,7 @@
                 </div>
 
                 {% for param in schema %}
-                <div class="mb-3">
+                <div class="mb-3 param-field" data-param-key="{{ param.key }}"{% if param.get('show_if') %} data-show-if='{{ param.get('show_if')|tojson }}'{% endif %}>
                     <label class="form-label">{{ param.label }}</label>
                     {% if param.type == 'select' %}
                     <select name="{{ param.key }}" class="form-select">
@@ -266,6 +266,7 @@ function escapeHtml(text) {
 function collectCurrentParams() {
     const params = {};
     document.querySelectorAll('.param-form input, .param-form select, .param-form textarea').forEach(el => {
+        if (el.disabled) return;
         const name = el.name;
         if (!name || name === 'input_path') return;
         if (el.type === 'checkbox') {
@@ -306,6 +307,47 @@ function applyPresetToForm(presetParams) {
         } else {
             el.value = value;
         }
+    });
+    updateConditionalParams();
+}
+
+function findParamControl(name) {
+    return Array.from(document.querySelectorAll('.param-form input, .param-form select, .param-form textarea'))
+        .find(el => el.name === name);
+}
+
+function getParamValue(name) {
+    const el = findParamControl(name);
+    if (!el) return null;
+    if (el.type === 'checkbox') return el.checked;
+    return el.value;
+}
+
+function conditionValueMatches(actual, expected) {
+    if (Array.isArray(expected)) {
+        return expected.some(item => conditionValueMatches(actual, item));
+    }
+    if (typeof expected === 'boolean') {
+        return Boolean(actual) === expected;
+    }
+    return String(actual) === String(expected);
+}
+
+function updateConditionalParams() {
+    document.querySelectorAll('.param-field[data-show-if]').forEach(field => {
+        let condition = {};
+        try {
+            condition = JSON.parse(field.dataset.showIf || '{}');
+        } catch (e) {
+            condition = {};
+        }
+        const visible = Object.entries(condition).every(([key, expected]) => {
+            return conditionValueMatches(getParamValue(key), expected);
+        });
+        field.style.display = visible ? '' : 'none';
+        field.querySelectorAll('input, select, textarea').forEach(el => {
+            el.disabled = !visible;
+        });
     });
 }
 
@@ -373,6 +415,12 @@ document.getElementById('btn-confirm-save').addEventListener('click', async () =
 });
 
 loadPresets();
+
+updateConditionalParams();
+document.querySelectorAll('.param-form input, .param-form select, .param-form textarea').forEach(el => {
+    el.addEventListener('change', updateConditionalParams);
+    el.addEventListener('input', updateConditionalParams);
+});
 
 // === Multiselect 动态加载 ===
 document.querySelectorAll('.multiselect-group').forEach(async (group) => {

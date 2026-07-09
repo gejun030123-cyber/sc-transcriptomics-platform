@@ -118,6 +118,47 @@ class HVGAnalysis(BaseAnalysis):
                              plot_bgcolor='white', width=600, height=400)
             result_files.append(self.save_plotly_json(fig, plots_dir, 'hvg_scatter.json', 'scatter', 'Highly Variable Genes'))
 
+            if self.params.get('show_hvg_rank_plot', True):
+                ranked = adata.var.copy().sort_values(y_col, ascending=False)
+                ranked['rank'] = np.arange(1, len(ranked) + 1)
+                rank_df = ranked.iloc[:min(5000, len(ranked))].copy()
+                fig_rank = go.Figure()
+                fig_rank.add_trace(go.Scattergl(
+                    x=rank_df['rank'],
+                    y=rank_df[y_col],
+                    mode='markers',
+                    marker=dict(
+                        size=3,
+                        color=rank_df['highly_variable'].map({True: '#e53935', False: '#9e9e9e'}),
+                        opacity=0.75,
+                    ),
+                    text=rank_df.index.astype(str).tolist(),
+                    hovertemplate='Rank: %{x}<br>Gene: %{text}<br>' + y_col + ': %{y:.3f}<extra></extra>',
+                ))
+                for gene_name, row in rank_df.iloc[:15].iterrows():
+                    fig_rank.add_annotation(
+                        x=int(row['rank']),
+                        y=float(row[y_col]),
+                        text=str(gene_name),
+                        showarrow=True,
+                        arrowhead=2,
+                        ax=20,
+                        ay=-20,
+                        font=dict(size=9),
+                    )
+                fig_rank.update_layout(
+                    title='HVG Rank Plot',
+                    xaxis_title='Gene rank',
+                    yaxis_title=y_col,
+                    plot_bgcolor='white',
+                    width=760,
+                    height=460,
+                )
+                result_files.append(self.save_plotly_json(
+                    fig_rank, plots_dir, 'hvg_rank_plot.json',
+                    'scatter', 'HVG Rank Plot'
+                ))
+
         self.progress(90, "Saving output...")
         output_path = self.save_output(adata, 'hvg')
 

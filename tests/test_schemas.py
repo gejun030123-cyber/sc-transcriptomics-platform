@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import pytest
 from modules.schemas import (
     parse_form_params, SC_MODULE_LIST, BULK_MODULE_LIST, MODULE_LIST,
-    MODULE_DISPLAY_MAP, STATUS_MAP, PARAM_SCHEMAS,
+    MODULE_DISPLAY_MAP, STATUS_MAP, PARAM_SCHEMAS, filter_active_params,
 )
 
 
@@ -128,3 +128,68 @@ class TestParseFormParams:
         """空 schema → 空 dict。"""
         result = parse_form_params([], {'anything': 'value'})
         assert result == {}
+
+    def test_show_if_skips_inactive_params(self):
+        """show_if 不匹配的参数不应被表单解析保存。"""
+        schema = [
+            {'key': 'method', 'type': 'select', 'default': 'harmony'},
+            {
+                'key': 'harmony_theta',
+                'type': 'number',
+                'default': 2.0,
+                'show_if': {'method': 'harmony'},
+            },
+            {
+                'key': 'bbknn_neighbors_within_batch',
+                'type': 'number',
+                'default': 3,
+                'show_if': {'method': 'bbknn'},
+            },
+        ]
+        form = {
+            'method': 'bbknn',
+            'harmony_theta': '9',
+            'bbknn_neighbors_within_batch': '4',
+        }
+        result = parse_form_params(schema, form)
+        assert result == {
+            'method': 'bbknn',
+            'bbknn_neighbors_within_batch': 4.0,
+        }
+
+    def test_show_if_supports_checkbox_conditions(self):
+        """show_if 应正确识别 checkbox 的开关状态。"""
+        schema = [
+            {'key': 'evaluate_correction', 'type': 'checkbox', 'default': True},
+            {
+                'key': 'evaluation_sample_size',
+                'type': 'number',
+                'default': 10000,
+                'show_if': {'evaluate_correction': True},
+            },
+        ]
+        assert parse_form_params(schema, {}) == {'evaluate_correction': False}
+        assert parse_form_params(schema, {
+            'evaluate_correction': 'on',
+            'evaluation_sample_size': '500',
+        }) == {
+            'evaluate_correction': True,
+            'evaluation_sample_size': 500.0,
+        }
+
+    def test_filter_active_params_reuses_schema_conditions(self):
+        """非表单入口也应复用 show_if 过滤无关参数。"""
+        schema = [
+            {'key': 'method', 'type': 'select', 'default': 'harmony'},
+            {'key': 'harmony_theta', 'type': 'number', 'default': 2.0, 'show_if': {'method': 'harmony'}},
+            {'key': 'bbknn_neighbors_within_batch', 'type': 'number', 'default': 3, 'show_if': {'method': 'bbknn'}},
+        ]
+        result = filter_active_params(schema, {
+            'method': 'bbknn',
+            'harmony_theta': 9.0,
+            'bbknn_neighbors_within_batch': 4.0,
+        })
+        assert result == {
+            'method': 'bbknn',
+            'bbknn_neighbors_within_batch': 4.0,
+        }

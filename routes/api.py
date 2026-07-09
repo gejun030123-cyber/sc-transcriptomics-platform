@@ -22,9 +22,21 @@ def _validate_file_path(file_path):
     """校验文件路径在允许的目录内，防止路径遍历攻击"""
     if not file_path:
         return False
-    abs_path = os.path.abspath(file_path)
-    data_dir = os.path.abspath(Config.DATA_DIR)
-    return abs_path.startswith(data_dir + os.sep) or abs_path == data_dir
+    if os.path.islink(file_path):
+        return False
+    try:
+        real_path = os.path.realpath(file_path)
+        data_dir = os.path.realpath(Config.DATA_DIR)
+    except (OSError, ValueError):
+        return False
+    return real_path.startswith(data_dir + os.sep) or real_path == data_dir
+
+
+def _validate_project_file_path(file_path, project_id):
+    if not file_path or not project_id:
+        return False
+    is_valid, _ = Config._validate_path(file_path, project_id)
+    return is_valid and os.path.isfile(file_path)
 
 
 def _get_project_presets_dir(project_id):
@@ -135,6 +147,12 @@ def system_status():
         'active_tasks': active_count(),
     })
 
+
+@api_bp.route('/system/dependencies')
+def system_dependencies():
+    from modules.platform.system_health import dependency_status
+    return jsonify(dependency_status())
+
 @api_bp.route('/projects/<pid>/adata-info')
 def adata_info(pid):
     p = Project.get_by_id(pid)
@@ -164,11 +182,19 @@ def adata_info(pid):
         logger.exception("API error")
         return jsonify({'error': str(e)}), 500
 
+@api_bp.route('/projects/<pid>/result-file/<file_id>')
 @api_bp.route('/result-file/<file_id>')
-def get_result_file(file_id):
+def get_result_file(file_id, pid=None):
     f = ResultFile.get_by_id(file_id)
     if not f:
         return jsonify({'error': 'Not found'}), 404
+    pid = pid or request.args.get('project_id', '').strip()
+    if not pid:
+        return jsonify({'error': 'project_id required'}), 400
+    if f.project_id != pid:
+        return jsonify({'error': 'Result file 不属于该项目'}), 403
+    if not _validate_project_file_path(f.file_path, f.project_id):
+        return jsonify({'error': '文件路径不在所属项目内'}), 403
     if f.file_type == 'plotly_json':
         with open(f.file_path, 'r') as fh:
             data = json.load(fh)
@@ -178,14 +204,25 @@ def get_result_file(file_id):
     return send_file(f.file_path)
 
 
+@api_bp.route('/projects/<pid>/enrichment-result/<task_id>')
 @api_bp.route('/enrichment-result/<task_id>')
-def enrichment_result(task_id):
+def enrichment_result(task_id, pid=None):
     """返回富集分析的 Plotly JSON 结果"""
     from models import ResultFile
+    task = AnalysisTask.get_by_id(task_id)
+    if not task:
+        return jsonify({'error': 'Task not found'}), 404
+    pid = pid or request.args.get('project_id', '').strip()
+    if not pid:
+        return jsonify({'error': 'project_id required'}), 400
+    if task.project_id != pid:
+        return jsonify({'error': 'Task 不属于该项目'}), 403
     files = ResultFile.get_by_task(task_id)
     enrichment_files = [f for f in files if f.category == 'enrichment']
     result = []
     for f in enrichment_files:
+        if f.project_id != task.project_id or not _validate_project_file_path(f.file_path, f.project_id):
+            return jsonify({'error': '文件路径不在所属项目内'}), 403
         with open(f.file_path, 'r') as fh:
             data = json.load(fh)
         result.append({'id': f.id, 'label': f.label, 'data': data})
@@ -608,7 +645,7 @@ def create_pipeline_run(pid):
         return jsonify({'error': '输入文件不存在'}), 400
 
     # 构建参数（从 schema 默认值 + 请求参数合并）
-    from modules.schemas import PARAM_SCHEMAS
+    from modules.schemas import PARAM_SCHEMAS, filter_active_params
     params_by_module = {}
     for mod in modules:
         # 从 schema 获取默认值
@@ -640,7 +677,7 @@ def create_pipeline_run(pid):
                     schema_keys = {f['key'] for f in PARAM_SCHEMAS.get(mod, [])}
                     if key in schema_keys and key not in default_params:
                         default_params[key] = val
-        params_by_module[mod] = default_params
+        params_by_module[mod] = filter_active_params(schema, default_params)
 
     # 创建 PipelineRun
     pipeline_run = PipelineRun(
@@ -689,3 +726,60 @@ def pipeline_run_status(run_id):
         return jsonify({'error': 'Pipeline run 不存在'}), 404
 
     return jsonify(run.to_dict())
+
+
+@api_bp.route('/projects/<pid>/pipeline-runs/<run_id>/resume', methods=['POST'])
+def resume_pipeline_run(pid, run_id):
+    """Create a new PipelineRun starting from the failed module."""
+    from models import PipelineRun, AnalysisTask
+    from modules.reporting.pipeline_report import build_resume_plan
+    from worker import submit_pipeline_run
+
+    run = PipelineRun.get_by_id(run_id)
+    if not run:
+        return jsonify({'error': 'Pipeline run 不存在'}), 404
+    if run.project_id != pid:
+        return jsonify({'error': 'Pipeline run 不属于该项目'}), 403
+    if run.status != 'failed':
+        return jsonify({'error': '只有 failed 状态的 Pipeline run 可以续跑'}), 400
+
+    try:
+        task_ids = json.loads(run.task_ids_json) if run.task_ids_json else []
+    except Exception:
+        task_ids = []
+    tasks = [t for tid in task_ids for t in [AnalysisTask.get_by_id(tid)] if t]
+    resume_plan = build_resume_plan(run, tasks)
+    if not resume_plan.get('can_resume'):
+        return jsonify({'error': resume_plan.get('reason', '无法续跑'), 'resume_plan': resume_plan}), 400
+
+    input_path = resume_plan['resume_input_path']
+    is_valid, err = Config._validate_path(input_path, pid)
+    if not is_valid:
+        return jsonify({'error': err}), 400
+    if not os.path.isfile(input_path):
+        return jsonify({'error': '续跑输入文件不存在'}), 400
+
+    modules = resume_plan['remaining_modules']
+    params_by_module = resume_plan.get('params', {})
+    new_run = PipelineRun(
+        project_id=pid,
+        name=f"{run.name} - resume",
+        analysis_type=run.analysis_type,
+        input_path=input_path,
+        modules_json=json.dumps(modules),
+        params_json=json.dumps(params_by_module, ensure_ascii=False),
+    )
+    new_run.save()
+    submit_pipeline_run(
+        run_id=new_run.id,
+        project_id=pid,
+        modules=modules,
+        params_by_module=params_by_module,
+        project_dir=Config.project_dir(pid),
+        input_path=input_path,
+    )
+    return jsonify({
+        'id': new_run.id,
+        'message': '续跑流程已启动',
+        'resume_plan': resume_plan,
+    }), 201

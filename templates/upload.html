@@ -13,8 +13,8 @@
                     </svg>
                 </div>
                 <h5>拖拽文件到此处</h5>
-                <p class="text-muted">支持格式：.h5ad, .h5, .mtx/.tsv (10x Genomics), .csv, .txt, .xlsx, .xls</p>
-                <input type="file" id="file-input" class="d-none" accept=".h5ad,.h5,.csv,.txt,.gz,.xlsx,.xls,.mtx,.tsv" multiple>
+                <p class="text-muted">支持格式：.h5ad, .h5/.hdf5, .loom, .mtx/.tsv (10x Genomics), .csv, .txt, .xlsx, .xls</p>
+                <input type="file" id="file-input" class="d-none" accept=".h5ad,.h5,.hdf5,.loom,.csv,.txt,.gz,.xlsx,.xls,.mtx,.tsv" multiple>
                 <button class="btn btn-primary btn-sm" onclick="document.getElementById('file-input').click()">
                     选择文件
                 </button>
@@ -72,6 +72,50 @@
                 <div class="alert alert-success" id="tenx-result-msg"></div>
                 <a href="/projects/{{ project.id }}" class="btn btn-outline-primary btn-sm">返回项目</a>
             </div>
+            <div id="sc-import-status" class="mt-3 d-none">
+                <div class="alert alert-info">
+                    <strong>单细胞数据导入</strong>
+                    <div class="small mt-1">检测到可导入的 h5ad / 10x h5 / loom / zarr 文件，可统一标准化为 h5ad。</div>
+                </div>
+                <div class="card p-3 mt-2">
+                    <div class="mb-2">
+                        <label class="form-label small">数据文件</label>
+                        <select class="form-select form-select-sm" id="sc-import-file"></select>
+                    </div>
+                    <div class="row mb-2">
+                        <div class="col-md-6">
+                            <label class="form-label small">物种（可选）</label>
+                            <select class="form-select form-select-sm" id="sc-import-species">
+                                <option value="">不指定</option>
+                                <option value="human">人类 (Human)</option>
+                                <option value="mouse">小鼠 (Mouse)</option>
+                                <option value="rat">大鼠 (Rat)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small">基因组版本（可选）</label>
+                            <input type="text" class="form-control form-control-sm" id="sc-import-genome" placeholder="如 GRCh38、mm10">
+                        </div>
+                    </div>
+                    <button class="btn btn-primary btn-sm w-100" id="btn-import-sc" onclick="startImportSc()">
+                        导入为标准 h5ad
+                    </button>
+                </div>
+            </div>
+            <div id="sc-import-progress" class="mt-3 d-none">
+                <div class="d-flex justify-content-between mb-1">
+                    <span>单细胞数据导入</span>
+                    <span id="sc-import-pct">0%</span>
+                </div>
+                <div class="progress-container">
+                    <div class="progress-bar-inner" id="sc-import-bar" style="width:0%"></div>
+                </div>
+                <div class="small text-muted mt-1" id="sc-import-msg"></div>
+            </div>
+            <div id="sc-import-result" class="mt-3 d-none">
+                <div class="alert alert-success" id="sc-import-result-msg"></div>
+                <a href="/projects/{{ project.id }}" class="btn btn-outline-primary btn-sm">返回项目</a>
+            </div>
         </div>
 
         <form method="post" enctype="multipart/form-data" class="mt-3">
@@ -119,6 +163,7 @@ function uploadNext() {
         resultDiv.classList.remove('d-none');
         document.getElementById('upload-msg').textContent = '所有文件上传完成！';
         check10x();
+        checkScImport();
         return;
     }
     const file = uploadQueue[uploadIndex];
@@ -186,6 +231,111 @@ function check10x() {
 
 // 页面加载时也检测一次（处理已上传部分文件后刷新页面的情况）
 check10x();
+checkScImport();
+
+function checkScImport() {
+    fetch('/projects/{{ project.id }}/upload/check-sc-import')
+        .then(r => r.json())
+        .then(data => {
+            const statusDiv = document.getElementById('sc-import-status');
+            const select = document.getElementById('sc-import-file');
+            if (!data.has_importable || !data.files || !data.files.length) {
+                statusDiv.classList.add('d-none');
+                select.innerHTML = '';
+                return;
+            }
+            statusDiv.classList.remove('d-none');
+            select.innerHTML = '';
+            for (const f of data.files) {
+                const opt = document.createElement('option');
+                opt.value = f.name;
+                opt.dataset.format = f.format || 'auto';
+                const size = f.size_mb === null || f.size_mb === undefined ? '' : `, ${f.size_mb} MB`;
+                opt.textContent = `${f.name} (${f.format || 'auto'}${size})`;
+                select.appendChild(opt);
+            }
+        });
+}
+
+function startImportSc() {
+    const btn = document.getElementById('btn-import-sc');
+    const select = document.getElementById('sc-import-file');
+    if (!select.value) {
+        alert('请选择要导入的文件');
+        return;
+    }
+    btn.disabled = true;
+    btn.textContent = '导入中...';
+
+    const formData = new FormData();
+    formData.append('source_file', select.value);
+    formData.append('input_format', select.options[select.selectedIndex].dataset.format || 'auto');
+
+    const species = document.getElementById('sc-import-species').value;
+    const genome = document.getElementById('sc-import-genome').value;
+    if (species) formData.append('species', species);
+    if (genome) formData.append('genome', genome);
+
+    fetch('/projects/{{ project.id }}/upload/import-sc', {
+        method: 'POST',
+        body: formData,
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) {
+            btn.disabled = false;
+            btn.textContent = '导入为标准 h5ad';
+            alert('导入失败：' + data.error);
+            return;
+        }
+        document.getElementById('sc-import-progress').classList.remove('d-none');
+        pollScImportTask(data.task_id);
+    })
+    .catch(() => {
+        btn.disabled = false;
+        btn.textContent = '导入为标准 h5ad';
+        alert('请求失败，请重试');
+    });
+}
+
+function pollScImportTask(taskId) {
+    const interval = setInterval(() => {
+        fetch(`/api/tasks/${taskId}/status`)
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('sc-import-bar').style.width = data.progress + '%';
+                document.getElementById('sc-import-pct').textContent = data.progress + '%';
+                document.getElementById('sc-import-msg').textContent = data.progress_message || '';
+
+                if (data.status === 'completed') {
+                    clearInterval(interval);
+                    document.getElementById('sc-import-progress').classList.add('d-none');
+                    document.getElementById('sc-import-result').classList.remove('d-none');
+                    const summary = data.result || {};
+                    let msg = `导入完成！${summary.n_cells || '?'} 个细胞，${summary.n_genes || '?'} 个基因`;
+                    const details = [];
+                    if (summary.input_format) details.push(`格式：${summary.input_format}`);
+                    if (summary.sparsity !== undefined) details.push(`稀疏度：${summary.sparsity}%`);
+                    if (summary.file_size_mb !== undefined) details.push(`文件大小：${summary.file_size_mb} MB`);
+                    if (summary.output_file) details.push(`输出：${summary.output_file}`);
+                    if (details.length) msg += '<br>' + details.join(' | ');
+                    document.getElementById('sc-import-result-msg').innerHTML = msg;
+                    document.getElementById('btn-import-sc').disabled = false;
+                    document.getElementById('btn-import-sc').textContent = '导入为标准 h5ad';
+                    checkScImport();
+                } else if (data.status === 'failed') {
+                    clearInterval(interval);
+                    document.getElementById('sc-import-progress').classList.add('d-none');
+                    document.getElementById('sc-import-result').classList.remove('d-none');
+                    document.getElementById('sc-import-result-msg').className = 'alert alert-danger';
+                    document.getElementById('sc-import-result-msg').textContent =
+                        '导入失败：' + (data.error_traceback || data.progress_message || '未知错误');
+                    document.getElementById('btn-import-sc').disabled = false;
+                    document.getElementById('btn-import-sc').textContent = '导入为标准 h5ad';
+                }
+            });
+    }, 2000);
+}
 
 function startConvert10x() {
     const btn = document.getElementById('btn-convert-10x');

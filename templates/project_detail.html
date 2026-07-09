@@ -458,16 +458,18 @@ async function loadAgentState() {
     content.innerHTML = '<div class="text-center py-3"><div class="spinner-border spinner-border-sm"></div> 加载中...</div>';
 
     try {
-        const [ctxResp, sessResp, branchResp, jobResp] = await Promise.all([
+        const [ctxResp, sessResp, branchResp, jobResp, compareResp] = await Promise.all([
             fetch('/api/projects/' + PROJECT_ID + '/current-context'),
             fetch('/api/projects/' + PROJECT_ID + '/agent/sessions'),
             fetch('/api/projects/' + PROJECT_ID + '/branches'),
             fetch('/api/projects/' + PROJECT_ID + '/agent/jobs'),
+            fetch('/api/projects/' + PROJECT_ID + '/branches/compare'),
         ]);
         const ctx = await ctxResp.json();
         const sessions = (await sessResp.json()).sessions || [];
         const branches = (await branchResp.json()).branches || [];
         const jobs = (await jobResp.json()).jobs || [];
+        const comparison = await compareResp.json();
 
         let html = '';
 
@@ -511,6 +513,15 @@ async function loadAgentState() {
         if (branches.length > 0) {
             branches.sort((a, b) => (b.accepted || 0) - (a.accepted || 0));
             html += '<div style="font-weight:600;margin-bottom:6px;">候选分支 (' + branches.length + ')</div>';
+            if (comparison && comparison.branches) {
+                const best = comparison.branches.find(x => x.branch_id === comparison.best_branch_id);
+                const accepted = comparison.branches.find(x => x.branch_id === comparison.accepted_branch_id);
+                html += '<div style="background:#f5f7fa;border:1px solid #d9e2ec;border-radius:6px;padding:7px 8px;margin-bottom:8px;font-size:11px;">';
+                if (best) html += '<div>推荐候选: <strong>' + escapeHtml(best.branch_name) + '</strong>' + (best.best_score != null ? ' (' + (best.best_score * 100).toFixed(0) + '%)' : '') + '</div>';
+                if (accepted) html += '<div>已采纳: <strong>' + escapeHtml(accepted.branch_name) + '</strong></div>';
+                html += '<div>参数差异项: ' + ((comparison.param_diff || []).length) + '</div>';
+                html += '</div>';
+            }
 
             for (const b of branches) {
                 let cardClass = 'branch-card';
@@ -616,6 +627,9 @@ async function acceptBranch(branchId, branchName) {
         if (data.error) {
             alert('采纳失败: ' + data.error);
         } else {
+            if (data.accepted_report && data.accepted_report.markdown_path) {
+                alert('采纳成功，已生成采纳记录：' + data.accepted_report.markdown_path);
+            }
             loadAgentState();
         }
     } catch (e) {

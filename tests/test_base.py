@@ -30,6 +30,16 @@ def _make_analysis(params=None):
     )
 
 
+def test_progress_allows_missing_callback():
+    """Branch/agent runners may omit progress callbacks; progress should be a no-op."""
+    analysis = _StubAnalysis(
+        project_dir='/tmp/test_project',
+        params={},
+        progress_callback=None,
+    )
+    analysis.progress(10, 'running')
+
+
 def _make_adata(n_obs=10, obs_dict=None):
     """创建测试用 AnnData。"""
     X = np.random.rand(n_obs, 5)

@@ -95,6 +95,7 @@ def _run_sweep_background(job, goal_id, candidates, base_checkpoint, project_id)
 def _run_sweep_loop(job, goal_id, candidates, base_checkpoint, project_id, results, errors, total):
     """逐候选执行 sweep（在顶层 try/except 内）。"""
     from modules import MODULE_REGISTRY
+    from worker import register_task_outputs
 
     for i, candidate in enumerate(candidates):
         branch_name = candidate['name']
@@ -149,6 +150,7 @@ def _run_sweep_loop(job, goal_id, candidates, base_checkpoint, project_id, resul
 
         try:
             current_input = base_checkpoint
+            current_task = None
             for mod_name in modules_list:
                 cls = MODULE_REGISTRY.get(mod_name)
                 if not cls:
@@ -162,16 +164,27 @@ def _run_sweep_loop(job, goal_id, candidates, base_checkpoint, project_id, resul
                 )
                 task.save()
                 task.mark_running()
+                current_task = task
 
-                module = cls(project_dir=branch_dir, params=params.get(mod_name, {}), progress_callback=None)
+                task_progress_log = []
+
+                def progress_cb(pct, message, _task=task, _module=mod_name):
+                    from datetime import datetime
+                    now = datetime.now().strftime('%H:%M:%S')
+                    task_progress_log.append({'time': now, 'pct': pct, 'msg': f'[{_module}] {message}'})
+                    _task.update_progress(pct, message, json.dumps(task_progress_log, ensure_ascii=False))
+
+                module = cls(project_dir=branch_dir, params=params.get(mod_name, {}), progress_callback=progress_cb)
                 result = module.run(current_input)
 
                 output_adata = result.get('output_adata')
                 if not output_adata:
                     raise ValueError(f'模块 {mod_name} 未返回 output_adata')
 
+                register_task_outputs(task, project_id, branch_dir, result)
                 task.mark_completed(output_adata, json.dumps(result.get('summary', {}), ensure_ascii=False))
                 current_input = output_adata
+                current_task = None
 
             branch.mark_completed(current_input)
 
@@ -222,6 +235,11 @@ def _run_sweep_loop(job, goal_id, candidates, base_checkpoint, project_id, resul
         except Exception as e:
             tb = traceback.format_exc()
             logger.error(f"[AgentJob] Candidate {branch_name} failed:\n{tb}")
+            if 'current_task' in locals() and current_task is not None:
+                try:
+                    current_task.mark_failed(tb)
+                except Exception as db_err:
+                    logger.warning(f"[AgentJob] Failed to mark task {current_task.id} failed: {db_err}")
             try:
                 branch.mark_failed(tb)
             except Exception:

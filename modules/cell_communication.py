@@ -118,6 +118,74 @@ class CellCommunicationAnalysis(BaseAnalysis):
             except Exception as e:
                 logger.warning("生成热图失败: %s", e)
 
+        if self.params.get('show_network', True):
+            try:
+                import numpy as np
+                import plotly.graph_objects as go
+                if 'source' in liana_results.columns and 'target' in liana_results.columns:
+                    edge_df = (
+                        liana_results.groupby(['source', 'target'])
+                        .size()
+                        .reset_index(name='count')
+                        .sort_values('count', ascending=False)
+                    )
+                    edge_df = edge_df.iloc[:max(1, top_n)].copy()
+                    nodes = sorted(set(edge_df['source'].astype(str)) | set(edge_df['target'].astype(str)))
+                    if nodes:
+                        angles = np.linspace(0, 2 * np.pi, len(nodes), endpoint=False)
+                        positions = {node: (float(np.cos(a)), float(np.sin(a))) for node, a in zip(nodes, angles)}
+                        max_count = max(float(edge_df['count'].max()), 1.0)
+                        fig_net = go.Figure()
+                        for _, row in edge_df.iterrows():
+                            source = str(row['source'])
+                            target = str(row['target'])
+                            count = float(row['count'])
+                            x0, y0 = positions[source]
+                            x1, y1 = positions[target]
+                            fig_net.add_trace(go.Scatter(
+                                x=[x0, x1],
+                                y=[y0, y1],
+                                mode='lines',
+                                line=dict(width=1 + 7 * count / max_count, color='rgba(229,57,53,0.35)'),
+                                hoverinfo='text',
+                                text=f'{source} → {target}<br>Interactions: {int(count)}',
+                                showlegend=False,
+                            ))
+                        degrees = {node: 0 for node in nodes}
+                        for _, row in edge_df.iterrows():
+                            degrees[str(row['source'])] += int(row['count'])
+                            degrees[str(row['target'])] += int(row['count'])
+                        fig_net.add_trace(go.Scatter(
+                            x=[positions[n][0] for n in nodes],
+                            y=[positions[n][1] for n in nodes],
+                            mode='markers+text',
+                            marker=dict(
+                                size=[max(14, min(42, 10 + degrees[n])) for n in nodes],
+                                color=[degrees[n] for n in nodes],
+                                colorscale='Viridis',
+                                line=dict(width=1, color='white'),
+                                colorbar=dict(title='Degree'),
+                            ),
+                            text=nodes,
+                            textposition='top center',
+                            hovertemplate='Cell type: %{text}<br>Weighted degree: %{marker.color}<extra></extra>',
+                            showlegend=False,
+                        ))
+                        fig_net.update_layout(
+                            title=f'Top {len(edge_df)} Cell Communication Network',
+                            xaxis=dict(showgrid=False, zeroline=False, visible=False),
+                            yaxis=dict(showgrid=False, zeroline=False, visible=False),
+                            plot_bgcolor='white',
+                            width=720,
+                            height=620,
+                        )
+                        result_files.append(self.save_plotly_json(
+                            fig_net, plots_dir, 'cell_communication_network.json',
+                            'network', 'Communication Network'
+                        ))
+            except Exception as e:
+                logger.warning("生成通讯网络图失败: %s", e)
+
         # Save output
         self.progress(90, "Saving output...")
         output_path = self.save_output(adata, 'cell_communication')

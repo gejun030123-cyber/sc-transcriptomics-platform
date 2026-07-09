@@ -79,6 +79,44 @@ class QCReassessAnalysis(BaseAnalysis):
 
         n_low = stats_df['low_quality'].sum()
 
+        if self.params.get('show_cluster_qc_bar', True) and not stats_df.empty:
+            from plotly.subplots import make_subplots
+            color_by_quality = stats_df['low_quality'].map({True: '#e53935', False: '#3949ab'}).tolist()
+            fig_qc_bar = make_subplots(
+                rows=2, cols=2,
+                subplot_titles=['Cell count', 'Mean detected genes', 'Mean MT%', 'Doublet fraction'],
+            )
+            fig_qc_bar.add_trace(go.Bar(
+                x=stats_df['cluster'], y=stats_df['n_cells'], marker_color=color_by_quality,
+                hovertemplate='Cluster: %{x}<br>Cells: %{y}<extra></extra>',
+            ), row=1, col=1)
+            fig_qc_bar.add_trace(go.Bar(
+                x=stats_df['cluster'], y=stats_df['mean_n_genes'], marker_color=color_by_quality,
+                hovertemplate='Cluster: %{x}<br>Mean genes: %{y}<extra></extra>',
+            ), row=1, col=2)
+            fig_qc_bar.add_trace(go.Bar(
+                x=stats_df['cluster'], y=stats_df['mean_pct_mt'], marker_color=color_by_quality,
+                hovertemplate='Cluster: %{x}<br>Mean MT%: %{y}<extra></extra>',
+            ), row=2, col=1)
+            fig_qc_bar.add_trace(go.Bar(
+                x=stats_df['cluster'], y=stats_df['doublet_fraction'], marker_color=color_by_quality,
+                hovertemplate='Cluster: %{x}<br>Doublet fraction: %{y:.3f}<extra></extra>',
+            ), row=2, col=2)
+            fig_qc_bar.update_layout(
+                title='Cluster QC Summary',
+                plot_bgcolor='white',
+                width=900,
+                height=700,
+                showlegend=False,
+            )
+            for i in range(1, 3):
+                for j in range(1, 3):
+                    fig_qc_bar.update_xaxes(title_text='Cluster', row=i, col=j)
+            result_files.append(self.save_plotly_json(
+                fig_qc_bar, plots_dir, 'qc_reassess_cluster_qc_bar.json',
+                'bar', 'Cluster QC Summary'
+            ))
+
         # Auto-remove low quality clusters
         if auto_remove and n_low > 0:
             low_clusters = set(stats_df[stats_df['low_quality']]['cluster'].tolist())

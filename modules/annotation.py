@@ -223,6 +223,68 @@ class AnnotationAnalysis(BaseAnalysis):
         plots_dir = self.ensure_plots_dir()
         result_files = []
 
+        if self.params.get('show_celltype_composition', True) and 'celltype' in adata.obs.columns:
+            ct_counts_plot = adata.obs['celltype'].astype(str).value_counts()
+            ct_pct = ct_counts_plot / max(int(ct_counts_plot.sum()), 1) * 100
+            fig_comp = go.Figure()
+            fig_comp.add_trace(go.Bar(
+                x=ct_counts_plot.index.tolist(),
+                y=ct_counts_plot.values.astype(int).tolist(),
+                marker_color='#00897b',
+                customdata=ct_pct.round(2).values,
+                text=[f'{p:.1f}%' for p in ct_pct.values],
+                textposition='outside',
+                hovertemplate='Cell type: %{x}<br>Cells: %{y}<br>Percent: %{customdata:.2f}%<extra></extra>',
+            ))
+            fig_comp.update_layout(
+                title='Cell Type Composition',
+                xaxis_title='Cell type',
+                yaxis_title='Cell count',
+                plot_bgcolor='white',
+                width=max(700, 85 * max(1, len(ct_counts_plot))),
+                height=460,
+                xaxis=dict(tickangle=35),
+            )
+            result_files.append(self.save_plotly_json(
+                fig_comp, plots_dir, 'annotation_celltype_composition.json',
+                'bar', '细胞类型组成'
+            ))
+
+        if self.params.get('show_marker_score_heatmap', True):
+            score_cols = [c for c in adata.obs.columns if c.startswith('score_')]
+            if score_cols and leiden_key in adata.obs.columns:
+                cluster_labels = adata.obs[leiden_key].astype(str)
+                cluster_order = sorted(cluster_labels.unique(), key=lambda x: (len(x), x))
+                mean_scores = []
+                for cluster in cluster_order:
+                    mask = cluster_labels == cluster
+                    mean_scores.append(adata.obs.loc[mask, score_cols].mean().values)
+                score_matrix = np.asarray(mean_scores, dtype=float).T
+                row_mean = score_matrix.mean(axis=1, keepdims=True)
+                row_std = score_matrix.std(axis=1, keepdims=True) + 1e-10
+                z = np.clip((score_matrix - row_mean) / row_std, -3, 3)
+                fig_score_heat = go.Figure(data=go.Heatmap(
+                    z=z,
+                    x=cluster_order,
+                    y=[c.replace('score_', '') for c in score_cols],
+                    colorscale='RdBu',
+                    zmid=0,
+                    colorbar=dict(title='Row z-score'),
+                    hovertemplate='Cluster: %{x}<br>Marker set: %{y}<br>z-score: %{z:.2f}<extra></extra>',
+                ))
+                fig_score_heat.update_layout(
+                    title=f'Marker Score Heatmap by {leiden_key}',
+                    xaxis_title='Cluster',
+                    yaxis_title='Marker set',
+                    plot_bgcolor='white',
+                    width=max(700, 55 * max(1, len(cluster_order))),
+                    height=max(450, 24 * max(1, len(score_cols))),
+                )
+                result_files.append(self.save_plotly_json(
+                    fig_score_heat, plots_dir, 'annotation_marker_score_heatmap.json',
+                    'heatmap', 'Marker Score Heatmap'
+                ))
+
         # Dotplot for marker validation
         dotplot_genes = []
         for genes in markers.values():

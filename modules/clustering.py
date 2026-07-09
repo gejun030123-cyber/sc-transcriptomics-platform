@@ -33,6 +33,7 @@ class ClusteringAnalysis(BaseAnalysis):
         use_corrected = self.params.get('use_corrected', True)
         auto_select = self.params.get('auto_select_resolution', False)
         resolution_metric = self.params.get('resolution_metric', 'silhouette')
+        batch_key = self.params.get('batch_key', 'batch')
         primary_resolution = self.params.get('primary_resolution', None)
         if primary_resolution == '':
             primary_resolution = None
@@ -205,6 +206,63 @@ class ClusteringAnalysis(BaseAnalysis):
             adata.obs['leiden'] = adata.obs[primary_key].copy()
         elif 'leiden' not in adata.obs.columns:
             adata.obs['leiden'] = adata.obs[f'leiden_{resolutions[0]}'].copy()
+
+        if self.params.get('show_cluster_size_bar', True) and 'leiden' in adata.obs.columns:
+            cluster_labels = adata.obs['leiden'].astype(str)
+            cluster_counts = cluster_labels.value_counts().sort_index(key=lambda idx: idx.map(lambda x: (len(x), x)))
+            fig_size = go.Figure()
+            fig_size.add_trace(go.Bar(
+                x=cluster_counts.index.tolist(),
+                y=cluster_counts.values.astype(int).tolist(),
+                marker_color='#3949ab',
+                text=cluster_counts.values.astype(int).tolist(),
+                textposition='outside',
+                hovertemplate='Cluster: %{x}<br>Cells: %{y}<extra></extra>',
+            ))
+            fig_size.update_layout(
+                title=f'Cluster Size Distribution (primary res={best_res})',
+                xaxis_title='Cluster',
+                yaxis_title='Cell count',
+                plot_bgcolor='white',
+                width=max(650, 45 * max(1, len(cluster_counts))),
+                height=430,
+            )
+            result_files.append(self.save_plotly_json(
+                fig_size, plots_dir, 'cluster_size_bar.json',
+                'bar', 'Cluster Size Distribution'
+            ))
+
+        if (
+            self.params.get('show_cluster_batch_composition', True)
+            and 'leiden' in adata.obs.columns
+            and batch_key in adata.obs.columns
+        ):
+            batch_table = pd.crosstab(
+                adata.obs['leiden'].astype(str),
+                adata.obs[batch_key].astype(str),
+                normalize='index',
+            )
+            fig_batch = go.Figure()
+            for batch in batch_table.columns:
+                fig_batch.add_trace(go.Bar(
+                    x=batch_table.index.tolist(),
+                    y=batch_table[batch].values,
+                    name=str(batch),
+                    hovertemplate='Cluster: %{x}<br>' + batch_key + ': ' + str(batch) + '<br>Fraction: %{y:.2%}<extra></extra>',
+                ))
+            fig_batch.update_layout(
+                title=f'Batch Composition by Cluster ({batch_key})',
+                xaxis_title='Cluster',
+                yaxis_title='Fraction',
+                barmode='stack',
+                plot_bgcolor='white',
+                width=max(700, 55 * max(1, len(batch_table.index))),
+                height=460,
+            )
+            result_files.append(self.save_plotly_json(
+                fig_batch, plots_dir, 'cluster_batch_composition.json',
+                'bar', 'Cluster Batch Composition'
+            ))
 
         # 主分辨率 UMAP：添加 cluster label，便于汇报和截图
         if self.params.get('show_labeled_umap', True) and 'X_umap' in adata.obsm and 'leiden' in adata.obs.columns:

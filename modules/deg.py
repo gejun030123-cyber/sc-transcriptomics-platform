@@ -120,6 +120,47 @@ class DEGAnalysis(BaseAnalysis):
                              plot_bgcolor='white', width=600, height=400)
             result_files.append(self.save_plotly_json(fig, plots_dir, f'deg_volcano_{first_group}.json', 'volcano', f'Volcano: {first_group}'))
 
+        if self.params.get('show_deg_counts_bar', True) and not deg_df.empty:
+            try:
+                group_order = [str(g) for g in groups]
+                up_counts = []
+                down_counts = []
+                for g in group_order:
+                    sub = deg_df[deg_df['cluster'].astype(str) == g]
+                    sig = sub['pval_adj'] < pval_cutoff
+                    up_counts.append(int((sig & (sub['logfc'] > logfc_cutoff)).sum()))
+                    down_counts.append(int((sig & (sub['logfc'] < -logfc_cutoff)).sum()))
+                fig_counts = go.Figure()
+                fig_counts.add_trace(go.Bar(
+                    x=group_order,
+                    y=up_counts,
+                    name='Up',
+                    marker_color='#e53935',
+                    hovertemplate='Cluster: %{x}<br>Up DEGs: %{y}<extra></extra>',
+                ))
+                fig_counts.add_trace(go.Bar(
+                    x=group_order,
+                    y=down_counts,
+                    name='Down',
+                    marker_color='#3949ab',
+                    hovertemplate='Cluster: %{x}<br>Down DEGs: %{y}<extra></extra>',
+                ))
+                fig_counts.update_layout(
+                    title=f'Significant DEG Counts (padj<{pval_cutoff}, |logFC|>{logfc_cutoff})',
+                    xaxis_title=groupby,
+                    yaxis_title='Gene count',
+                    barmode='group',
+                    plot_bgcolor='white',
+                    width=max(650, 60 * max(1, len(group_order))),
+                    height=430,
+                )
+                result_files.append(self.save_plotly_json(
+                    fig_counts, plots_dir, 'deg_significant_counts_bar.json',
+                    'bar', 'Significant DEG Counts'
+                ))
+            except Exception as e:
+                self.progress(-1, f"DEG count summary plot failed: {e}")
+
         # DEG Dotplot
         if self.params.get('show_dotplot', True):
             try:
@@ -164,6 +205,66 @@ class DEGAnalysis(BaseAnalysis):
                 fpath = os.path.join(plots_dir, f'deg_gene_umap_{gene}.json')
                 with open(fpath, 'w') as f: f.write(json.dumps(fig_gene))
                 result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'{gene} Expression'})
+
+        if self.params.get('show_top_marker_umap_panel', True) and 'X_umap' in adata.obsm and not deg_df.empty:
+            try:
+                from plotly.subplots import make_subplots
+                marker_limit = int(self.params.get('top_marker_umap_genes', 6))
+                marker_candidates = []
+                for g in groups:
+                    sub = deg_df[deg_df['cluster'].astype(str) == str(g)]
+                    sig_sub = sub[(sub['pval_adj'] < pval_cutoff) & (sub['logfc'] > logfc_cutoff)]
+                    genes_for_group = sig_sub['gene'].astype(str).tolist() or sub['gene'].astype(str).tolist()
+                    marker_candidates.extend(genes_for_group[:1])
+                marker_genes = [g for g in dict.fromkeys(marker_candidates) if g in adata.var_names][:max(1, marker_limit)]
+                if marker_genes:
+                    coords = adata.obsm['X_umap'][:, :2]
+                    n_cols = min(3, len(marker_genes))
+                    n_rows = int(np.ceil(len(marker_genes) / n_cols))
+                    fig_marker_umap = make_subplots(
+                        rows=n_rows,
+                        cols=n_cols,
+                        subplot_titles=marker_genes,
+                    )
+                    for i, gene in enumerate(marker_genes):
+                        expr = adata[:, gene].X
+                        if hasattr(expr, 'toarray'):
+                            expr = expr.toarray()
+                        expr = np.asarray(expr).ravel()
+                        row = i // n_cols + 1
+                        col = i % n_cols + 1
+                        fig_marker_umap.add_trace(go.Scattergl(
+                            x=coords[:, 0],
+                            y=coords[:, 1],
+                            mode='markers',
+                            marker=dict(
+                                size=3,
+                                color=expr,
+                                colorscale='Viridis',
+                                opacity=0.75,
+                                showscale=False,
+                            ),
+                            text=adata.obs_names.tolist(),
+                            hovertemplate='%{text}<br>' + gene + ': %{marker.color:.3f}<extra></extra>',
+                            name=gene,
+                        ), row=row, col=col)
+                    fig_marker_umap.update_layout(
+                        title='Top Marker Feature UMAPs',
+                        plot_bgcolor='white',
+                        width=350 * n_cols,
+                        height=320 * n_rows,
+                        showlegend=False,
+                    )
+                    for row in range(1, n_rows + 1):
+                        for col in range(1, n_cols + 1):
+                            fig_marker_umap.update_xaxes(title_text='UMAP-1', row=row, col=col)
+                            fig_marker_umap.update_yaxes(title_text='UMAP-2', row=row, col=col)
+                    result_files.append(self.save_plotly_json(
+                        fig_marker_umap, plots_dir, 'deg_top_marker_umap_panel.json',
+                        'umap', 'Top Marker Feature UMAPs'
+                    ))
+            except Exception as e:
+                self.progress(-1, f"Top marker UMAP panel failed: {e}")
 
         # Export full DEG results
         all_deg = []

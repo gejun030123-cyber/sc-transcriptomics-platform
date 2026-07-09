@@ -61,6 +61,10 @@ def analyze(pid, module_name):
         if not input_path:
             flash('请选择输入数据', 'danger')
             return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
+        is_valid, err = Config._validate_path(input_path, pid)
+        if not is_valid or not os.path.isfile(input_path):
+            flash(err or '输入文件不存在', 'danger')
+            return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
         # 注入 _visualization 和 _filters 到 params
         viz_json = request.form.get('_visualization', '')
         filters_json = request.form.get('_filters', '')

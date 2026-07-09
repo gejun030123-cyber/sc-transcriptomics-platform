@@ -77,6 +77,39 @@
 </div>
 {% endif %}
 
+{% if review_evidence %}
+<div class="card p-4 mb-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="mb-0">{{ review_evidence.title }}</h5>
+        {% set ev_status = review_evidence.status %}
+        <span class="badge {% if ev_status == 'pass' %}bg-success{% elif ev_status == 'warning' %}bg-danger{% else %}bg-warning text-dark{% endif %}">
+            {% if ev_status == 'pass' %}通过{% elif ev_status == 'warning' %}警告{% else %}需复核{% endif %}
+        </span>
+    </div>
+    <div class="list-group list-group-flush">
+        {% for check in review_evidence.checks %}
+        {% set ck = check.status %}
+        <div class="list-group-item px-0">
+            <div class="d-flex justify-content-between align-items-start gap-3">
+                <div>
+                    <div class="fw-semibold">{{ check.name }}</div>
+                    <div class="small text-muted">{{ check.message }}</div>
+                </div>
+                <div class="text-end">
+                    {% if check.value is defined %}
+                    <div class="small text-muted">{{ check.value }}</div>
+                    {% endif %}
+                    <span class="badge {% if ck == 'pass' %}bg-success{% elif ck == 'warning' %}bg-danger{% else %}bg-warning text-dark{% endif %}">
+                        {% if ck == 'pass' %}通过{% elif ck == 'warning' %}警告{% else %}复核{% endif %}
+                    </span>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
 {% if plotly_files %}
 <h5 class="mb-3">可视化图表</h5>
 <div class="row">
@@ -112,6 +145,18 @@
     <div class="d-flex justify-content-between align-items-center py-2 border-bottom">
         <span>{{ f.label }} <span class="text-muted small">({{ "%.1f"|format(f._file_size / 1024) }} KB)</span></span>
         <a href="/projects/{{ project.id }}/results/file/{{ f.id }}" class="btn btn-outline-primary btn-sm">下载</a>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if json_files %}
+<h5 class="mb-3">结构化结果文件</h5>
+<div class="card p-3 mb-4">
+    {% for f in json_files %}
+    <div class="d-flex justify-content-between align-items-center py-2 border-bottom">
+        <span>{{ f.label }} <span class="text-muted small">({{ "%.1f"|format(f._file_size / 1024) }} KB)</span></span>
+        <a href="/projects/{{ project.id }}/results/file/{{ f.id }}" class="btn btn-outline-primary btn-sm">查看 / 下载</a>
     </div>
     {% endfor %}
 </div>
@@ -354,7 +399,7 @@ if (STATUS === 'running' || STATUS === 'pending') {
 }
 
 {% for f in plotly_files %}
-fetch('/api/result-file/{{ f.id }}')
+fetch('/api/projects/{{ project.id }}/result-file/{{ f.id }}')
     .then(r => r.json())
     .then(data => Plotly.newPlot('plot-{{ f.id }}', data.data, data.layout, {
                 responsive: true,

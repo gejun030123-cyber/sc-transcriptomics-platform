@@ -50,9 +50,9 @@ class TestAnnotationMarkers:
     """测试注释模块的标记基因集。"""
 
     def test_marker_sets_keys(self):
-        """MARKER_SETS 包含 'TME', 'Immune', 'Blood' 三个键。"""
+        """MARKER_SETS 包含内置注释基因集。"""
         from modules.annotation import MARKER_SETS
-        assert set(MARKER_SETS.keys()) == {'TME', 'Immune', 'Blood'}
+        assert set(MARKER_SETS.keys()) == {'TME', 'Immune', 'Blood', 'PBMC'}
 
     def test_tme_markers_not_empty(self):
         """DEFAULT_TME_MARKERS 中每个细胞类型的基因列表非空。"""

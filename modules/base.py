@@ -37,6 +37,8 @@ class BaseAnalysis(ABC):
         self._progress = progress_callback
 
     def progress(self, pct: int, message: str):
+        if not self._progress:
+            return
         self._progress(min(pct, 100), message)
 
     def apply_filters(self, adata, module_name):

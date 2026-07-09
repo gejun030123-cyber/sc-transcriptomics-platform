@@ -147,6 +147,26 @@ def list_branches(pid):
     return jsonify({"branches": [b.to_dict() for b in branches]})
 
 
+@branches_bp.route('/api/projects/<pid>/branches/compare', methods=['GET'])
+@require_ai_token
+def compare_branches(pid):
+    """比较项目或目标下的候选分支评分和参数差异."""
+    from models import AnalysisBranch, CandidateScore
+    from modules.reporting.branch_report import build_branch_comparison
+
+    goal_id = request.args.get('goal_id', '').strip()
+    if goal_id:
+        branches = [b for b in AnalysisBranch.get_by_goal(goal_id) if b.project_id == pid and not b.deleted]
+    else:
+        branches = AnalysisBranch.get_by_project(pid)
+
+    scores_by_branch = {
+        branch.id: CandidateScore.get_by_branch(branch.id)
+        for branch in branches
+    }
+    return jsonify(build_branch_comparison(pid, branches, scores_by_branch))
+
+
 @branches_bp.route('/api/projects/<pid>/branches', methods=['POST'])
 @require_ai_token
 def create_branch(pid):
@@ -265,13 +285,14 @@ def run_branch(pid, branch_id):
         return jsonify({"error": f"分支 {branch_id} 状态不是 pending，无法启动"}), 400
 
     # 在后台执行
-    from worker import _executor
+    from worker import _executor, register_task_outputs
     import traceback
 
     branch_dir = Config.branch_dir(branch.project_id, branch.id)
     os.makedirs(branch_dir, exist_ok=True)
 
     def _run_branch_modules():
+        current_task = None
         try:
             current_input = branch.parent_adata_path
             for mod_name in modules_list:
@@ -286,21 +307,37 @@ def run_branch(pid, branch_id):
                 )
                 task.save()
                 task.mark_running()
+                current_task = task
 
-                module = cls(project_dir=branch_dir, params=params, progress_callback=None)
+                task_progress_log = []
+
+                def progress_cb(pct, message, _task=task, _module=mod_name):
+                    from datetime import datetime
+                    now = datetime.now().strftime('%H:%M:%S')
+                    task_progress_log.append({'time': now, 'pct': pct, 'msg': f'[{_module}] {message}'})
+                    _task.update_progress(pct, message, json.dumps(task_progress_log, ensure_ascii=False))
+
+                module = cls(project_dir=branch_dir, params=params, progress_callback=progress_cb)
                 result = module.run(current_input)
 
                 output_adata = result.get('output_adata')
                 if not output_adata:
                     raise ValueError(f"模块 {mod_name} 未返回 output_adata")
 
-                task.mark_completed(output_adata, json.dumps(result.get('summary', {})))
+                register_task_outputs(task, branch.project_id, branch_dir, result)
+                task.mark_completed(output_adata, json.dumps(result.get('summary', {}), ensure_ascii=False))
                 current_input = output_adata
+                current_task = None
 
             branch.mark_completed(current_input)
         except Exception as e:
             tb = traceback.format_exc()
             logger.error(f"[Branch] Branch {branch_id} failed:\n{tb}")
+            if current_task is not None:
+                try:
+                    current_task.mark_failed(tb)
+                except Exception as db_err:
+                    logger.warning(f"[Branch] Failed to mark task {current_task.id} failed: {db_err}")
             try:
                 branch.mark_failed(tb)
             except Exception:
@@ -319,7 +356,7 @@ def run_branch(pid, branch_id):
 @require_ai_token
 def accept_branch(pid, branch_id):
     """采纳候选分支."""
-    from models import AnalysisBranch
+    from models import AnalysisBranch, CandidateScore
 
     branch = AnalysisBranch.get_by_id(branch_id)
     if not branch:
@@ -341,13 +378,29 @@ def accept_branch(pid, branch_id):
             "message": "请显式确认采纳此分支（设置 confirm=true）",
         }), 200
 
+    scores = CandidateScore.get_by_branch(branch.id)
+    from modules.reporting.branch_report import build_branch_comparison, write_acceptance_report
     branch.accept()
+    branch = AnalysisBranch.get_by_id(branch_id)
+    project_branches = AnalysisBranch.get_by_project(pid)
+    scores_by_branch = {
+        b.id: CandidateScore.get_by_branch(b.id)
+        for b in project_branches
+    }
+    comparison = build_branch_comparison(pid, project_branches, scores_by_branch)
+    report_paths = write_acceptance_report(
+        project_dir=Config.project_dir(pid),
+        branch=branch,
+        scores=scores,
+        comparison=comparison,
+    )
 
     return jsonify({
         "status": "accepted",
         "branch_id": branch.id,
         "branch_name": branch.branch_name,
         "output_adata_path": branch.output_adata_path,
+        "accepted_report": report_paths,
         "message": f"已采纳分支 {branch.branch_name}，输出文件: {branch.output_adata_path}",
     })
 

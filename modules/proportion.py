@@ -96,6 +96,30 @@ class ProportionAnalysis(BaseAnalysis):
         ))
         result_files.append(self.save_plotly_json(fig, plots_dir, 'proportion_stacked.json', 'bar', 'Cell Proportions (Stacked)'))
 
+        if self.params.get('show_proportion_heatmap', True):
+            fig_heat = go.Figure(data=go.Heatmap(
+                z=ct.values,
+                x=[str(x) for x in ct.columns],
+                y=[str(x) for x in ct.index],
+                colorscale='Viridis',
+                text=(ct.values * 100).round(1),
+                texttemplate='%{text}%',
+                colorbar=dict(title='Proportion'),
+                hovertemplate=batch_key + ': %{y}<br>' + groupby + ': %{x}<br>Proportion: %{z:.2%}<extra></extra>',
+            ))
+            fig_heat.update_layout(
+                title='Cell Proportion Heatmap',
+                xaxis_title=groupby,
+                yaxis_title=batch_key,
+                plot_bgcolor='white',
+                width=max(700, 70 * max(1, len(ct.columns))),
+                height=max(420, 55 * max(1, len(ct.index))),
+            )
+            result_files.append(self.save_plotly_json(
+                fig_heat, plots_dir, 'proportion_heatmap.json',
+                'heatmap', 'Cell Proportion Heatmap'
+            ))
+
         n_batches = len(ct.index)
         fig2 = make_subplots(rows=1, cols=n_batches,
                              subplot_titles=[str(x) for x in ct.index],
