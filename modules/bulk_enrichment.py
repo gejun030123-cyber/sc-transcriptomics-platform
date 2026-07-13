@@ -72,15 +72,21 @@ def _enrichment_figure(result_df, title, database='GO_BP', score_column=None):
     else:
         score = pd.Series(np.arange(len(df), 0, -1), index=df.index, dtype=float)
         x_label = 'Enrichment score'
-    df = df.assign(_score=score).dropna(subset=['_score']).sort_values('_score', ascending=False)
+    df = df.assign(_score=score).dropna(subset=['_score'])
     if df.empty:
         return None
 
     ontology_col = next((c for c in ('Ontology', 'ontology', 'Gene_set', 'gene_set', 'database') if c in df.columns), None)
-    ontologies = [
+    df['_ontology'] = [
         _enrichment_ontology(row[ontology_col] if ontology_col else database, database)
         for _, row in df.iterrows()
     ]
+    # Keep ontology blocks together, then order the most significant pathways
+    # first within each block as in the supplied reference figure.
+    ontology_order = {'BP': 0, 'MF': 1, 'KEGG': 2, 'OTHER': 3}
+    df['_ontology_rank'] = df['_ontology'].map(ontology_order).fillna(3)
+    df = df.sort_values(['_ontology_rank', '_score'], ascending=[True, False])
+    ontologies = df['_ontology'].tolist()
     count_col = next((c for c in ('Overlap', 'Count', 'count', 'Gene Count', 'gene_count', 'setSize', 'size') if c in df.columns), None)
     counts = [_enrichment_count(row[count_col]) if count_col else 1 for _, row in df.iterrows()]
     terms = [str(value) for value in df[term_col].tolist()]
