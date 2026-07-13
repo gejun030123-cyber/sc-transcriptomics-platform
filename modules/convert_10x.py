@@ -146,6 +146,7 @@ class Convert10x(BaseAnalysis):
         os.makedirs(extraction_root, exist_ok=True)
         adatas = []
         batch_names = []
+        batch_records = []
         species = self.params.get('species')
         genome = self.params.get('genome')
 
@@ -176,6 +177,13 @@ class Convert10x(BaseAnalysis):
             adata.obs['batch'] = batch_name
             adatas.append(adata)
             batch_names.append(batch_name)
+            total_counts = adata.obs['total_counts'] if 'total_counts' in adata.obs else None
+            batch_records.append({
+                'batch': batch_name,
+                'n_cells': int(adata.n_obs),
+                'n_genes': int(adata.n_vars),
+                'median_total_counts': round(float(total_counts.median()), 3) if total_counts is not None else None,
+            })
 
         self.progress(75, '正在合并两个批次...')
         combined = ad.concat(
@@ -192,6 +200,48 @@ class Convert10x(BaseAnalysis):
         combined.uns['input_format'] = '10x_mtx_zip_batches'
         output_path = os.path.join(uploads_dir, 'combined_batches_imported.h5ad')
         combined.write_h5ad(output_path)
+        import pandas as pd
+        batch_summary = pd.DataFrame(batch_records)
+        results_dir = os.path.join(self.project_dir, 'results')
+        os.makedirs(results_dir, exist_ok=True)
+        summary_csv = os.path.join(results_dir, 'batch_import_summary.csv')
+        batch_summary.to_csv(summary_csv, index=False)
+        result_files = [{
+            'file_path': output_path,
+            'file_type': 'h5ad',
+            'category': 'data',
+            'label': 'Combined multi-batch single-cell h5ad',
+        }, {
+            'file_path': summary_csv,
+            'file_type': 'csv',
+            'category': 'table',
+            'label': 'Batch import summary',
+        }]
+        try:
+            import matplotlib.pyplot as plt
+            plots_dir = os.path.join(self.project_dir, 'plots')
+            os.makedirs(plots_dir, exist_ok=True)
+            fig, ax = plt.subplots(figsize=(7.2, 4.6), dpi=150)
+            palette = ['#3C5488', '#E64B35', '#00A087', '#4DBBD5']
+            bars = ax.bar(batch_summary['batch'], batch_summary['n_cells'],
+                          color=[palette[i % len(palette)] for i in range(len(batch_summary))],
+                          width=0.62)
+            ax.set_title('Cells per imported batch', fontsize=15, fontweight='semibold')
+            ax.set_ylabel('Cells')
+            ax.grid(axis='y', color='#d8dee9', linewidth=0.6, alpha=0.7)
+            ax.set_axisbelow(True)
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+            for bar in bars:
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                        f'{int(bar.get_height()):,}', ha='center', va='bottom', fontsize=10)
+            result_files.extend(self.save_matplotlib_figure(
+                fig, plots_dir,
+                'batch_import_cell_counts.png', 'batch', 'Batch cell counts',
+            ))
+            plt.close(fig)
+        except Exception as exc:
+            self.progress(-1, f'批次组成图生成失败（不影响合并结果）：{exc}')
         summary = summarize_adata_import(combined, '10x_mtx_zip_batches', output_path)
         summary.update({
             'n_batches': len(batch_names),
@@ -201,11 +251,6 @@ class Convert10x(BaseAnalysis):
         self.progress(100, f'批次导入完成，共 {summary["n_cells"]} 个细胞、{summary["n_genes"]} 个基因')
         return {
             'output_adata': output_path,
-            'result_files': [{
-                'file_path': output_path,
-                'file_type': 'h5ad',
-                'category': 'data',
-                'label': 'Combined multi-batch single-cell h5ad',
-            }],
+            'result_files': result_files,
             'summary': summary,
         }

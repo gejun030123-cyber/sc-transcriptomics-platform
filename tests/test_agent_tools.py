@@ -314,14 +314,15 @@ class TestAnalysisConfigRecommendation:
         assert mapping['Ctr_En_1'] == 'Ctr_En'
         assert mapping['PEA_B_1'] == 'PEA_B'
 
-    def test_recommendation_tool_is_read_only_and_auto_executed(self):
+    def test_recommendation_tool_is_read_only_and_sweep_proposal_requires_confirmation(self):
         from modules.ai_adapter import AUTO_EXEC_TOOLS, CONFIRM_TOOLS, TOOLS_ANTHROPIC
 
         tool_names = {tool['name'] for tool in TOOLS_ANTHROPIC}
         assert 'recommend_analysis_config' in tool_names
         assert 'recommend_analysis_config' in AUTO_EXEC_TOOLS
         assert 'recommend_analysis_config' not in CONFIRM_TOOLS
-        assert 'propose_parameter_sweep' in AUTO_EXEC_TOOLS
+        assert 'propose_parameter_sweep' not in AUTO_EXEC_TOOLS
+        assert 'propose_parameter_sweep' in CONFIRM_TOOLS
 
 
 class TestProposeParameterSweep:

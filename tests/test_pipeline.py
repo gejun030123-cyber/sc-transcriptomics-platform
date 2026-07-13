@@ -11,9 +11,9 @@ class TestModuleRegistry:
     """测试 MODULE_REGISTRY 注册表。"""
 
     def test_all_modules_registered(self):
-        """所有 21 个模块都在注册表中。"""
+        """所有注册模块都在注册表中。"""
         from modules import MODULE_REGISTRY
-        assert len(MODULE_REGISTRY) == 21
+        assert len(MODULE_REGISTRY) == 22
 
     def test_registry_values_are_classes(self):
         """注册表的值都是类（有 run 方法）。"""

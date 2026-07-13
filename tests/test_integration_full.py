@@ -1625,7 +1625,7 @@ class TestWorkerIntegration:
 
         expected_sc = {'qc', 'normalize', 'hvg', 'dimred', 'batch_correct',
                        'clustering', 'qc_reassess', 'annotation', 'deg',
-                       'trajectory', 'proportion', 'cell_communication'}
+                       'trajectory', 'proportion', 'cell_communication', 'subcluster'}
         expected_bulk = {'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca',
                         'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
                         'bulk_deg_integration'}

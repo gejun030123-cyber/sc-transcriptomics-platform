@@ -283,10 +283,10 @@ AUTO_EXEC_TOOLS = {
     'get_project_status', 'get_task_results', 'list_modules',
     'inspect_analysis_state', 'inspect_adata', 'get_cluster_summary',
     'score_cell_type_signature', 'list_builtin_markers',
-    'recommend_analysis_config', 'propose_parameter_sweep',
+    'recommend_analysis_config',
 }
 # 需要用户确认的工具
-CONFIRM_TOOLS = {'run_analysis', 'run_parameter_sweep',
+CONFIRM_TOOLS = {'run_analysis', 'propose_parameter_sweep', 'run_parameter_sweep',
                  'start_goal_agent', 'continue_goal_agent'}
 # 注：accept_branch 仅通过前端 Branch API 调用（POST /api/branches/<id>/accept），
 # 不作为 AI 工具暴露，确保用户在前端显式操作采纳。

@@ -365,8 +365,10 @@ class BulkDEGAnalysis(BaseAnalysis):
         input_measurement = infer_expression_measurement(adata, input_path)
         if input_measurement != 'raw_counts' and method in {'deseq2', 'edger', 'limma'}:
             raise ValueError(f'{method} 需要原始整数 counts；当前输入为 {input_measurement}。请选择 t-test/Mann-Whitney，或从原始 counts 重新分析。')
-        if input_measurement == 'continuous_expression' and method in {'t-test', 'mann-whitney'}:
-            raise ValueError('FPKM/TPM 等连续表达值需先运行 bulk_normalize(method=log2)，再做差异分析。')
+        auto_log2_continuous = (
+            input_measurement == 'continuous_expression'
+            and method in {'t-test', 'mann-whitney'}
+        )
         fc_threshold = float(self.params.get('fc_threshold', 2.0))
         pval_threshold = float(self.params.get('pval_threshold', 0.05))
         top_n = int(self.params.get('top_n', 20))
@@ -404,6 +406,15 @@ class BulkDEGAnalysis(BaseAnalysis):
             import logging
             logging.getLogger(__name__).warning(f"[bulk_deg] 输入数据含 {n_inf} 个 inf 值（可能来自除零），已替换为 0")
         counts = np.nan_to_num(counts, nan=0.0, posinf=0.0, neginf=0.0)
+        if auto_log2_continuous:
+            # Continuous FPKM/TPM-like input is valid for Welch/Wilcoxon after
+            # an explicit log2(x+1) transform.  Keep the transform local to
+            # this DEG run and record it in the result summary instead of
+            # silently mutating the uploaded matrix.
+            counts = np.log2(np.clip(counts, a_min=0.0, a_max=None) + 1.0)
+            normalization = dict(adata.uns.get('normalization', {}) or {})
+            normalization.update({'is_log_transformed': True, 'method': 'log2_auto_for_deg'})
+            adata.uns['normalization'] = normalization
 
         # 处理自动检测的分组
         if groupby == '_auto_group_':
@@ -612,6 +623,8 @@ class BulkDEGAnalysis(BaseAnalysis):
                 'fc_threshold': fc_threshold,
                 'pval_threshold': pval_threshold,
                 'lrt_n_sig': lrt_n_sig,
+                'input_measurement': input_measurement,
+                'auto_transform': 'log2(x+1)' if auto_log2_continuous else None,
             }
         else:
             # 单次比较模式
@@ -665,6 +678,8 @@ class BulkDEGAnalysis(BaseAnalysis):
                 'fc_threshold': fc_threshold,
                 'pval_threshold': pval_threshold,
                 'lrt_n_sig': lrt_n_sig,
+                'input_measurement': input_measurement,
+                'auto_transform': 'log2(x+1)' if auto_log2_continuous else None,
             }
 
         # LRT 文件：多比较模式已在 line 551 添加，单次比较模式在此添加
