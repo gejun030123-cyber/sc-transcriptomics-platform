@@ -1,5 +1,6 @@
 # modules/bulk_deg_integration.py
 import os
+import json
 import logging
 import numpy as np
 import pandas as pd
@@ -8,9 +9,29 @@ from modules.base import BaseAnalysis
 logger = logging.getLogger(__name__)
 
 
+def _deduplicate_gene_results(df):
+    """Keep the strongest, most significant row for each displayed gene symbol."""
+    unique = df.copy()
+    unique['_abs_log2fc'] = unique['log2FC'].abs()
+    return (
+        unique.sort_values(['padj', '_abs_log2fc'], ascending=[True, False])
+        .drop_duplicates('gene', keep='first')
+        .drop(columns=['_abs_log2fc'])
+    )
+
+
 def _load_comparison_labels(project_dir):
     """Load filename→label mapping from ResultFile table (same logic as deg-comparisons API)."""
     label_map = {}
+    mapping_path = os.path.join(project_dir, 'results', 'bulk_deg_comparison_labels.json')
+    if os.path.isfile(mapping_path):
+        try:
+            with open(mapping_path, encoding='utf-8') as f:
+                stored = json.load(f)
+            if isinstance(stored, dict):
+                label_map.update({str(k): str(v) for k, v in stored.items()})
+        except (OSError, ValueError, TypeError) as e:
+            logger.warning("读取 DEG 比较标签文件失败: %s", e)
     try:
         from models import AnalysisTask, ResultFile
         results_dir = os.path.join(project_dir, 'results')
@@ -30,7 +51,7 @@ def _load_comparison_labels(project_dir):
                         lbl = lbl.split('(')[-1].rstrip(')')
                     # Normalize: "moclel vs hmc3" → "moclel-vs-hmc3"
                     lbl = lbl.replace(' vs ', '-vs-').strip()
-                    label_map[fname] = lbl
+                    label_map.setdefault(fname, lbl)
     except Exception as e:
         logger.warning("解析文件标签失败: %s", e)
     return label_map
@@ -116,7 +137,10 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
         all_genes_idx = pd.Index(all_genes)
         reg_map = {'Up': 1, 'Down': -1}
         for name, df in comparisons.items():
-            df_idx = df.set_index('gene')
+            # 多个 Ensembl ID 可能映射到同一 gene symbol。整合时每个 symbol
+            # 保留 padj 最小（并优先效应量更大）的记录，避免重复索引无法对齐。
+            df_unique = _deduplicate_gene_results(df)
+            df_idx = df_unique.set_index('gene')
             common = all_genes_idx.intersection(df_idx.index)
             if len(common) > 0:
                 logfc_matrix.loc[common, name] = df_idx.loc[common, 'log2FC']

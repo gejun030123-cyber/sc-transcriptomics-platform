@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Pipeline Run - {{ run.name }}{% endblock %}
+{% block content %}
+<div class="mb-3">
+    <a href="/projects/{{ project.id }}/results" class="text-decoration-none small">&larr; 返回分析结果</a>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+        <h4 class="mb-1">{{ run.name }}</h4>
+        <span class="status-badge status-{{ run.status }}">{{ status_map.get(run.status, run.status) }}</span>
+        <span class="small text-muted ms-2">{{ run.analysis_type }} pipeline</span>
+    </div>
+    <div class="d-flex gap-2">
+        <a href="/projects/{{ project.id }}/pipeline-runs/{{ run.id }}/report" class="btn btn-outline-primary btn-sm">流程报告</a>
+        <a href="/projects/{{ project.id }}/pipeline-runs/{{ run.id }}/manifest" class="btn btn-outline-primary btn-sm">Manifest</a>
+    </div>
+</div>
+
+<div class="card p-3 mb-4">
+    <div class="row small">
+        <div class="col-md-3"><strong>Run ID：</strong><code>{{ run.id }}</code></div>
+        <div class="col-md-3"><strong>进度：</strong>{{ run.progress }}%</div>
+        <div class="col-md-3"><strong>当前模块：</strong>{{ run.current_module or '—' }}</div>
+        <div class="col-md-3"><strong>任务数：</strong>{{ tasks|length }}</div>
+    </div>
+    <div class="progress mt-3" style="height:8px;">
+        <div class="progress-bar {% if run.status == 'failed' %}bg-danger{% elif run.status == 'completed' %}bg-success{% endif %}" style="width: {{ run.progress }}%"></div>
+    </div>
+</div>
+
+{% set resume = artifacts.manifest.resume_plan %}
+{% if run.status == 'failed' %}
+<div class="card p-4 mb-4 border-danger">
+    <h5 class="text-danger">失败与续跑建议</h5>
+    <div class="small mb-2">失败模块：<code>{{ resume.failed_module or run.current_module }}</code></div>
+    <div class="small mb-2">续跑输入：<code>{{ resume.resume_input_path or '' }}</code></div>
+    <div class="small mb-3">后续模块：<code>{{ (resume.remaining_modules or [])|join(', ') }}</code></div>
+    {% if resume.can_resume %}
+    <button class="btn btn-danger btn-sm" onclick="resumePipeline()">从失败模块续跑</button>
+    {% endif %}
+    {% if run.error_traceback %}
+    <pre class="small bg-light p-3 rounded mt-3" style="max-height:260px;overflow:auto">{{ run.error_traceback }}</pre>
+    {% endif %}
+</div>
+{% endif %}
+
+<h5 class="mb-3">流程步骤</h5>
+{% if tasks %}
+{% for t in tasks %}
+{% set files = files_by_task.get(t.id, []) %}
+<div class="card p-3 mb-3">
+    <div class="d-flex justify-content-between align-items-start">
+        <div>
+            <h6 class="mb-1">{{ loop.index }}. {{ module_display_map.get(t.module_name, t.module_name) }}</h6>
+            <span class="status-badge status-{{ t.status }}">{{ status_map.get(t.status, t.status) }}</span>
+            {% if t.finished_at %}<span class="small text-muted ms-2">{{ t.finished_at[:16] }}</span>{% endif %}
+        </div>
+        <a href="/projects/{{ project.id }}/task/{{ t.id }}" class="btn btn-outline-primary btn-sm">任务详情</a>
+    </div>
+    {% if t.output_adata_path %}
+    <div class="small text-muted mt-2">输出：<code>{{ t.output_adata_path }}</code></div>
+    {% endif %}
+    {% if files %}
+    <div class="small text-muted mt-2">结果文件：{{ files|length }} 个</div>
+    {% endif %}
+    {% if t.error_traceback %}
+    <pre class="small bg-light p-2 rounded mt-2" style="max-height:180px;overflow:auto">{{ t.error_traceback }}</pre>
+    {% endif %}
+</div>
+{% endfor %}
+{% else %}
+<div class="card p-5 text-center text-muted">暂无子任务。</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function resumePipeline() {
+    if (!confirm('将从失败模块重新创建一个 PipelineRun，已完成任务不会被覆盖。确认继续？')) return;
+    const resp = await fetch('/api/projects/{{ project.id }}/pipeline-runs/{{ run.id }}/resume', { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) {
+        alert('续跑失败: ' + (data.error || '未知错误'));
+        return;
+    }
+    window.location.href = '/projects/{{ project.id }}/pipeline-runs/' + data.id;
+}
+</script>
+{% endblock %}

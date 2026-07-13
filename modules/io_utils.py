@@ -3,6 +3,84 @@ import numpy as np
 import pandas as pd
 
 
+def infer_expression_measurement(adata, input_path=''):
+    """Classify a bulk expression matrix without silently changing its scale."""
+    normalization = dict(getattr(adata, 'uns', {}).get('normalization', {}) or {})
+    if normalization.get('is_log_transformed'):
+        return 'log_transformed'
+    matrix = adata.X
+    values = matrix.data if hasattr(matrix, 'data') else np.asarray(matrix).ravel()
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    hint = str(input_path).lower()
+    if any(token in hint for token in ('fpkm', 'tpm', 'rpkm')):
+        return 'continuous_expression'
+    if values.size == 0:
+        return 'raw_counts'
+    integer_fraction = float(np.mean(np.isclose(values, np.round(values))))
+    return 'raw_counts' if np.min(values) >= 0 and integer_fraction >= 0.995 else 'continuous_expression'
+
+
+def infer_sample_group_candidates(sample_names):
+    """Infer reusable grouping candidates from names ending in a replicate number.
+
+    Examples:
+      Ctr_1 -> Ctr
+      Ctr_B_1 -> combined=Ctr_B, factor_1=Ctr, factor_2=B
+    """
+    import re
+    from collections import Counter
+
+    parsed = []
+    for raw_name in sample_names:
+        name = str(raw_name)
+        clean = re.sub(
+            r'_(count|FPKM|TPM|fpkm|tpm|Counts|normalized)$', '', name)
+        tokens = [token for token in re.split(r'[-_]', clean) if token]
+        if len(tokens) < 2 or not re.fullmatch(r'(?:rep)?\d+', tokens[-1], re.I):
+            return []
+        parsed.append((name, tokens[:-1]))
+
+    if not parsed:
+        return []
+
+    raw_candidates = []
+    max_factors = max(len(tokens) for _, tokens in parsed)
+
+    # The full pre-replicate name preserves treatment x stratum designs.
+    raw_candidates.append({
+        'key': 'combined',
+        'label': '联合分组（推荐）' if max_factors > 1 else '自动分组（推荐）',
+        'mapping': {name: '_'.join(tokens) for name, tokens in parsed},
+    })
+
+    for factor_idx in range(max_factors):
+        if not all(len(tokens) > factor_idx for _, tokens in parsed):
+            continue
+        raw_candidates.append({
+            'key': f'factor_{factor_idx + 1}',
+            'label': f'第 {factor_idx + 1} 因素',
+            'mapping': {name: tokens[factor_idx] for name, tokens in parsed},
+        })
+
+    candidates = []
+    seen_mappings = set()
+    for candidate in raw_candidates:
+        mapping = candidate['mapping']
+        signature = tuple(mapping[name] for name, _ in parsed)
+        if signature in seen_mappings:
+            continue
+        seen_mappings.add(signature)
+        counts = Counter(mapping.values())
+        if len(counts) < 2 or any(count < 2 for count in counts.values()):
+            continue
+        candidate['values'] = sorted(counts)
+        candidate['group_sizes'] = dict(sorted(counts.items()))
+        candidates.append(candidate)
+
+    return candidates
+
+
 def read_expression_matrix(file_path):
     """读取表达矩阵文件，自动检测格式，只保留数值列"""
     import scanpy as sc
@@ -156,6 +234,155 @@ def read_expression_matrix(file_path):
     adata = remap_var_names(adata)
 
     return adata
+
+
+def infer_sc_data_format(input_path):
+    """Infer supported single-cell input format from path."""
+    if not input_path:
+        return 'unknown'
+
+    lower = str(input_path).lower()
+    if os.path.isdir(input_path):
+        names = set(os.listdir(input_path))
+        if (
+            ('matrix.mtx' in names or 'matrix.mtx.gz' in names)
+            and ('barcodes.tsv' in names or 'barcodes.tsv.gz' in names)
+            and (
+                'features.tsv' in names or 'features.tsv.gz' in names
+                or 'genes.tsv' in names or 'genes.tsv.gz' in names
+            )
+        ):
+            return '10x_mtx'
+        if lower.endswith('.zarr'):
+            return 'zarr'
+        return 'directory'
+
+    if lower.endswith('.h5ad'):
+        return 'h5ad'
+    if lower.endswith(('.h5', '.hdf5')):
+        return '10x_h5'
+    if lower.endswith('.loom'):
+        return 'loom'
+    if lower.endswith('.zarr'):
+        return 'zarr'
+    if lower.endswith(('.csv', '.txt', '.tsv', '.xlsx', '.xls')):
+        return 'expression_matrix'
+    if lower.endswith(('.mtx', '.mtx.gz')):
+        return '10x_mtx'
+    return 'unknown'
+
+
+def _ensure_counts_layer(adata):
+    """Preserve raw/imported matrix in counts layer if absent."""
+    if 'counts' not in adata.layers:
+        adata.layers['counts'] = adata.X.copy()
+    return adata
+
+
+def _standardize_imported_adata(adata, input_format=None, species=None, genome=None):
+    """Apply lightweight AnnData normalization needed by downstream modules."""
+    if hasattr(adata, 'var_names_make_unique'):
+        adata.var_names_make_unique()
+    if hasattr(adata, 'obs_names_make_unique'):
+        adata.obs_names_make_unique()
+
+    adata = remap_var_names(adata)
+    adata = _ensure_counts_layer(adata)
+
+    if input_format:
+        adata.uns['input_format'] = input_format
+    if species:
+        adata.uns['species'] = species
+    if genome:
+        adata.uns['genome'] = genome
+    return adata
+
+
+def read_single_cell_data(input_path, input_format='auto', species=None, genome=None):
+    """
+    Read common single-cell input formats into AnnData.
+
+    Supported formats:
+      - h5ad
+      - 10x mtx directory or matrix.mtx path
+      - 10x h5
+      - loom
+      - zarr
+      - expression matrix csv/tsv/txt/xlsx/xls
+    """
+    import scanpy as sc
+
+    if not input_path:
+        raise ValueError("缺少输入路径")
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"输入路径不存在: {input_path}")
+
+    fmt = infer_sc_data_format(input_path) if input_format in ('', None, 'auto') else input_format
+    source_path = input_path
+
+    if fmt == 'h5ad':
+        adata = sc.read_h5ad(source_path)
+    elif fmt == '10x_mtx':
+        mtx_dir = source_path if os.path.isdir(source_path) else os.path.dirname(source_path)
+        if not mtx_dir:
+            mtx_dir = '.'
+        adata = sc.read_10x_mtx(mtx_dir, var_names='gene_symbols', cache=True)
+    elif fmt == '10x_h5':
+        adata = sc.read_10x_h5(source_path)
+    elif fmt == 'loom':
+        adata = sc.read_loom(source_path)
+    elif fmt == 'zarr':
+        import anndata as ad
+        adata = ad.read_zarr(source_path)
+    elif fmt == 'expression_matrix':
+        adata = read_expression_matrix(source_path)
+    else:
+        raise ValueError(
+            f"不支持的单细胞输入格式: {fmt}。"
+            "支持 h5ad、10x mtx、10x h5、loom、zarr、csv/tsv/xlsx 表达矩阵。"
+        )
+
+    return _standardize_imported_adata(adata, input_format=fmt, species=species, genome=genome)
+
+
+def write_single_cell_h5ad(input_path, output_path, input_format='auto', species=None, genome=None):
+    """Read a supported single-cell input and write a standardized h5ad."""
+    adata = read_single_cell_data(
+        input_path,
+        input_format=input_format,
+        species=species,
+        genome=genome,
+    )
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    if os.path.abspath(input_path) != os.path.abspath(output_path):
+        adata.write_h5ad(output_path)
+    return adata
+
+
+def summarize_adata_import(adata, input_format, output_path):
+    """Build a JSON-serializable import summary."""
+    total_elements = int(adata.n_obs) * int(adata.n_vars)
+    if total_elements > 0:
+        if hasattr(adata.X, 'nnz'):
+            nonzero = int(adata.X.nnz)
+        else:
+            nonzero = int(np.count_nonzero(adata.X))
+        sparsity = round((1 - nonzero / total_elements) * 100, 1)
+    else:
+        sparsity = 0.0
+
+    file_size_mb = round(os.path.getsize(output_path) / (1024 * 1024), 1) if os.path.exists(output_path) else 0.0
+    return {
+        'input_format': input_format,
+        'n_cells': int(adata.n_obs),
+        'n_genes': int(adata.n_vars),
+        'sparsity': sparsity,
+        'file_size_mb': file_size_mb,
+        'output_file': os.path.basename(output_path),
+        'obs_columns': list(map(str, adata.obs.columns[:20])),
+        'var_columns': list(map(str, adata.var.columns[:20])),
+        'layers': list(map(str, adata.layers.keys())),
+    }
 
 
 def remap_var_names(adata):

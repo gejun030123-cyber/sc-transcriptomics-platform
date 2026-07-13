@@ -1,4 +1,5 @@
 # tests/test_bulk_qc_helpers.py
+import os
 import numpy as np
 import pytest
 
@@ -50,6 +51,68 @@ def test_infer_groups_no_sep():
     from modules.bulk_qc import _infer_groups
     names = ['sampleA', 'sampleB']
     assert _infer_groups(names) == ['sampleA', 'sampleB']
+
+
+def test_infer_multifactor_groups_preserves_combined_group():
+    """Ctr_B_1 应默认分到 Ctr_B，不应与 Ctr_En 合并。"""
+    from modules.bulk_qc import _infer_groups
+
+    names = ['Ctr_B_1', 'Ctr_B_2', 'Ctr_En_1', 'Ctr_En_2']
+    assert _infer_groups(names) == ['Ctr_B', 'Ctr_B', 'Ctr_En', 'Ctr_En']
+
+
+def test_multifactor_group_candidates_include_combined_and_factors():
+    from modules.io_utils import infer_sample_group_candidates
+
+    names = [
+        'Ctr_B_1', 'Ctr_B_2', 'Ctr_En_1', 'Ctr_En_2',
+        'PEA_B_1', 'PEA_B_2', 'PEA_En_1', 'PEA_En_2',
+    ]
+    candidates = infer_sample_group_candidates(names)
+
+    assert [c['key'] for c in candidates] == ['combined', 'factor_1', 'factor_2']
+    assert candidates[0]['values'] == ['Ctr_B', 'Ctr_En', 'PEA_B', 'PEA_En']
+    assert candidates[0]['group_sizes'] == {
+        'Ctr_B': 2, 'Ctr_En': 2, 'PEA_B': 2, 'PEA_En': 2,
+    }
+    assert candidates[1]['values'] == ['Ctr', 'PEA']
+    assert candidates[2]['values'] == ['B', 'En']
+
+
+def test_simple_group_names_do_not_duplicate_candidate():
+    from modules.io_utils import infer_sample_group_candidates
+
+    candidates = infer_sample_group_candidates(['Ctrl_1', 'Ctrl_2', 'Drug_1', 'Drug_2'])
+    assert len(candidates) == 1
+    assert candidates[0]['values'] == ['Ctrl', 'Drug']
+
+
+def test_unstructured_sample_names_have_no_auto_group():
+    from modules.io_utils import infer_sample_group_candidates
+
+    assert infer_sample_group_candidates(['sampleA', 'sampleB']) == []
+
+
+def test_obs_columns_api_returns_multifactor_candidates(test_project):
+    from app import create_app
+    from config import Config
+
+    path = os.path.join(Config.uploads_dir(test_project), 'bulk.tsv')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(
+            'gene\tCtr_B_1\tCtr_B_2\tCtr_En_1\tCtr_En_2\tPEA_B_1\tPEA_B_2\tPEA_En_1\tPEA_En_2\n'
+            'G1\t1\t2\t3\t4\t5\t6\t7\t8\n'
+            'G2\t8\t7\t6\t5\t4\t3\t2\t1\n'
+        )
+
+    app = create_app()
+    app.config['TESTING'] = True
+    response = app.test_client().get('/api/obs-columns', query_string={'file_path': path})
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload['sample_groups']['auto_group']['values'] == ['Ctr_B', 'Ctr_En', 'PEA_B', 'PEA_En']
+    assert len(payload['sample_groups']['auto_group_candidates']) == 3
 
 
 def test_detect_outliers_no_outlier():

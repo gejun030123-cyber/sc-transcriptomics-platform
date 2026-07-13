@@ -1,22 +1,10 @@
 # routes/chat.py
 """AI 对话 API"""
-from functools import wraps
 from flask import Blueprint, request, jsonify
 from config import Config
+from routes.auth import require_ai_token
 
 chat_bp = Blueprint('chat', __name__)
-
-
-def require_ai_token(f):
-    """API Token 认证装饰器。AI_API_TOKEN 为空时跳过认证。"""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if Config.AI_API_TOKEN:
-            auth = request.headers.get('Authorization', '')
-            if not auth.startswith('Bearer ') or auth[7:] != Config.AI_API_TOKEN:
-                return jsonify({"error": "认证失败，无效的 API Token"}), 401
-        return f(*args, **kwargs)
-    return decorated
 
 
 MAX_HISTORY_PER_PROJECT = 50
@@ -43,6 +31,14 @@ class ChatHistoryStore:
 _chat_histories = ChatHistoryStore()
 
 
+@chat_bp.route('/api/chat/config')
+@require_ai_token
+def chat_config():
+    """返回 AI 对话的非敏感配置状态，供前端显示诊断信息。"""
+    from modules.ai_adapter import get_ai_config_status
+    return jsonify(get_ai_config_status())
+
+
 @chat_bp.route('/api/chat', methods=['POST'])
 @require_ai_token
 def chat_endpoint():
@@ -62,6 +58,10 @@ def chat_endpoint():
 
     if not project_id:
         return jsonify({"error": "需要指定项目 ID"}), 400
+    try:
+        Config._validate_pid(project_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     # 获取聊天历史
     history = _chat_histories.get(project_id)
@@ -78,6 +78,11 @@ def chat_endpoint():
         return jsonify({
             "reply": result["reply"],
             "tool_calls": result["tool_calls"],
+            "proposed_tools": result.get("proposed_tools", []),
+            "config": {
+                "model": Config.AI_MODEL,
+                "message_count": len(result["messages"]),
+            },
         })
     except Exception as e:
         return jsonify({"error": f"AI 调用失败: {str(e)}"}), 500

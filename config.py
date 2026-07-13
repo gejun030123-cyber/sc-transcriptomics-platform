@@ -2,6 +2,34 @@ import os
 import re
 
 
+def _load_dotenv(path=None):
+    """Load simple KEY=VALUE pairs from .env without overriding real env vars."""
+    env_path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+    if not os.path.exists(env_path):
+        return
+    try:
+        with open(env_path, encoding='utf-8') as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+                if not key or key in os.environ:
+                    continue
+                if (value.startswith('"') and value.endswith('"')) or (
+                    value.startswith("'") and value.endswith("'")
+                ):
+                    value = value[1:-1]
+                os.environ[key] = value
+    except OSError:
+        return
+
+
+_load_dotenv()
+
+
 class Config:
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -34,7 +62,7 @@ class Config:
     MIN_FREE_RAM_GB = float(os.environ.get('MIN_FREE_RAM_GB', '4'))
     CUDA_DEVICES = os.environ.get('CUDA_DEVICES', '0,1')
 
-    # AI 对话配置（支持任意 OpenAI 兼容 API）
+    # AI 对话配置（支持 OpenAI compatible 和 Anthropic messages compatible API）
     AI_API_KEY = os.environ.get('AI_API_KEY', '')
     AI_API_URL = os.environ.get('AI_API_URL', 'https://token-plan-cn.xiaomimimo.com/anthropic')
     AI_MODEL = os.environ.get('AI_MODEL', 'mimo-v2.5-pro')
@@ -72,3 +100,30 @@ class Config:
     def plots_dir(cls, pid):
         cls._validate_pid(pid)
         return os.path.join(cls.DATA_DIR, 'projects', pid, 'plots')
+
+    @classmethod
+    def branches_dir(cls, pid):
+        """候选分支输出目录，隔离于主线 intermediate/."""
+        cls._validate_pid(pid)
+        return os.path.join(cls.DATA_DIR, 'projects', pid, 'branches')
+
+    @classmethod
+    def branch_dir(cls, pid, branch_id):
+        """单个候选分支目录."""
+        cls._validate_pid(pid)
+        return os.path.join(cls.DATA_DIR, 'projects', pid, 'branches', branch_id)
+
+    @classmethod
+    def _validate_path(cls, path, pid):
+        """验证路径在项目目录内，拒绝符号链接。返回 (is_valid: bool, error: str|None)."""
+        cls._validate_pid(pid)
+        proj_dir = os.path.realpath(cls.project_dir(pid))
+        try:
+            real_path = os.path.realpath(path)
+        except (OSError, ValueError) as e:
+            return False, f"路径解析失败: {e}"
+        if os.path.islink(path):
+            return False, "不支持符号链接文件"
+        if not real_path.startswith(proj_dir + os.sep) and real_path != proj_dir:
+            return False, f"路径不在项目目录内: {path}"
+        return True, None

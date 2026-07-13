@@ -100,6 +100,79 @@ class DimredAnalysis(BaseAnalysis):
                 fpath = os.path.join(plots_dir, f'dimred_umap_{color_key}.json')
                 with open(fpath, 'w') as f: f.write(fig_json)
                 result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'UMAP by {color_key}'})
+                try:
+                    fig_static = sc.pl.umap(
+                        adata, color=color_key, title=f'UMAP colored by {color_key}',
+                        show=False, return_fig=True, frameon=False,
+                        size=self.get_viz_params()['umap_point_size'],
+                    )
+                    result_files.extend(self.save_matplotlib_figure(
+                        fig_static, plots_dir, f'dimred_umap_{color_key}.png',
+                        'umap', f'UMAP by {color_key}'
+                    ))
+                    import matplotlib.pyplot as plt
+                    plt.close(fig_static)
+                except Exception as exc:
+                    self.progress(-1, f'静态 UMAP 导出失败（不影响交互图）：{exc}')
+
+        # PCA scatter for early detection of outliers and batch/sample structure
+        if self.params.get('show_pca_scatter', True) and 'X_pca' in adata.obsm:
+            import plotly.graph_objects as go
+            pca = adata.obsm['X_pca']
+            color_key = next((k for k in ['batch', 'phase', 'n_genes_by_counts', 'total_counts'] if k in adata.obs.columns), None)
+            fig_pca = go.Figure()
+            if color_key:
+                values = adata.obs[color_key]
+                try:
+                    numeric_values = values.astype(float).values
+                    fig_pca.add_trace(go.Scattergl(
+                        x=pca[:, 0],
+                        y=pca[:, 1],
+                        mode='markers',
+                        marker=dict(
+                            size=4,
+                            color=numeric_values,
+                            colorscale='Viridis',
+                            opacity=0.75,
+                            colorbar=dict(title=color_key),
+                        ),
+                        text=adata.obs_names.tolist(),
+                        hovertemplate='%{text}<br>' + color_key + ': %{marker.color:.3f}<extra></extra>',
+                    ))
+                except (TypeError, ValueError):
+                    labels = values.astype(str)
+                    for cat in sorted(labels.unique(), key=lambda x: (len(x), x)):
+                        mask = labels == cat
+                        fig_pca.add_trace(go.Scattergl(
+                            x=pca[mask.values, 0],
+                            y=pca[mask.values, 1],
+                            mode='markers',
+                            marker=dict(size=4, opacity=0.7),
+                            name=str(cat),
+                            text=adata.obs_names[mask.values].tolist(),
+                            hovertemplate='%{text}<br>' + color_key + ': ' + str(cat) + '<extra></extra>',
+                        ))
+            else:
+                fig_pca.add_trace(go.Scattergl(
+                    x=pca[:, 0],
+                    y=pca[:, 1],
+                    mode='markers',
+                    marker=dict(size=4, color='#3949ab', opacity=0.7),
+                    text=adata.obs_names.tolist(),
+                    hovertemplate='%{text}<extra></extra>',
+                ))
+            fig_pca.update_layout(
+                title='PCA Scatter',
+                xaxis_title='PC1',
+                yaxis_title='PC2',
+                plot_bgcolor='white',
+                width=700,
+                height=520,
+            )
+            result_files.append(self.save_plotly_json(
+                fig_pca, plots_dir, 'dimred_pca_scatter.json',
+                'pca', 'PCA Scatter'
+            ))
 
         # t-SNE plot
         if enable_tsne and 'X_tsne' in adata.obsm:

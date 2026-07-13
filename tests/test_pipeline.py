@@ -120,3 +120,45 @@ class TestValidatePipelineOrder:
         from modules import validate_pipeline_order
         is_valid, errors = validate_pipeline_order(['bulk_deg', 'bulk_normalize'])
         assert is_valid is False
+
+
+class TestPipelineTypeValidation:
+    """测试流水线类型校验（SC vs Bulk）。"""
+
+    def test_sc_pipeline_valid(self):
+        """单细胞最小链路 → 有效。"""
+        from modules import validate_pipeline_order
+        is_valid, errors = validate_pipeline_order(['qc', 'normalize', 'hvg'])
+        assert is_valid is True
+
+    def test_sc_pipeline_reverse_fails(self):
+        """单细胞反序 → 失败。"""
+        from modules import validate_pipeline_order
+        is_valid, errors = validate_pipeline_order(['hvg', 'normalize', 'qc'])
+        assert is_valid is False
+
+    def test_bulk_pipeline_valid(self):
+        """Bulk 最小链路 → 有效。"""
+        from modules import validate_pipeline_order
+        is_valid, errors = validate_pipeline_order(['bulk_qc', 'bulk_normalize', 'bulk_pca'])
+        assert is_valid is True
+
+    def test_bulk_pipeline_reverse_fails(self):
+        """Bulk 反序 → 失败。"""
+        from modules import validate_pipeline_order
+        is_valid, errors = validate_pipeline_order(['bulk_pca', 'bulk_normalize', 'bulk_qc'])
+        assert is_valid is False
+
+    def test_sc_module_in_bulk_pipeline_rejected(self):
+        """单细胞模块出现在 bulk pipeline 中 → 被 SC_MODULE_NAMES 拒绝。"""
+        from modules import SC_MODULE_NAMES, BULK_MODULE_NAMES
+        # qc 是单细胞模块，不属于 BULK_MODULE_NAMES
+        assert 'qc' in SC_MODULE_NAMES
+        assert 'qc' not in BULK_MODULE_NAMES
+
+    def test_bulk_module_in_sc_pipeline_rejected(self):
+        """Bulk 模块出现在单细胞 pipeline 中 → 被 SC_MODULE_NAMES 拒绝。"""
+        from modules import SC_MODULE_NAMES, BULK_MODULE_NAMES
+        # bulk_qc 是 bulk 模块，不属于 SC_MODULE_NAMES
+        assert 'bulk_qc' in BULK_MODULE_NAMES
+        assert 'bulk_qc' not in SC_MODULE_NAMES

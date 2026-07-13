@@ -85,6 +85,8 @@ class QCAnalysis(BaseAnalysis):
         # ── 4. Scrublet 双细胞检测 + 阈值过滤 ──────────────────────────
         self.progress(35, "Running Scrublet doublet detection + QC filtering...")
         n_before = adata.shape[0]
+        qc_before = adata.obs.copy()
+        n_genes_before = adata.shape[1]
         requested_batch = self.params.get('batch_key', 'batch')
         batch_key = requested_batch if requested_batch in adata.obs.columns else None
 
@@ -150,6 +152,68 @@ class QCAnalysis(BaseAnalysis):
         self.progress(60, "Generating QC plots...")
         plots_dir = self.ensure_plots_dir()
         result_files = []
+
+        # 过滤前后 QC 指标对比
+        if self.params.get('show_qc_filter_summary', True):
+            metrics = [
+                ('n_cells', 'Cells', n_before, n_after),
+                ('n_genes', 'Genes', n_genes_before, adata.shape[1]),
+            ]
+            for col, label in [
+                ('n_genes_by_counts', 'Median detected genes'),
+                ('total_counts', 'Median total counts'),
+                ('pct_counts_mt', 'Median MT%'),
+                ('pct_counts_ribo', 'Median ribo%'),
+            ]:
+                if col in qc_before.columns and col in adata.obs.columns:
+                    metrics.append((col, label, float(qc_before[col].median()), float(adata.obs[col].median())))
+            fig_filter = go.Figure()
+            fig_filter.add_trace(go.Bar(
+                x=[m[1] for m in metrics],
+                y=[m[2] for m in metrics],
+                name='Before QC',
+                marker_color='#607d8b',
+            ))
+            fig_filter.add_trace(go.Bar(
+                x=[m[1] for m in metrics],
+                y=[m[3] for m in metrics],
+                name='After QC',
+                marker_color='#1a237e',
+            ))
+            fig_filter.update_layout(
+                title='QC Filtering Summary',
+                yaxis_title='Value',
+                barmode='group',
+                plot_bgcolor='white',
+                width=760,
+                height=430,
+            )
+            result_files.append(self.save_plotly_json(
+                fig_filter, plots_dir, 'qc_filter_summary.json', 'qc', 'QC 过滤前后对比'
+            ))
+
+        # Scrublet doublet score 分布
+        if self.params.get('show_doublet_histogram', True) and 'doublet_score' in adata.obs.columns:
+            fig_doublet = go.Figure()
+            fig_doublet.add_trace(go.Histogram(
+                x=adata.obs['doublet_score'],
+                nbinsx=50,
+                marker_color='#3949ab',
+                opacity=0.8,
+                name='Retained cells',
+            ))
+            fig_doublet.update_layout(
+                title='Scrublet Doublet Score Distribution',
+                xaxis_title='Doublet score',
+                yaxis_title='Cell count',
+                plot_bgcolor='white',
+                width=650,
+                height=420,
+            )
+            result_files.append(self.save_plotly_json(
+                fig_doublet, plots_dir, 'qc_doublet_score_histogram.json', 'histogram',
+                'Scrublet Doublet Score 分布'
+            ))
 
         # QC Violin
         violin_keys = [k for k in ['n_genes_by_counts', 'total_counts', 'pct_counts_mt', 'pct_counts_ribo']
@@ -241,7 +305,7 @@ class QCAnalysis(BaseAnalysis):
                 'cells_removed': n_before - n_after,
                 'pct_removed': round((n_before - n_after) / max(n_before, 1) * 100, 1),
                 'n_genes': adata.shape[1],
-                'doublets_removed': n_before - n_after_scrublet,
+                'cells_removed_by_qc_and_doublet': n_before - n_after_scrublet,
                 'novelty_median': round(float(adata.obs['novelty_score'].median()), 4) if 'novelty_score' in adata.obs.columns else None,
                 'cell_cycle_available': cc_available,
                 'phase_counts': phase_counts,

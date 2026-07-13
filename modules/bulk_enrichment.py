@@ -5,6 +5,15 @@ import pandas as pd
 from modules.base import BaseAnalysis
 
 
+def _ensure_gsea_term_column(result_df):
+    """Preserve pathway names stored in a GSEA result index."""
+    result = result_df.copy()
+    if 'Term' not in result.columns:
+        index_name = result.index.name or 'index'
+        result = result.reset_index().rename(columns={index_name: 'Term'})
+    return result
+
+
 class BulkEnrichmentAnalysis(BaseAnalysis):
     MODULE_NAME = "bulk_enrichment"
     DISPLAY_NAME = "通路富集分析"
@@ -257,7 +266,8 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
             )
 
             self.progress(71, "处理 GSEA 结果...")
-            enr = pre_res.res2d
+            enr = _ensure_gsea_term_column(pre_res.res2d)
+            # omicverse 将通路名保存在索引中；导出 index=False 前显式保留为 Term 列。
             enr_sig = enr[enr['fdr'] < pvalue_cutoff].copy()
 
             csv_path = os.path.join(results_dir, 'enrichment_gsea_results.csv')
@@ -270,7 +280,7 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
                 fig_bar = go.Figure()
                 fig_bar.add_trace(go.Bar(
                     x=top_gsea['nes'].values,
-                    y=top_gsea.index.tolist(),
+                    y=top_gsea['Term'].astype(str).tolist(),
                     orientation='h',
                     marker_color=['#e53935' if v > 0 else '#1a237e' for v in top_gsea['nes'].values]
                 ))

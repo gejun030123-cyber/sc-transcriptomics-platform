@@ -22,9 +22,21 @@ def _validate_file_path(file_path):
     """校验文件路径在允许的目录内，防止路径遍历攻击"""
     if not file_path:
         return False
-    abs_path = os.path.abspath(file_path)
-    data_dir = os.path.abspath(Config.DATA_DIR)
-    return abs_path.startswith(data_dir + os.sep) or abs_path == data_dir
+    if os.path.islink(file_path):
+        return False
+    try:
+        real_path = os.path.realpath(file_path)
+        data_dir = os.path.realpath(Config.DATA_DIR)
+    except (OSError, ValueError):
+        return False
+    return real_path.startswith(data_dir + os.sep) or real_path == data_dir
+
+
+def _validate_project_file_path(file_path, project_id):
+    if not file_path or not project_id:
+        return False
+    is_valid, _ = Config._validate_path(file_path, project_id)
+    return is_valid and os.path.isfile(file_path)
 
 
 def _get_project_presets_dir(project_id):
@@ -135,6 +147,12 @@ def system_status():
         'active_tasks': active_count(),
     })
 
+
+@api_bp.route('/system/dependencies')
+def system_dependencies():
+    from modules.platform.system_health import dependency_status
+    return jsonify(dependency_status())
+
 @api_bp.route('/projects/<pid>/adata-info')
 def adata_info(pid):
     p = Project.get_by_id(pid)
@@ -164,11 +182,19 @@ def adata_info(pid):
         logger.exception("API error")
         return jsonify({'error': str(e)}), 500
 
+@api_bp.route('/projects/<pid>/result-file/<file_id>')
 @api_bp.route('/result-file/<file_id>')
-def get_result_file(file_id):
+def get_result_file(file_id, pid=None):
     f = ResultFile.get_by_id(file_id)
     if not f:
         return jsonify({'error': 'Not found'}), 404
+    pid = pid or request.args.get('project_id', '').strip()
+    if not pid:
+        return jsonify({'error': 'project_id required'}), 400
+    if f.project_id != pid:
+        return jsonify({'error': 'Result file 不属于该项目'}), 403
+    if not _validate_project_file_path(f.file_path, f.project_id):
+        return jsonify({'error': '文件路径不在所属项目内'}), 403
     if f.file_type == 'plotly_json':
         with open(f.file_path, 'r') as fh:
             data = json.load(fh)
@@ -178,14 +204,25 @@ def get_result_file(file_id):
     return send_file(f.file_path)
 
 
+@api_bp.route('/projects/<pid>/enrichment-result/<task_id>')
 @api_bp.route('/enrichment-result/<task_id>')
-def enrichment_result(task_id):
+def enrichment_result(task_id, pid=None):
     """返回富集分析的 Plotly JSON 结果"""
     from models import ResultFile
+    task = AnalysisTask.get_by_id(task_id)
+    if not task:
+        return jsonify({'error': 'Task not found'}), 404
+    pid = pid or request.args.get('project_id', '').strip()
+    if not pid:
+        return jsonify({'error': 'project_id required'}), 400
+    if task.project_id != pid:
+        return jsonify({'error': 'Task 不属于该项目'}), 403
     files = ResultFile.get_by_task(task_id)
     enrichment_files = [f for f in files if f.category == 'enrichment']
     result = []
     for f in enrichment_files:
+        if f.project_id != task.project_id or not _validate_project_file_path(f.file_path, f.project_id):
+            return jsonify({'error': '文件路径不在所属项目内'}), 403
         with open(f.file_path, 'r') as fh:
             data = json.load(fh)
         result.append({'id': f.id, 'label': f.label, 'data': data})
@@ -385,8 +422,7 @@ def obs_columns():
     if not _validate_file_path(file_path):
         return jsonify({'error': '文件路径不在允许范围内'}), 403
     try:
-        from modules.io_utils import read_expression_matrix
-        import re
+        from modules.io_utils import read_expression_matrix, infer_sample_group_candidates
         import pandas as pd
         adata = read_expression_matrix(file_path)
         qc_columns = {'total_counts', 'n_genes_by_counts', 'pct_counts_mt', 'size_factor',
@@ -406,29 +442,14 @@ def obs_columns():
         if cols:
             return jsonify({'columns': cols, 'sample_groups': {}, 'time_candidates': time_candidates})
 
-        # 如果 obs 没有注释列，尝试从样本名中提取分组前缀
+        # 如果 obs 没有注释列，从样本名推断多因素候选分组。
         sample_groups = {}
         if adata.n_obs > 0:
             sample_names = adata.obs.index.tolist()
-            prefixes = []
-            valid_indices = []
-            for i, name in enumerate(sample_names):
-                name_str = str(name)
-                name_clean = re.sub(r'_(count|FPKM|TPM|fpkm|tpm|Counts|normalized)$', '', name_str)
-                prefix = re.sub(r'[-_]\d+.*$', '', name_clean)
-                # 只保留匹配 prefix-number 模式的样本名（排除注释列）
-                if prefix and re.match(r'^[a-zA-Z][a-zA-Z0-9]*[-_]\d', name_clean):
-                    prefixes.append(prefix)
-                    valid_indices.append(i)
-                else:
-                    prefixes.append(None)
-            unique_prefixes = sorted(set(p for p in prefixes if p is not None))
-            if len(unique_prefixes) > 1 and len(valid_indices) > len(unique_prefixes):
-                mapping = {str(sample_names[i]): prefixes[i] for i in valid_indices}
-                sample_groups['auto_group'] = {
-                    'values': unique_prefixes,
-                    'mapping': mapping
-                }
+            candidates = infer_sample_group_candidates(sample_names)
+            if candidates:
+                sample_groups['auto_group'] = candidates[0]
+                sample_groups['auto_group_candidates'] = candidates
 
         return jsonify({'columns': cols, 'sample_groups': sample_groups, 'time_candidates': time_candidates})
     except Exception:
@@ -543,3 +564,206 @@ def delete_preset(preset_id):
         os.remove(fpath)
         return jsonify({'message': '预设已删除'})
     return jsonify({'error': '预设不存在'}), 404
+
+
+# ============ Pipeline Run API ============
+
+@api_bp.route('/projects/<pid>/pipeline-runs', methods=['POST'])
+def create_pipeline_run(pid):
+    """创建并启动 pipeline run。"""
+    from modules import MODULE_REGISTRY, SC_MODULE_NAMES, BULK_MODULE_NAMES, validate_pipeline_order
+    from models import PipelineRun
+    from worker import submit_pipeline_run
+
+    # 校验项目
+    p = Project.get_by_id(pid)
+    if not p:
+        return jsonify({'error': '项目不存在'}), 404
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': '请求体为空'}), 400
+
+    # 解析参数
+    name = data.get('name', '').strip()
+    analysis_type = data.get('analysis_type', '').strip()
+    modules = data.get('modules', [])
+    params = data.get('params', {})
+    input_path = data.get('input_path', '').strip()
+
+    # 校验必填字段
+    if not name:
+        return jsonify({'error': '缺少流程名称'}), 400
+    if not analysis_type:
+        return jsonify({'error': '缺少分析类型'}), 400
+    if not modules:
+        return jsonify({'error': '模块列表为空'}), 400
+    if not input_path:
+        return jsonify({'error': '缺少输入文件路径'}), 400
+
+    # 校验 analysis_type
+    if analysis_type not in ('sc', 'bulk'):
+        return jsonify({'error': 'analysis_type 必须是 sc 或 bulk'}), 400
+
+    # 校验模块类型
+    module_set = SC_MODULE_NAMES if analysis_type == 'sc' else BULK_MODULE_NAMES
+    for mod in modules:
+        if mod not in MODULE_REGISTRY:
+            return jsonify({'error': f'未知模块: {mod}'}), 400
+        if mod not in module_set:
+            return jsonify({'error': f'模块 {mod} 不属于 {analysis_type} 类型'}), 400
+
+    # 校验依赖顺序
+    is_valid, errors = validate_pipeline_order(modules)
+    if not is_valid:
+        return jsonify({'error': '模块顺序不满足依赖约束', 'details': errors}), 400
+
+    # 校验输入文件路径
+    abs_input = os.path.abspath(input_path)
+    project_dir = os.path.abspath(Config.project_dir(pid))
+    if not abs_input.startswith(project_dir + os.sep):
+        return jsonify({'error': '输入文件不在项目目录内'}), 400
+    if os.path.islink(abs_input):
+        return jsonify({'error': '输入文件不能是符号链接'}), 400
+    if not os.path.isfile(abs_input):
+        return jsonify({'error': '输入文件不存在'}), 400
+
+    # 构建参数（从 schema 默认值 + 请求参数合并）
+    from modules.schemas import PARAM_SCHEMAS, filter_active_params
+    params_by_module = {}
+    for mod in modules:
+        # 从 schema 获取默认值
+        schema = PARAM_SCHEMAS.get(mod, [])
+        default_params = {}
+        for field in schema:
+            key = field['key']
+            default = field.get('default')
+            if field.get('type') == 'select' and 'options' in field:
+                opts = field['options']
+                if default not in opts and opts:
+                    default = opts[0]
+            default_params[key] = default
+        # 合并请求参数（新形态：按模块名分组）
+        if mod in params:
+            module_params = params[mod]
+            if isinstance(module_params, dict):
+                default_params.update(module_params)
+        # 兼容旧形态：扁平参数应用到所有匹配的模块
+        for key, val in params.items():
+            if key not in ('qc', 'normalize', 'hvg', 'dimred', 'batch_correct',
+                          'clustering', 'subcluster', 'qc_reassess', 'annotation', 'deg',
+                          'trajectory', 'proportion', 'cell_communication',
+                          'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca',
+                          'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
+                          'bulk_deg_integration', 'convert_10x'):
+                if isinstance(val, (str, int, float, bool)):
+                    # 检查该模块的 schema 是否有这个 key
+                    schema_keys = {f['key'] for f in PARAM_SCHEMAS.get(mod, [])}
+                    if key in schema_keys and key not in default_params:
+                        default_params[key] = val
+        params_by_module[mod] = filter_active_params(schema, default_params)
+
+    # 创建 PipelineRun
+    pipeline_run = PipelineRun(
+        project_id=pid,
+        name=name,
+        analysis_type=analysis_type,
+        input_path=input_path,
+        modules_json=json.dumps(modules),
+        params_json=json.dumps(params_by_module, ensure_ascii=False)
+    )
+    pipeline_run.save()
+
+    # 提交到线程池
+    submit_pipeline_run(
+        run_id=pipeline_run.id,
+        project_id=pid,
+        modules=modules,
+        params_by_module=params_by_module,
+        project_dir=project_dir,
+        input_path=abs_input
+    )
+
+    return jsonify({'id': pipeline_run.id, 'message': '流程已启动'}), 201
+
+
+@api_bp.route('/projects/<pid>/pipeline-runs')
+def list_pipeline_runs(pid):
+    """列出项目的所有 pipeline runs。"""
+    from models import PipelineRun
+
+    p = Project.get_by_id(pid)
+    if not p:
+        return jsonify({'error': '项目不存在'}), 404
+
+    runs = PipelineRun.get_by_project(pid)
+    return jsonify([r.to_dict() for r in runs])
+
+
+@api_bp.route('/pipeline-runs/<run_id>/status')
+def pipeline_run_status(run_id):
+    """查询 pipeline run 状态。"""
+    from models import PipelineRun
+
+    run = PipelineRun.get_by_id(run_id)
+    if not run:
+        return jsonify({'error': 'Pipeline run 不存在'}), 404
+
+    return jsonify(run.to_dict())
+
+
+@api_bp.route('/projects/<pid>/pipeline-runs/<run_id>/resume', methods=['POST'])
+def resume_pipeline_run(pid, run_id):
+    """Create a new PipelineRun starting from the failed module."""
+    from models import PipelineRun, AnalysisTask
+    from modules.reporting.pipeline_report import build_resume_plan
+    from worker import submit_pipeline_run
+
+    run = PipelineRun.get_by_id(run_id)
+    if not run:
+        return jsonify({'error': 'Pipeline run 不存在'}), 404
+    if run.project_id != pid:
+        return jsonify({'error': 'Pipeline run 不属于该项目'}), 403
+    if run.status != 'failed':
+        return jsonify({'error': '只有 failed 状态的 Pipeline run 可以续跑'}), 400
+
+    try:
+        task_ids = json.loads(run.task_ids_json) if run.task_ids_json else []
+    except Exception:
+        task_ids = []
+    tasks = [t for tid in task_ids for t in [AnalysisTask.get_by_id(tid)] if t]
+    resume_plan = build_resume_plan(run, tasks)
+    if not resume_plan.get('can_resume'):
+        return jsonify({'error': resume_plan.get('reason', '无法续跑'), 'resume_plan': resume_plan}), 400
+
+    input_path = resume_plan['resume_input_path']
+    is_valid, err = Config._validate_path(input_path, pid)
+    if not is_valid:
+        return jsonify({'error': err}), 400
+    if not os.path.isfile(input_path):
+        return jsonify({'error': '续跑输入文件不存在'}), 400
+
+    modules = resume_plan['remaining_modules']
+    params_by_module = resume_plan.get('params', {})
+    new_run = PipelineRun(
+        project_id=pid,
+        name=f"{run.name} - resume",
+        analysis_type=run.analysis_type,
+        input_path=input_path,
+        modules_json=json.dumps(modules),
+        params_json=json.dumps(params_by_module, ensure_ascii=False),
+    )
+    new_run.save()
+    submit_pipeline_run(
+        run_id=new_run.id,
+        project_id=pid,
+        modules=modules,
+        params_by_module=params_by_module,
+        project_dir=Config.project_dir(pid),
+        input_path=input_path,
+    )
+    return jsonify({
+        'id': new_run.id,
+        'message': '续跑流程已启动',
+        'resume_plan': resume_plan,
+    }), 201

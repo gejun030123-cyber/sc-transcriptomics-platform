@@ -4,6 +4,7 @@ from .hvg import HVGAnalysis
 from .dimred import DimredAnalysis
 from .batch_correct import BatchCorrectAnalysis
 from .clustering import ClusteringAnalysis
+from .subcluster import SubclusterAnalysis
 from .qc_reassess import QCReassessAnalysis
 from .annotation import AnnotationAnalysis
 from .deg import DEGAnalysis
@@ -19,6 +20,7 @@ from .bulk_enrichment import BulkEnrichmentAnalysis
 from .bulk_timecourse import BulkTimecourseAnalysis
 from .bulk_deg_integration import BulkDEGIntegrationAnalysis
 from .convert_10x import Convert10x
+from .schemas import SC_MODULE_NAMES, BULK_MODULE_NAMES
 
 MODULE_REGISTRY = {
     # 单细胞分析模块
@@ -28,6 +30,7 @@ MODULE_REGISTRY = {
     'dimred': DimredAnalysis,
     'batch_correct': BatchCorrectAnalysis,
     'clustering': ClusteringAnalysis,
+    'subcluster': SubclusterAnalysis,
     'qc_reassess': QCReassessAnalysis,
     'annotation': AnnotationAnalysis,
     'deg': DEGAnalysis,
@@ -48,7 +51,7 @@ MODULE_REGISTRY = {
 }
 
 PIPELINE_ORDER = [
-    'qc', 'normalize', 'hvg', 'dimred', 'batch_correct', 'clustering',
+    'qc', 'normalize', 'hvg', 'dimred', 'batch_correct', 'clustering', 'subcluster',
     'qc_reassess', 'annotation', 'deg', 'trajectory', 'proportion', 'cell_communication',
     'bulk_qc', 'bulk_normalize', 'bulk_pca', 'bulk_deg', 'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
     'bulk_deg_integration',
@@ -62,6 +65,7 @@ PIPELINE_DEPS = {
     'dimred': ['hvg'],
     'batch_correct': ['hvg'],
     'clustering': ['dimred'],
+    'subcluster': ['clustering'],
     'qc_reassess': ['clustering'],
     'annotation': ['clustering'],
     'deg': ['clustering'],

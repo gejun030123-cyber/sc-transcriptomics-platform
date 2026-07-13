@@ -1,6 +1,29 @@
 import json
 import numpy as np
 
+
+def categorical_color_map(adata, color_key):
+    """Return a stable categorical palette, preferring omicverse defaults."""
+    series = adata.obs[color_key]
+    if not hasattr(series, 'cat'):
+        series = series.astype('category')
+    categories = [str(category) for category in series.cat.categories]
+    colors = None
+    try:
+        import omicverse as ov
+        # Omicverse creates a category-aligned palette in adata.uns.  This
+        # preserves a cluster's color across every plot generated from adata.
+        ov.utils.get_colors(adata, color_key)
+        colors = adata.uns.get(f'{color_key}_colors')
+        if isinstance(colors, dict):
+            return {category: colors.get(category, '#bdbdbd') for category in categories}
+    except Exception:
+        colors = None
+    if colors is None:
+        from plotly.colors import qualitative
+        colors = qualitative.Alphabet + qualitative.Dark24 + qualitative.Set3
+    return {category: colors[index % len(colors)] for index, category in enumerate(categories)}
+
 def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title='',
                  viz_params=None):
     import plotly.graph_objects as go
@@ -23,6 +46,7 @@ def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title='
             color_series = color_series.astype('category')
     fig = go.Figure()
     if color_series is not None and hasattr(color_series, 'cat'):
+        color_map = categorical_color_map(adata, color_key)
         for cat in color_series.cat.categories:
             mask = np.array(color_series == cat)
             if mask.sum() == 0:
@@ -30,7 +54,7 @@ def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title='
             fig.add_trace(go.Scattergl(
                 x=coords[mask, 0], y=coords[mask, 1],
                 mode='markers', name=str(cat),
-                marker=dict(size=point_size, opacity=opacity),
+                marker=dict(size=point_size, opacity=opacity, color=color_map.get(str(cat), '#bdbdbd')),
             ))
     elif color_series is not None:
         fig.add_trace(go.Scattergl(

@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
 instance/
 *.db
 *.sqlite3
@@ -13,6 +14,9 @@ data/
 genesets/
 .superpowers/
 cache/
+
+# Generated analysis outputs
+bulk_reference_output*/
 
 # Local configuration
 .claude/

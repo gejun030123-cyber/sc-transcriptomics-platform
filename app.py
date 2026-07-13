@@ -27,6 +27,7 @@ def create_app():
     from routes.results import results_bp
     from routes.api import api_bp
     from routes.chat import chat_bp
+    from routes.branches import branches_bp
 
     app.register_blueprint(main_bp)
     app.register_blueprint(analysis_bp, url_prefix='/projects')
@@ -35,6 +36,7 @@ def create_app():
     app.register_blueprint(results_bp, url_prefix='/projects')
     app.register_blueprint(api_bp, url_prefix='/api')
     app.register_blueprint(chat_bp)
+    app.register_blueprint(branches_bp)
 
     return app
 

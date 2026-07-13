@@ -40,6 +40,11 @@ class TrajectoryAnalysis(BaseAnalysis):
             root_mask = adata.obs[cluster_key].astype(str) == start_cluster
             if root_mask.sum() > 0:
                 adata.uns['iroot'] = np.where(root_mask)[0][0]
+        if 'iroot' not in adata.uns:
+            if 'X_diffmap' in adata.obsm and adata.obsm['X_diffmap'].shape[1] > 0:
+                adata.uns['iroot'] = int(np.argmin(adata.obsm['X_diffmap'][:, 0]))
+            else:
+                adata.uns['iroot'] = 0
 
         self.progress(40, "Computing diffusion pseudotime...")
         sc.tl.dpt(adata, n_branchings=n_branchings, n_dcs=n_dcs)
@@ -58,6 +63,51 @@ class TrajectoryAnalysis(BaseAnalysis):
         fpath = os.path.join(plots_dir, 'trajectory_pseudotime.json')
         with open(fpath, 'w') as f: f.write(fig_json)
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'Trajectory by {color_key}'})
+
+        if self.params.get('show_pseudotime_distribution', True) and 'dpt_pseudotime' in adata.obs.columns:
+            pseudotime = adata.obs['dpt_pseudotime'].astype(float)
+            fig_dist = go.Figure()
+            if cluster_key in adata.obs.columns:
+                labels = adata.obs[cluster_key].astype(str)
+                for cluster in sorted(labels.unique(), key=lambda x: (len(x), x)):
+                    vals = pseudotime[labels == cluster]
+                    fig_dist.add_trace(go.Violin(
+                        x=[str(cluster)] * len(vals),
+                        y=vals.values,
+                        name=str(cluster),
+                        box_visible=True,
+                        meanline_visible=True,
+                        points=False,
+                        hovertemplate='Cluster: ' + str(cluster) + '<br>Pseudotime: %{y:.3f}<extra></extra>',
+                    ))
+                fig_dist.update_layout(
+                    title=f'Pseudotime Distribution by {cluster_key}',
+                    xaxis_title=cluster_key,
+                    yaxis_title='DPT pseudotime',
+                    showlegend=False,
+                    plot_bgcolor='white',
+                    width=max(700, 55 * max(1, labels.nunique())),
+                    height=470,
+                )
+            else:
+                fig_dist.add_trace(go.Histogram(
+                    x=pseudotime.values,
+                    nbinsx=60,
+                    marker_color='#3949ab',
+                    hovertemplate='Pseudotime: %{x:.3f}<br>Cells: %{y}<extra></extra>',
+                ))
+                fig_dist.update_layout(
+                    title='Pseudotime Distribution',
+                    xaxis_title='DPT pseudotime',
+                    yaxis_title='Cell count',
+                    plot_bgcolor='white',
+                    width=700,
+                    height=430,
+                )
+            result_files.append(self.save_plotly_json(
+                fig_dist, plots_dir, 'trajectory_pseudotime_distribution.json',
+                'violin', 'Pseudotime Distribution'
+            ))
 
         # PAGA plot
         if enable_paga and 'paga' in adata.uns:

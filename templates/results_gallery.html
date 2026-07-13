@@ -3,9 +3,38 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3">
     <h4>分析结果 — {{ project.name }}</h4>
-    <a href="/projects/{{ project.id }}" class="btn btn-outline-secondary btn-sm">返回项目</a>
+    <div class="d-flex gap-2">
+        <a href="/projects/{{ project.id }}/results/project-report" class="btn btn-outline-primary btn-sm">项目报告</a>
+        <a href="/projects/{{ project.id }}/results/plot-gallery" class="btn btn-outline-primary btn-sm">图表图库</a>
+        <a href="/projects/{{ project.id }}/results/plots-archive" class="btn btn-outline-primary btn-sm">下载全部图表 ZIP</a>
+        <a href="/projects/{{ project.id }}" class="btn btn-outline-secondary btn-sm">返回项目</a>
+    </div>
 </div>
+{% if report_info and report_info.report_path %}
+<div class="card p-3 mb-3 small text-muted">
+    已生成项目级结果包：Markdown 报告和可直接浏览的 Plotly HTML 图库。
+</div>
+{% endif %}
+{% if pipeline_runs %}
+<h5 class="mb-3">流程运行</h5>
+{% for r in pipeline_runs %}
+<div class="card p-3 mb-3">
+    <div class="d-flex justify-content-between align-items-center">
+        <div>
+            <h6 class="mb-1">{{ r.name }}</h6>
+            <span class="status-badge status-{{ r.status }}">{{ status_map.get(r.status, r.status) }}</span>
+            <span class="small text-muted ms-2">{{ r.analysis_type }} | {{ r.progress }}%</span>
+            {% if r.finished_at %}
+            <span class="small text-muted ms-2">{{ r.finished_at[:16] }}</span>
+            {% endif %}
+        </div>
+        <a href="/projects/{{ project.id }}/pipeline-runs/{{ r.id }}" class="btn btn-outline-primary btn-sm">查看流程</a>
+    </div>
+</div>
+{% endfor %}
+{% endif %}
 {% if tasks %}
+<h5 class="mb-3 mt-4">单任务结果</h5>
 {% for t in tasks %}
 <div class="card p-3 mb-3">
     <div class="d-flex justify-content-between align-items-center">

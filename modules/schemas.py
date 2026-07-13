@@ -8,6 +8,7 @@ SC_MODULE_LIST = [
     {'name': 'dimred', 'display': '降维分析', 'desc': 'PCA, UMAP'},
     {'name': 'batch_correct', 'display': '批次校正', 'desc': 'Harmony, ComBat, SysVI'},
     {'name': 'clustering', 'display': '聚类分析', 'desc': 'Leiden 聚类'},
+    {'name': 'subcluster', 'display': '子簇精细分析', 'desc': '选定一个簇进行重聚类、差异表达、热图和通路富集'},
     {'name': 'qc_reassess', 'display': 'QC 重新评估', 'desc': '聚类后检查 doublet 和 QC 指标，标记低质量簇'},
     {'name': 'annotation', 'display': '细胞注释', 'desc': '基于 Marker 的细胞类型注释'},
     {'name': 'deg', 'display': '差异表达', 'desc': '差异表达基因分析'},
@@ -30,6 +31,7 @@ BULK_MODULE_LIST = [
 MODULE_LIST = SC_MODULE_LIST + BULK_MODULE_LIST
 
 MODULE_DISPLAY_MAP = {m['name']: m['display'] for m in MODULE_LIST}
+MODULE_DISPLAY_MAP['convert_10x'] = '单细胞数据导入'
 
 SC_MODULE_NAMES = {m['name'] for m in SC_MODULE_LIST}
 BULK_MODULE_NAMES = {m['name'] for m in BULK_MODULE_LIST}
@@ -54,11 +56,14 @@ PARAM_SCHEMAS = {
         {'key': 'batch_adaptive_qc', 'label': '批次自适应 QC', 'type': 'checkbox', 'default': False, 'help': '按批次独立计算 MAD 阈值过滤，适用于批次间质量差异大的数据。'},
         {'key': 'mad_multiplier', 'label': 'MAD 倍数', 'type': 'number', 'default': 3.0, 'step': 0.5, 'help': '批次自适应 QC 的 MAD 倍数。越大越宽松。默认 3.0（约对应 3σ）。'},
         {'key': 'save_counts_layer', 'label': '保存原始 counts 层', 'type': 'checkbox', 'default': True, 'help': '在 QC 过滤前将原始表达矩阵保存到 adata.layers["counts"]，供下游标准化使用。'},
+        {'key': 'show_qc_filter_summary', 'label': '生成过滤前后 QC 对比图', 'type': 'checkbox', 'default': True, 'help': '输出 QC 过滤前后细胞数、基因数和核心 QC 指标的对比图，用于检查过滤强度是否合理。'},
+        {'key': 'show_doublet_histogram', 'label': '生成 Doublet score 直方图', 'type': 'checkbox', 'default': True, 'help': '输出 Scrublet doublet score 分布图，用于判断双细胞阈值和残留双细胞风险。'},
     ],
     'normalize': [
         {'key': 'method', 'label': '标准化方法', 'type': 'select', 'options': ['log1p', 'pearson_residuals'], 'default': 'log1p', 'help': 'log1p：标准 log1p CPM（shiftlog），适合大多数分析。pearson_residuals：Pearson 残差标准化，对技术噪声更鲁棒。'},
         {'key': 'target_sum', 'label': '标准化目标总数', 'type': 'number', 'default': 10000, 'help': '每个细胞标准化后的总计数目标。10000 为 scanpy 默认值。'},
         {'key': 'clip_values', 'label': '裁剪 Pearson 残差', 'type': 'checkbox', 'default': True, 'help': '仅 pearson_residuals 模式生效。裁剪残差到 ±√n 范围，减少极端值影响。'},
+        {'key': 'show_expression_distribution', 'label': '生成表达值分布图', 'type': 'checkbox', 'default': True, 'help': '展示标准化后表达值分布，并与 log1p 原始 counts 对比，用于发现标准化异常或极端值。'},
     ],
     'hvg': [
         {'key': 'n_top_genes', 'label': '高变异基因数量', 'type': 'number', 'default': 2000, 'help': '选择的高变异基因数量。2000 为标准值，适合大多数分析。基因数过少会丢失生物学信号，过多会引入噪声。'},
@@ -70,6 +75,7 @@ PARAM_SCHEMAS = {
         {'key': 'force_include_genes', 'label': '强制包含基因（可选）', 'type': 'textarea', 'default': '', 'help': '强制包含在 HVG 中的基因名，逗号或换行分隔。无论是否被选为 HVG 都会保留。'},
         {'key': 'cc_scoring', 'label': '细胞周期评分', 'type': 'checkbox', 'default': False, 'help': '计算 S 期和 G2M 期评分，存入 obs。'},
         {'key': 'regress_cc', 'label': '回归去除细胞周期', 'type': 'checkbox', 'default': False, 'help': '回归去除细胞周期效应（需先开启细胞周期评分）。用于消除细胞周期对下游分析的干扰。'},
+        {'key': 'show_hvg_rank_plot', 'label': '生成 HVG Rank 图', 'type': 'checkbox', 'default': True, 'help': '按变异度排名展示基因，并标注 Top HVG，用于检查 HVG 选择是否合理。'},
     ],
     'dimred': [
         {'key': 'n_comps', 'label': 'PCA 主成分数量', 'type': 'number', 'default': 50, 'help': 'PCA 主成分数量。通常 30-50 即可捕获大部分方差。'},
@@ -82,21 +88,31 @@ PARAM_SCHEMAS = {
         {'key': 'tsne_perplexity', 'label': 't-SNE 困惑度', 'type': 'number', 'default': 30, 'help': 't-SNE 困惑度，大致表示有效邻居数。通常 5-50，大数据集可增大。'},
         {'key': 'tsne_learning_rate', 'label': 't-SNE 学习率', 'type': 'number', 'default': 1000, 'help': 't-SNE 学习率。通常 100-1000，默认 1000。'},
         {'key': 'use_mde', 'label': '使用 MDE（加速 UMAP）', 'type': 'checkbox', 'default': False, 'help': '使用 Minimum Dystortion Embedding 替代标准 UMAP，速度更快但结果略有差异。'},
+        {'key': 'show_pca_scatter', 'label': '生成 PCA Scatter 图', 'type': 'checkbox', 'default': True, 'help': '展示 PC1/PC2 散点图，用于在 UMAP 前检查离群细胞、批次结构或样本结构。'},
     ],
     'batch_correct': [
-        {'key': 'method', 'label': '校正方法', 'type': 'select', 'options': ['harmony', 'combat', 'bbknn', 'scanorama', 'sysvi', 'scvi'], 'default': 'harmony', 'help': '批次校正方法。Harmony：速度快，推荐首选。ComBat：适用于已知批次。BBKNN：基于邻居图。Scanorama：基于 MNN。SysVI/scVI：深度学习方法，需要 GPU。'},
+        {'key': 'method', 'label': '校正方法', 'type': 'select', 'options': ['harmony', 'combat', 'bbknn', 'scanorama', 'sysvi', 'scvi'], 'default': 'harmony', 'help': '批次整合方法。Harmony：PCA 空间校正；ComBat：Scanpy ComBat PCA；BBKNN：邻居图整合；Scanorama：MNN/全局整合；SysVI/scVI：深度生成模型，可 CPU/GPU 运行。'},
         {'key': 'batch_key', 'label': '批次列名', 'type': 'text', 'default': 'batch', 'help': 'adata.obs 中标识批次的列名。'},
-        {'key': 'n_pcs', 'label': '主成分数量', 'type': 'number', 'default': 50, 'help': '用于批次校正的主成分数量。'},
-        {'key': 'max_epochs', 'label': '最大迭代轮数（仅 SysVI/scVI）', 'type': 'number', 'default': 200, 'help': '深度学习方法的最大训练轮数。'},
-        {'key': 'harmony_theta', 'label': 'Harmony theta', 'type': 'number', 'default': 2.0, 'step': 0.5, 'help': 'Harmony 多样性惩罚。值越大强制批次混合越强。默认 2.0。'},
-        {'key': 'harmony_lambda', 'label': 'Harmony lambda', 'type': 'number', 'default': 1.0, 'step': 0.1, 'help': 'Harmony 正则化强度。默认 1.0。'},
-        {'key': 'bbknn_neighbors_within_batch', 'label': 'BBKNN 每批次邻居数', 'type': 'number', 'default': 3, 'help': 'BBKNN 在每个批次内搜索的邻居数。默认 3。'},
-        {'key': 'scvi_n_latent', 'label': 'scVI 潜在维度', 'type': 'number', 'default': 30, 'help': 'scVI/SysVI 潜在空间维度。默认 30。'},
-        {'key': 'scvi_n_hidden', 'label': 'scVI 隐藏层大小', 'type': 'number', 'default': 128, 'help': 'scVI/SysVI 隐藏层神经元数。默认 128。'},
-        {'key': 'scvi_n_layers', 'label': 'scVI 层数', 'type': 'number', 'default': 1, 'help': 'scVI/SysVI 编码器/解码器层数。默认 1。'},
-        {'key': 'scvi_dropout_rate', 'label': 'scVI dropout', 'type': 'number', 'default': 0.1, 'step': 0.05, 'help': 'scVI/SysVI dropout 率。默认 0.1。'},
-        {'key': 'scvi_learning_rate', 'label': 'scVI 学习率', 'type': 'number', 'default': 0.001, 'help': 'scVI 学习率。默认 0.001。'},
-        {'key': 'evaluate_correction', 'label': '评估校正效果', 'type': 'checkbox', 'default': False, 'help': '计算批次校正评估指标（ASW、图连通性）。'},
+        {'key': 'n_pcs', 'label': '主成分数量', 'type': 'number', 'default': 50, 'show_if': {'method': ['harmony', 'combat', 'scanorama']}, 'help': '用于 Harmony、ComBat 和 Scanorama 的主成分数量。BBKNN 使用已有 PCA 图；SysVI/scVI 使用潜在空间维度。'},
+        {'key': 'max_epochs', 'label': '最大迭代轮数（仅 SysVI/scVI）', 'type': 'number', 'default': 60, 'show_if': {'method': ['sysvi', 'scvi']}, 'help': '深度学习方法的最大训练轮数。CPU 环境建议先用 40-80。'},
+        {'key': 'harmony_theta', 'label': 'Harmony theta', 'type': 'number', 'default': 2.0, 'step': 0.5, 'show_if': {'method': 'harmony'}, 'help': 'Harmony 多样性惩罚。值越大强制批次混合越强。默认 2.0。'},
+        {'key': 'harmony_lambda', 'label': 'Harmony lambda', 'type': 'number', 'default': 1.0, 'step': 0.1, 'show_if': {'method': 'harmony'}, 'help': 'Harmony 正则化强度。默认 1.0。'},
+        {'key': 'harmony_max_iter', 'label': 'Harmony 最大迭代', 'type': 'number', 'default': 20, 'show_if': {'method': 'harmony'}, 'help': 'Harmony 最大校正迭代数。'},
+        {'key': 'bbknn_neighbors_within_batch', 'label': 'BBKNN 每批次邻居数', 'type': 'number', 'default': 3, 'show_if': {'method': 'bbknn'}, 'help': 'BBKNN 在每个批次内搜索的邻居数。默认 3；如果某个批次细胞数更少，平台会自动下调到最小批次细胞数并在 summary 中记录。'},
+        {'key': 'scvi_n_latent', 'label': 'scVI 潜在维度', 'type': 'number', 'default': 30, 'show_if': {'method': ['sysvi', 'scvi']}, 'help': 'scVI/SysVI 潜在空间维度。默认 30。'},
+        {'key': 'scvi_n_hidden', 'label': 'scVI 隐藏层大小', 'type': 'number', 'default': 128, 'show_if': {'method': ['sysvi', 'scvi']}, 'help': 'scVI/SysVI 隐藏层神经元数。默认 128。'},
+        {'key': 'scvi_n_layers', 'label': 'scVI 层数', 'type': 'number', 'default': 1, 'show_if': {'method': ['sysvi', 'scvi']}, 'help': 'scVI/SysVI 编码器/解码器层数。默认 1。'},
+        {'key': 'scvi_dropout_rate', 'label': 'scVI dropout', 'type': 'number', 'default': 0.1, 'step': 0.05, 'show_if': {'method': ['sysvi', 'scvi']}, 'help': 'scVI/SysVI dropout 率。默认 0.1。'},
+        {'key': 'scvi_learning_rate', 'label': 'scVI 学习率', 'type': 'number', 'default': 0.001, 'show_if': {'method': 'scvi'}, 'help': 'scVI 学习率。默认 0.001。'},
+        {'key': 'sysvi_cycle_weight', 'label': 'SysVI cycle 权重', 'type': 'number', 'default': 5.0, 'step': 0.5, 'show_if': {'method': 'sysvi'}, 'help': 'SysVI latent cycle-consistency 权重。越高通常整合越强。'},
+        {'key': 'sysvi_kl_weight', 'label': 'SysVI KL 权重', 'type': 'number', 'default': 1.0, 'step': 0.1, 'show_if': {'method': 'sysvi'}, 'help': 'SysVI KL loss 权重。降低可能保留更多生物差异。'},
+        {'key': 'sysvi_prior', 'label': 'SysVI prior', 'type': 'select', 'options': ['vamp', 'standard_normal'], 'default': 'vamp', 'show_if': {'method': 'sysvi'}, 'help': 'SysVI prior 类型。默认 vamp。'},
+        {'key': 'sysvi_n_prior_components', 'label': 'SysVI prior 组件数', 'type': 'number', 'default': 5, 'show_if': {'method': 'sysvi', 'sysvi_prior': 'vamp'}, 'help': 'VampPrior 组件数。'},
+        {'key': 'evaluate_correction', 'label': '评估整合效果', 'type': 'checkbox', 'default': True, 'help': '计算批次整合关键指标并生成指标图表：batch ASW、cluster batch entropy、最大批次占比、邻居混合、图连通性等。'},
+        {'key': 'evaluation_cluster_key', 'label': '评价分群列（可选）', 'type': 'text', 'default': '', 'show_if': {'evaluate_correction': True}, 'help': '用于计算 cluster 层面批次混合的 obs 列。留空时优先用 leiden；没有则自动生成 batch_eval_leiden。'},
+        {'key': 'evaluation_resolution', 'label': '评价分群 resolution', 'type': 'number', 'default': 0.8, 'step': 0.1, 'show_if': {'evaluate_correction': True}, 'help': '自动生成 batch_eval_leiden 时使用的 resolution。'},
+        {'key': 'evaluation_sample_size', 'label': 'ASW 抽样细胞数', 'type': 'number', 'default': 10000, 'show_if': {'evaluate_correction': True}, 'help': '计算 silhouette/ASW 时的抽样细胞数，避免大数据过慢。'},
+        {'key': 'bio_label_key', 'label': '生物标签列（可选）', 'type': 'text', 'default': '', 'show_if': {'evaluate_correction': True}, 'help': '用于估计生物结构保留的标签列，如 celltype、annotation 或参考标签。留空时自动尝试 celltype/reference_celltype/leiden。'},
     ],
     'clustering': [
         {'key': 'resolutions', 'label': '聚类分辨率（逗号分隔）', 'type': 'text', 'default': '0.6,0.8,1.0', 'help': '聚类分辨率，多个值用逗号分隔。值越大聚类越细。'},
@@ -105,8 +121,33 @@ PARAM_SCHEMAS = {
         {'key': 'n_iterations', 'label': 'Leiden 迭代次数', 'type': 'number', 'default': 2, 'help': 'Leiden 算法迭代次数。-1 为运行至收敛。'},
         {'key': 'distance_metric', 'label': '距离度量', 'type': 'select', 'options': ['euclidean', 'cosine', 'correlation', 'manhattan'], 'default': 'euclidean', 'help': '邻居图的距离度量。'},
         {'key': 'use_corrected', 'label': '使用校正后表示', 'type': 'checkbox', 'default': True, 'help': '优先使用批次校正后的嵌入（如有）。'},
+        {'key': 'batch_key', 'label': '批次列名', 'type': 'text', 'default': 'batch', 'help': '用于生成 cluster 批次组成图的 obs 列名。数据中不存在该列时自动跳过。'},
         {'key': 'auto_select_resolution', 'label': '自动选择最优分辨率', 'type': 'checkbox', 'default': False, 'help': '使用聚类质量指标自动选择最优分辨率。'},
         {'key': 'resolution_metric', 'label': '评估指标', 'type': 'select', 'options': ['silhouette', 'calinski', 'davies_bouldin'], 'default': 'silhouette', 'help': '自动选择分辨率时的质量评估指标。'},
+        {'key': 'primary_resolution', 'label': '主分辨率（可选）', 'type': 'text', 'default': '', 'help': '指定最终写入 leiden 的主分辨率，例如 0.8。留空则使用首个分辨率或自动选择结果。'},
+        {'key': 'show_labeled_umap', 'label': '生成带标签 Cluster UMAP', 'type': 'checkbox', 'default': True, 'help': '在主分辨率 UMAP 上显示 cluster 编号，便于人工复核分群是否符合预期。'},
+        {'key': 'show_resolution_sankey', 'label': '生成分辨率流向图', 'type': 'checkbox', 'default': True, 'help': '用 Sankey 图展示不同 Leiden 分辨率之间的簇拆分关系，辅助选择合适分辨率。'},
+        {'key': 'show_cluster_size_bar', 'label': '生成 Cluster 细胞数图', 'type': 'checkbox', 'default': True, 'help': '展示主分辨率每个 cluster 的细胞数量，用于识别过小簇、过度分裂或不均衡分群。'},
+        {'key': 'show_cluster_batch_composition', 'label': '生成 Cluster 批次组成图', 'type': 'checkbox', 'default': True, 'help': '展示每个 cluster 的 batch/sample 组成比例，用于发现单一批次支配的分群。'},
+    ],
+    'subcluster': [
+        {'key': 'source_cluster_key', 'label': '来源聚类列', 'type': 'text', 'default': 'leiden', 'help': '原始 AnnData.obs 中要精细拆分的聚类列，通常为 leiden。'},
+        {'key': 'target_cluster', 'label': '目标簇编号', 'type': 'text', 'default': '', 'help': '要单独重聚类的簇编号，例如 3。必须与来源聚类列中的值完全一致。'},
+        {'key': 'min_cells', 'label': '最小细胞数', 'type': 'number', 'default': 30, 'step': 1, 'help': '目标簇少于此数量时停止，避免对过少细胞产生不稳定子簇。'},
+        {'key': 'n_neighbors', 'label': '子簇邻居数', 'type': 'number', 'default': 15, 'step': 1, 'help': '仅在目标簇细胞中重新构建 KNN 图；平台会自动限制为小于细胞数。'},
+        {'key': 'resolution', 'label': '子簇聚类分辨率', 'type': 'number', 'default': 0.8, 'step': 0.1, 'help': '值越大拆分越细。建议从 0.4-1.2 多次比较后确定。'},
+        {'key': 'clustering_method', 'label': '子簇聚类算法', 'type': 'select', 'options': ['leiden', 'louvain'], 'default': 'leiden', 'help': 'Leiden 为推荐的子簇社区发现方法。'},
+        {'key': 'n_iterations', 'label': 'Leiden 迭代次数', 'type': 'number', 'default': 2, 'step': 1, 'show_if': {'clustering_method': 'leiden'}, 'help': 'Leiden 迭代次数；-1 表示收敛。'},
+        {'key': 'distance_metric', 'label': '距离度量', 'type': 'select', 'options': ['euclidean', 'cosine', 'correlation'], 'default': 'euclidean', 'help': '子簇 KNN 图的距离度量。'},
+        {'key': 'umap_min_dist', 'label': '子簇 UMAP 最小距离', 'type': 'number', 'default': 0.4, 'step': 0.05, 'help': '仅影响子簇 UMAP 展示，不改变子簇身份。'},
+        {'key': 'deg_method', 'label': '子簇差异方法', 'type': 'select', 'options': ['wilcoxon', 't-test', 'logreg'], 'default': 'wilcoxon', 'help': '子簇 marker 差异表达方法。'},
+        {'key': 'n_genes', 'label': '每子簇 DEG 数', 'type': 'number', 'default': 50, 'step': 10, 'help': '导出的每个子簇 marker/DEG 数量。提高此值可保留更多候选基因。'},
+        {'key': 'marker_heatmap_top_n', 'label': '热图每子簇 Marker 数', 'type': 'number', 'default': 5, 'step': 1, 'help': '每个子簇纳入热图的 Top marker 数。'},
+        {'key': 'run_enrichment', 'label': '运行子簇通路富集', 'type': 'checkbox', 'default': True, 'help': '对每个子簇的显著上调 marker 独立运行 Enrichr；网络不可用时不会影响其他结果。'},
+        {'key': 'enrichment_database', 'label': '富集数据库', 'type': 'select', 'options': ['GO_Biological_Process_2023', 'KEGG_2021_Human', 'Reactome_2022'], 'default': 'GO_Biological_Process_2023', 'show_if': {'run_enrichment': True}, 'help': '每个子簇使用的 Enrichr 基因集库。'},
+        {'key': 'organism', 'label': '物种', 'type': 'select', 'options': ['Human', 'Mouse'], 'default': 'Human', 'show_if': {'run_enrichment': True}, 'help': '富集服务所用物种。'},
+        {'key': 'enrichment_pval_cutoff', 'label': '富集校正 P 值阈值', 'type': 'number', 'default': 0.05, 'step': 0.01, 'show_if': {'run_enrichment': True}, 'help': '仅使用达到此 Adjusted P-value 阈值的 marker 进行富集。'},
+        {'key': 'enrichment_top_n', 'label': '每子簇展示 Top 通路数', 'type': 'number', 'default': 10, 'step': 1, 'show_if': {'run_enrichment': True}, 'help': '通路气泡图中每个子簇展示的最多通路数量。'},
     ],
     'qc_reassess': [
         {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于评估的聚类列名。'},
@@ -115,19 +156,28 @@ PARAM_SCHEMAS = {
         {'key': 'ribosomal_threshold', 'label': '核糖体比例阈值（0 = 不检查）', 'type': 'number', 'default': 0, 'step': 1.0, 'help': '平均核糖体比例高于此值的簇标记为低质量。0 表示不检查。'},
         {'key': 'min_cells_per_cluster', 'label': '最小细胞数', 'type': 'number', 'default': 10, 'help': '细胞数低于此值的簇标记为低质量。'},
         {'key': 'auto_remove', 'label': '自动移除低质量簇', 'type': 'checkbox', 'default': False, 'help': '自动从数据中移除标记为低质量的簇。'},
+        {'key': 'show_qc_umap_panel', 'label': '生成 QC 指标 UMAP 面板', 'type': 'checkbox', 'default': True, 'help': '把 MT%、检测基因数、总 counts 和 doublet score 映射到 UMAP，用于定位低质量区域或疑似污染簇。'},
+        {'key': 'show_cluster_qc_bar', 'label': '生成按簇 QC 汇总图', 'type': 'checkbox', 'default': True, 'help': '按 cluster 展示细胞数、检测基因数、MT% 和 doublet fraction，低质量簇用颜色标记。'},
     ],
     'annotation': [
-        {'key': 'method', 'label': '注释方法', 'type': 'select', 'options': ['auto_marker', 'manual', 'celltypist'], 'default': 'auto_marker', 'help': 'auto_marker：使用 marker 基因自动打分。manual：手动指定 ClusterID:CellType 映射。celltypist：使用 CellTypist 预训练模型。'},
+        {'key': 'method', 'label': '注释方法', 'type': 'select', 'options': ['multi_evidence', 'auto_marker', 'manual', 'celltypist'], 'default': 'multi_evidence', 'help': 'multi_evidence：Marker 规则、Cluster 一致性与可用的 CellTypist 交叉证据（推荐）；auto_marker：仅规则打分；manual：手工映射；celltypist：仅 CellTypist。'},
         {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于分组的聚类列名。'},
         {'key': 'resolution', 'label': 'Leiden 分辨率', 'type': 'text', 'default': '0.8', 'help': '对应的 Leiden 分辨率，用于定位正确的聚类列。'},
-        {'key': 'marker_set', 'label': 'Marker 基因集', 'type': 'select', 'options': ['TME', 'Immune', 'Blood'], 'default': 'TME', 'help': '内置 marker 基因集。'},
+        {'key': 'marker_set', 'label': 'Marker 基因集', 'type': 'select', 'options': ['Universal', 'TME', 'Immune', 'Blood', 'PBMC'], 'default': 'Universal', 'help': 'Universal：未知组织的通用大谱系初注释（推荐起点）；TME/Immune/Blood/PBMC：已知场景的细分 marker 集。初注释后可对子簇使用场景集或自定义 marker 精修。'},
         {'key': 'custom_markers', 'label': '自定义 Marker（可选）', 'type': 'textarea', 'default': '', 'help': 'auto_marker 模式：CellType:GENE1,GENE2 格式。manual 模式：ClusterID:CellType 格式。'},
+        {'key': 'min_markers_per_type', 'label': '每类型最少可用 Marker 数', 'type': 'number', 'default': 2, 'step': 1, 'show_if': {'method': 'auto_marker'}, 'help': '当前数据中命中少于此数量的类型不参与打分，避免因基因面板缺失而误注释。'},
+        {'key': 'min_annotation_score', 'label': '自动注释最低 Marker 得分', 'type': 'number', 'default': 0.0, 'step': 0.05, 'show_if': {'method': 'auto_marker'}, 'help': '大于 0 时，最高 marker score 低于阈值的细胞标为 Unknown。建议先查看 Marker 覆盖度和得分热图后调整。'},
+        {'key': 'cluster_agreement_threshold', 'label': 'Cluster 最低标签一致率', 'type': 'number', 'default': 0.6, 'step': 0.05, 'show_if': {'method': 'multi_evidence'}, 'help': '同一 cluster 内 Marker 标签多数比例低于此值时标记为 Unknown，避免将混杂 cluster 强行命名。'},
         {'key': 'celltypist_model', 'label': 'CellTypist 模型', 'type': 'select', 'options': ['Immune_All_Low', 'Immune_All_High', 'Adult_COVID19_PBMC', 'Adult_Human_Pancreas'], 'default': 'Immune_All_Low', 'help': 'CellTypist 预训练模型。仅 celltypist 方法生效。'},
         {'key': 'celltypist_threshold', 'label': 'CellTypist 概率阈值', 'type': 'number', 'default': 0.5, 'step': 0.05, 'help': 'CellTypist 预测概率阈值。低于此值标为 Unknown。'},
         {'key': 'celltypist_majority_voting', 'label': '多数投票', 'type': 'checkbox', 'default': True, 'help': 'CellTypist 多数投票模式，提高注释一致性。'},
         {'key': 'confidence_method', 'label': '置信度方法', 'type': 'select', 'options': ['none', 'entropy', 'score_margin'], 'default': 'none', 'help': '注释置信度评估方法。entropy：基于评分熵。score_margin：基于最高分与次高分差距。'},
         {'key': 'mark_unknown', 'label': '低置信度标 Unknown', 'type': 'checkbox', 'default': True, 'help': '将低置信度的注释标记为 Unknown。'},
         {'key': 'merge_similar_threshold', 'label': '相似簇合并阈值（0 = 不合并）', 'type': 'number', 'default': 0, 'step': 0.05, 'help': '相似度高于此值的相邻簇合并为同一细胞类型。0 表示不合并。'},
+        {'key': 'show_celltype_composition', 'label': '生成细胞类型组成图', 'type': 'checkbox', 'default': True, 'help': '展示每种注释细胞类型的数量和比例，用于检查注释组成和样本结构。'},
+        {'key': 'show_marker_score_heatmap', 'label': '生成 Marker score 热图', 'type': 'checkbox', 'default': True, 'help': '按 cluster 展示各细胞类型 marker score 的相对强弱，用于解释自动注释依据。'},
+        {'key': 'show_marker_expression_violin', 'label': '生成 Marker 表达验证图', 'type': 'checkbox', 'default': True, 'help': '按注释细胞类型展示核心 marker 表达分布，用于人工确认注释是否符合生物学预期。'},
+        {'key': 'show_annotation_score_umap', 'label': '生成注释置信度 UMAP', 'type': 'checkbox', 'default': True, 'help': '把 annotation confidence 或 score margin 映射到 UMAP，用于定位低置信度区域和可能需要重分群的细胞。'},
     ],
     'deg': [
         {'key': 'groupby', 'label': '分组依据', 'type': 'text', 'default': '', 'help': '差异分析的分组依据列名。留空则自动使用 leiden。'},
@@ -143,11 +193,17 @@ PARAM_SCHEMAS = {
         {'key': 'correction_method', 'label': '多重检验校正', 'type': 'select', 'options': ['benjamini_hochberg', 'bonferroni', 'BY'], 'default': 'benjamini_hochberg', 'help': '多重检验校正方法。'},
         {'key': 'volcano_top_n', 'label': '火山图标注基因数', 'type': 'number', 'default': 10, 'help': '火山图上自动标注的 Top N 基因数。'},
         {'key': 'volcano_genes', 'label': '火山图自定义标注基因', 'type': 'textarea', 'default': '', 'help': '火山图上自定义标注的基因名。'},
+        {'key': 'show_deg_counts_bar', 'label': '生成显著 DEG 数量图', 'type': 'checkbox', 'default': True, 'help': '按分组统计显著上调/下调基因数量，用于快速判断各 cluster 差异信号强弱。'},
+        {'key': 'show_top_marker_umap_panel', 'label': '生成 Top marker UMAP 面板', 'type': 'checkbox', 'default': True, 'help': '自动选择各簇 Top marker 并生成表达 UMAP 面板，用于验证 marker 空间分布。'},
+        {'key': 'top_marker_umap_genes', 'label': 'Top marker UMAP 基因数', 'type': 'number', 'default': 6, 'help': '自动 marker UMAP 面板中最多展示的基因数。'},
+        {'key': 'show_marker_heatmap', 'label': '生成 Cluster marker 热图', 'type': 'checkbox', 'default': True, 'help': '展示每个簇 Top marker 在各簇中的平均表达 z-score，便于检查分群和注释一致性。'},
+        {'key': 'marker_heatmap_top_n', 'label': '热图每簇 Top marker 数', 'type': 'number', 'default': 3, 'help': '每个簇纳入 marker 热图的 Top 基因数量。数值越大热图越全面但也越拥挤。'},
     ],
     'trajectory': [
         {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于轨迹推断和可视化的聚类列名。'},
         {'key': 'plot_genes', 'label': '拟时序基因表达（可选）', 'type': 'textarea', 'default': '', 'help': '手动输入基因名，逗号或换行分隔。最多 10 个基因。'},
         {'key': 'enable_paga', 'label': '启用 PAGA', 'type': 'checkbox', 'default': False, 'help': '生成 PAGA 轨迹图，展示簇间连接强度。'},
+        {'key': 'show_pseudotime_distribution', 'label': '生成拟时序分布图', 'type': 'checkbox', 'default': True, 'help': '按 cluster 展示 DPT pseudotime 分布，用于判断轨迹方向和分支是否合理。'},
         {'key': 'paga_threshold', 'label': 'PAGA 连接阈值', 'type': 'number', 'default': 0.05, 'step': 0.01, 'help': 'PAGA 连接强度阈值，低于此值的连接不显示。'},
         {'key': 'n_diffcomps', 'label': '扩散图成分', 'type': 'number', 'default': 15, 'help': '扩散图计算的成分数量。'},
         {'key': 'start_cluster', 'label': '起始簇（留空=自动）', 'type': 'text', 'default': '', 'help': '伪时间计算的起始簇名。留空则自动选择。'},
@@ -161,6 +217,7 @@ PARAM_SCHEMAS = {
         {'key': 'stat_test', 'label': '统计检验', 'type': 'select', 'options': ['chi_square', 'fisher_exact', 'permutation'], 'default': 'chi_square', 'help': '比例差异的统计检验方法。'},
         {'key': 'n_permutations', 'label': '置换检验次数', 'type': 'number', 'default': 1000, 'help': '置换检验的置换次数。仅 permutation 方法生效。'},
         {'key': 'min_cells_per_group', 'label': '最小细胞数', 'type': 'number', 'default': 10, 'help': '每组最小细胞数，低于此值的组不参与比较。'},
+        {'key': 'show_proportion_heatmap', 'label': '生成比例热图', 'type': 'checkbox', 'default': True, 'help': '以 heatmap 展示每个样本/分组中的细胞类型比例，便于横向比较组成差异。'},
     ],
     'cell_communication': [
         {'key': 'cluster_key', 'label': '细胞类型列', 'type': 'text', 'default': 'celltype', 'help': '用于通讯分析的细胞类型列名。需先运行注释模块。'},
@@ -169,6 +226,7 @@ PARAM_SCHEMAS = {
         {'key': 'min_prop', 'label': '最小表达比例', 'type': 'number', 'default': 0.1, 'step': 0.05, 'help': '基因在细胞群中的最小表达比例，低于此值的不参与分析。'},
         {'key': 'top_n_interactions', 'label': '展示 Top N', 'type': 'number', 'default': 20, 'help': '展示 Top N 个最强相互作用。'},
         {'key': 'show_heatmap', 'label': '生成通讯热图', 'type': 'checkbox', 'default': True, 'help': '生成细胞类型间通讯数量热图。'},
+        {'key': 'show_network', 'label': '生成通讯网络图', 'type': 'checkbox', 'default': True, 'help': '以网络图展示 Top source-target 通讯关系，节点大小代表通讯连接度。'},
     ],
     'bulk_qc': [
         {'key': 'min_counts', 'label': '最小文库 reads 数', 'type': 'number', 'default': 100000, 'help': '最小文库 reads 数。低于此值的样本被过滤。人类/小鼠 RNA-seq 通常要求 ≥100000，小样本可降至 50000。'},
@@ -183,10 +241,10 @@ PARAM_SCHEMAS = {
         {'key': 'filter_strategy', 'label': '过滤策略', 'type': 'select', 'options': ['standard', 'strict', 'custom'], 'default': 'standard', 'help': 'standard：推荐阈值；strict：严格阈值（适合大样本高质量数据）；custom：自定义所有阈值。'},
     ],
     'bulk_normalize': [
-        {'key': 'method', 'label': '标准化方法', 'type': 'select', 'options': ['deseq2', 'tmm', 'cpm', 'vst', 'rlog', 'log2_quantile'], 'default': 'deseq2',
-         'help': '标准化方法。差异分析：DESeq2（中位比率法，金标准）或 TMM（edgeR 方法，组成偏差大时更优）。可视化/高维：VST（方差稳定，近似实现）或 rlog（小样本更稳定，近似实现）。简单归一：CPM（每百万计数）或 log2 分位数。'},
+        {'key': 'method', 'label': '标准化方法', 'type': 'select', 'options': ['deseq2', 'tmm', 'cpm', 'vst', 'rlog', 'log2', 'log2_quantile'], 'default': 'deseq2',
+         'help': '原始整数 count：DESeq2 中位比率（推荐）、TMM-CPM（组成偏差明显）、CPM、近似 VST/rlog（用于 PCA/热图，不是 DESeq2 原版变换）。FPKM/TPM：仅 log2(x+1)；log2_quantile 会强制样本分布一致，仅在该假设成立时使用。平台会拒绝将 FPKM/TPM 用于 count 方法。'},
         {'key': 'min_expr_value', 'label': '最小表达阈值 (CPM)', 'type': 'number', 'default': 1, 'step': 0.1,
-         'help': '基因表达量需达到此 CPM 阈值才算有效表达。默认 1。'},
+         'help': '原始 count 时为 CPM 阈值；FPKM/TPM 的 log2 模式下为原始 FPKM/TPM 阈值。默认 1。'},
         {'key': 'min_expr_samples', 'label': '最小表达样本数', 'type': 'number', 'default': 3, 'step': 1,
          'help': '基因在至少 N 个样本中达到最小表达阈值才保留。0 = 不过滤。建议设为最小组的样本数。'},
         {'key': 'max_zero_pct', 'label': '最大零值比例 (%)', 'type': 'number', 'default': 0, 'step': 1,
@@ -382,10 +440,52 @@ PARAM_SCHEMAS = {
 }
 
 
+def _condition_value_matches(actual, expected):
+    if isinstance(expected, (list, tuple, set)):
+        return any(_condition_value_matches(actual, item) for item in expected)
+    if isinstance(expected, bool):
+        if isinstance(actual, str):
+            return (actual.lower() in {'1', 'true', 'yes', 'on'}) is expected
+        return bool(actual) is expected
+    return str(actual) == str(expected)
+
+
+def param_is_active(param, values):
+    """Return whether a schema parameter should be active for current form values."""
+    conditions = param.get('show_if')
+    if not conditions:
+        return True
+    return all(_condition_value_matches(values.get(key), expected)
+               for key, expected in conditions.items())
+
+
+def filter_active_params(schema, params):
+    """Drop params hidden by show_if for the current parameter values."""
+    values = {param['key']: param.get('default') for param in schema}
+    values.update(params or {})
+    active_keys = {
+        param['key']
+        for param in schema
+        if param_is_active(param, values)
+    }
+    return {key: value for key, value in (params or {}).items() if key in active_keys}
+
+
 def parse_form_params(schema, form):
     """从 Flask request.form 中解析参数，根据 schema 定义做类型转换。"""
+    values = {}
+    for param in schema:
+        key = param['key']
+        if param['type'] == 'checkbox':
+            values[key] = form.get(key) == 'on'
+        else:
+            val = form.get(key)
+            values[key] = val if val not in (None, '') else param['default']
+
     params = {}
     for param in schema:
+        if not param_is_active(param, values):
+            continue
         val = form.get(param['key'])
         if param['type'] == 'number':
             params[param['key']] = float(val) if val else param['default']
@@ -393,7 +493,7 @@ def parse_form_params(schema, form):
             params[param['key']] = form.get(param['key']) == 'on'
         else:
             params[param['key']] = val or param['default']
-    return params
+    return filter_active_params(schema, params)
 
 
 def list_upload_files(pid, is_bulk):

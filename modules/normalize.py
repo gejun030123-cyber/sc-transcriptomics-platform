@@ -58,6 +58,51 @@ class NormalizeAnalysis(BaseAnalysis):
                          plot_bgcolor='white', width=600, height=400)
         result_files.append(self.save_plotly_json(fig, plots_dir, 'normalize_libsize.json', 'histogram', 'Library Size Distribution'))
 
+        # Expression value distribution after normalization
+        if self.params.get('show_expression_distribution', True):
+            def _sample_values(matrix, max_values=100000):
+                if hasattr(matrix, 'toarray') and hasattr(matrix, 'data'):
+                    vals = np.asarray(matrix.data).ravel()
+                else:
+                    vals = np.asarray(matrix).ravel()
+                vals = vals[np.isfinite(vals)]
+                if vals.size > max_values:
+                    rng = np.random.default_rng(0)
+                    vals = vals[rng.choice(vals.size, max_values, replace=False)]
+                return vals
+
+            fig_expr = go.Figure()
+            if 'counts' in adata.layers:
+                raw_vals = _sample_values(adata.layers['counts'])
+                if raw_vals.size:
+                    fig_expr.add_trace(go.Histogram(
+                        x=np.log1p(raw_vals),
+                        name='log1p(raw counts)',
+                        opacity=0.55,
+                        nbinsx=80,
+                    ))
+            norm_vals = _sample_values(adata.X)
+            if norm_vals.size:
+                fig_expr.add_trace(go.Histogram(
+                    x=norm_vals,
+                    name='normalized X',
+                    opacity=0.55,
+                    nbinsx=80,
+                ))
+            fig_expr.update_layout(
+                title='Expression Value Distribution',
+                xaxis_title='Expression value',
+                yaxis_title='Frequency',
+                barmode='overlay',
+                plot_bgcolor='white',
+                width=700,
+                height=420,
+            )
+            result_files.append(self.save_plotly_json(
+                fig_expr, plots_dir, 'normalize_expression_distribution.json',
+                'histogram', 'Expression Value Distribution'
+            ))
+
         self.progress(90, "Saving output...")
         output_path = self.save_output(adata, 'normalize')
 

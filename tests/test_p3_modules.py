@@ -450,3 +450,47 @@ class TestClipRangeParsing:
     def test_float_values(self):
         """浮点数应正确解析。"""
         assert self._parse_clip_range('-1.5,2.5') == (-1.5, 2.5)
+
+
+def test_deg_integration_deduplicates_gene_symbols():
+    """多个 Ensembl ID 映射到同一 symbol 时保留最显著的一行。"""
+    import pandas as pd
+    from modules.bulk_deg_integration import _deduplicate_gene_results
+
+    df = pd.DataFrame({
+        'gene': ['DUP', 'DUP', 'UNIQUE'],
+        'log2FC': [1.2, -2.0, 0.5],
+        'padj': [0.01, 0.001, 0.2],
+        'regulation': ['Up', 'Down', 'NS'],
+    })
+    result = _deduplicate_gene_results(df)
+
+    assert result['gene'].is_unique
+    assert result.loc[result['gene'] == 'DUP', 'log2FC'].item() == -2.0
+
+
+def test_deg_integration_loads_standalone_comparison_labels(tmp_path):
+    """独立 runner 无数据库记录时也应使用真实比较名。"""
+    import json
+    from modules.bulk_deg_integration import _load_comparison_labels
+
+    results = tmp_path / 'results'
+    results.mkdir()
+    (results / 'bulk_deg_results_0.csv').write_text('gene,log2FC,padj\nA,1,0.01\n')
+    (results / 'bulk_deg_comparison_labels.json').write_text(json.dumps({
+        'bulk_deg_results_0.csv': 'Treatment-vs-Control',
+    }))
+
+    assert _load_comparison_labels(str(tmp_path)) == {
+        'bulk_deg_results_0.csv': 'Treatment-vs-Control',
+    }
+
+
+def test_gsea_export_preserves_pathway_names_from_index():
+    import pandas as pd
+    from modules.bulk_enrichment import _ensure_gsea_term_column
+
+    df = pd.DataFrame({'nes': [2.1], 'fdr': [0.01]}, index=['interferon signaling'])
+    result = _ensure_gsea_term_column(df)
+
+    assert result.loc[0, 'Term'] == 'interferon signaling'

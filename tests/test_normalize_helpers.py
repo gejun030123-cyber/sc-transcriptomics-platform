@@ -99,3 +99,20 @@ def test_tmm_large_sample():
     factors = _tmm_normalize(counts)
     assert len(factors) == 12
     assert all(f > 0 for f in factors)
+
+
+def test_bulk_normalize_schema_supports_log2_for_continuous_expression():
+    from modules.schemas import PARAM_SCHEMAS
+
+    method = next(p for p in PARAM_SCHEMAS['bulk_normalize'] if p['key'] == 'method')
+    assert 'log2' in method['options']
+
+
+def test_measurement_type_uses_filename_hint_for_fpkm():
+    from modules.bulk_normalize import _infer_measurement_type
+    assert _infer_measurement_type(np.array([[1., 2.], [3., 4.]]), 'sample.fpkm.tsv') == 'continuous_expression'
+
+
+def test_measurement_type_accepts_integer_counts():
+    from modules.bulk_normalize import _infer_measurement_type
+    assert _infer_measurement_type(np.array([[1, 2], [3, 4]]), 'counts.tsv') == 'raw_counts'

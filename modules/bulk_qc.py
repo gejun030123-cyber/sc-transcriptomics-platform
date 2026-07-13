@@ -22,6 +22,8 @@ class BulkQCAnalysis(BaseAnalysis):
         self.progress(5, "加载计数矩阵...")
         from modules.io_utils import read_expression_matrix
         adata = read_expression_matrix(input_path)
+        from modules.io_utils import infer_expression_measurement
+        input_measurement = infer_expression_measurement(adata, input_path)
 
         # 应用自定义过滤规则
         adata = self.apply_filters(adata, 'bulk_qc')
@@ -43,10 +45,15 @@ class BulkQCAnalysis(BaseAnalysis):
             max_mt_pct = min(max_mt_pct, 15.0)
             max_ribo_pct = min(max_ribo_pct, 30.0)
 
+        if input_measurement != 'raw_counts':
+            self.progress(-1, '检测到连续或已标准化表达值：跳过 count 文库大小、MT/Ribo 百分比硬过滤。')
+            min_counts, min_genes, max_mt_pct, max_ribo_pct = 0, 0, 100.0, 100.0
+
         self.progress(20, "计算质控指标...")
         # 优先用 gene_name 检测线粒体基因（Ensembl ID 不以 MT- 开头）
         if 'gene_name' in adata.var.columns:
-            gene_names_for_mt = adata.var['gene_name'].fillna('').astype(str)
+            # h5ad 会将重复字符串列读为 categorical；先转 StringDtype 再填空值。
+            gene_names_for_mt = adata.var['gene_name'].astype('string').fillna('')
         else:
             gene_names_for_mt = adata.var_names.astype(str)
         adata.var['mt'] = gene_names_for_mt.str.startswith('MT-')
@@ -68,7 +75,22 @@ class BulkQCAnalysis(BaseAnalysis):
         # 分组推断
         sample_names = adata.obs.index.tolist()
         group_col = self.params.get('group_column', '').strip()
-        if group_col and group_col in adata.obs.columns:
+        if group_col == '_auto_group_':
+            auto_mapping = self.params.get('_auto_group_mapping', {})
+            if isinstance(auto_mapping, str):
+                try:
+                    import json as _json
+                    auto_mapping = _json.loads(auto_mapping)
+                except (TypeError, ValueError):
+                    auto_mapping = {}
+            if not auto_mapping:
+                from modules.io_utils import infer_sample_group_candidates
+                candidates = infer_sample_group_candidates(sample_names)
+                auto_mapping = candidates[0]['mapping'] if candidates else {}
+            groups = [str(auto_mapping.get(str(name), 'unknown')) for name in sample_names]
+            adata.obs['_auto_group'] = groups
+            group_col = '_auto_group'
+        elif group_col and group_col in adata.obs.columns:
             groups = adata.obs[group_col].astype(str).tolist()
         else:
             groups = _infer_groups(sample_names)
@@ -185,8 +207,11 @@ class BulkQCAnalysis(BaseAnalysis):
         # 统一标准化一份副本，用于相关性热图和 PCA
         self.progress(65, "标准化数据...")
         adata_normed = adata_filtered.copy()
-        sc.pp.normalize_total(adata_normed, target_sum=1e6)
-        sc.pp.log1p(adata_normed)
+        if input_measurement == 'raw_counts':
+            sc.pp.normalize_total(adata_normed, target_sum=1e6)
+            sc.pp.log1p(adata_normed)
+        else:
+            adata_normed.X = np.log2(np.maximum(adata_normed.X, 0) + 1)
 
         self.progress(70, "生成相关性热图...")
         corr_data = adata_normed.X if not hasattr(adata_normed.X, 'toarray') else adata_normed.X.toarray()
@@ -233,7 +258,7 @@ class BulkQCAnalysis(BaseAnalysis):
 
         self.progress(75, "PCA 离群检测...")
         outlier_samples = []
-        n_comps = min(10, n_after - 1)
+        n_comps = min(10, n_after - 1, adata_normed.n_vars - 1)
         if n_comps >= 2:
             sc.pp.pca(adata_normed, n_comps=n_comps)
             pc = adata_normed.obsm['X_pca']
@@ -433,6 +458,7 @@ class BulkQCAnalysis(BaseAnalysis):
                 'outlier_samples': outlier_samples if detect_outliers else [],
                 'filter_strategy': filter_strategy,
                 'median_lib_size': int(np.median(adata_filtered.obs['total_counts'])),
+                'input_measurement': input_measurement,
                 'median_genes': int(np.median(adata_filtered.obs['n_genes_by_counts'])),
                 'median_ribo_pct': round(float(np.median(adata_filtered.obs['pct_counts_ribo'])), 2) if 'pct_counts_ribo' in adata_filtered.obs.columns else 0,
                 'median_gini': round(float(np.median(gini_filtered)), 4),
@@ -456,7 +482,14 @@ def _gini(values):
 
 
 def _infer_groups(sample_names):
-    """从样本名推断分组，取第一个分隔符前的前缀。"""
+    """从样本名推断推荐分组，优先保留多因素联合组。"""
+    from modules.io_utils import infer_sample_group_candidates
+
+    candidates = infer_sample_group_candidates(sample_names)
+    if candidates:
+        mapping = candidates[0]['mapping']
+        return [mapping[str(name)] for name in sample_names]
+
     groups = []
     for name in sample_names:
         name = str(name)

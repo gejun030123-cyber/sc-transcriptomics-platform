@@ -1,0 +1,40 @@
+# Core web/runtime
+flask
+flask-cors
+psutil
+requests
+
+# Numeric/data stack
+numpy
+pandas
+scipy
+statsmodels
+patsy
+scikit-learn
+matplotlib
+plotly
+anndata
+
+# Single-cell analysis
+scanpy
+omicverse
+
+# Bulk RNA-seq and enrichment
+gseapy
+pydeseq2
+inmoose
+
+# Optional single-cell annotation / communication / integration
+celltypist
+liana
+harmonypy
+bbknn
+scanorama
+scvi-tools
+torch
+kneed
+kaleido
+
+# Optional AI providers
+openai
+anthropic

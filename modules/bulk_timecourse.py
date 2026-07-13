@@ -102,6 +102,7 @@ class BulkTimecourseAnalysis(BaseAnalysis):
         self.progress(5, "加载数据...")
         from modules.io_utils import read_expression_matrix
         adata = read_expression_matrix(input_path)
+        from modules.io_utils import infer_expression_measurement
 
         time_column = self.params.get('time_column', 'minute')
         group_column = self.params.get('group_column', '')
@@ -139,12 +140,17 @@ class BulkTimecourseAnalysis(BaseAnalysis):
         if n_genes == 0:
             raise ValueError("过滤低表达基因后无剩余基因，请降低过滤阈值或检查数据。")
 
-        # Log2 CPM normalization
-        self.progress(25, "CPM 标准化...")
-        lib_sizes = counts.sum(axis=1, keepdims=True)
-        lib_sizes = np.where(lib_sizes > 0, lib_sizes, 1)
-        cpm = counts / lib_sizes * 1e6
-        lognorm = np.log2(cpm + 1)
+        # Preserve a completed normalization; only raw counts receive CPM.
+        input_measurement = infer_expression_measurement(adata, input_path)
+        self.progress(25, "准备时序表达矩阵...")
+        if input_measurement == 'raw_counts':
+            lib_sizes = counts.sum(axis=1, keepdims=True)
+            lib_sizes = np.where(lib_sizes > 0, lib_sizes, 1)
+            lognorm = np.log2(counts / lib_sizes * 1e6 + 1)
+        elif input_measurement == 'continuous_expression':
+            lognorm = np.log2(np.maximum(counts, 0) + 1)
+        else:
+            lognorm = counts
 
         n_obs = lognorm.shape[0]
         unique_times = np.unique(time_vals)

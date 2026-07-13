@@ -46,11 +46,74 @@ DEFAULT_BLOOD_MARKERS = {
     'pDC': ['GZMB', 'IL3RA', 'COBLL1', 'TCF4', 'IRF7'],
 }
 
+DEFAULT_PBMC_MARKERS = {
+    'CD4 Naive T cells': ['IL7R', 'LTB', 'CCR7', 'TCF7', 'MALAT1', 'LEF1'],
+    'CD4 Memory T cells': ['IL7R', 'LTB', 'MALAT1', 'IL32', 'AQP3', 'GPR183'],
+    'CD14+ Monocytes': ['CD14', 'LYZ', 'S100A8', 'S100A9', 'LGALS3', 'FCN1'],
+    'B cells': ['MS4A1', 'CD79A', 'CD79B', 'CD74', 'HLA-DRA'],
+    'CD8 T cells': ['CD8A', 'CD8B', 'CCL5', 'GZMK', 'GZMA', 'TRBC2'],
+    'Cytotoxic T cells': ['NKG7', 'CCL5', 'GZMB', 'PRF1', 'CTSW', 'CD3D'],
+    'NK cells': ['GNLY', 'NKG7', 'KLRD1', 'PRF1', 'CTSW'],
+    'FCGR3A+ Monocytes': ['FCGR3A', 'MS4A7', 'LST1', 'FCER1G', 'AIF1', 'IFITM3'],
+    'Conventional DC': ['FCER1A', 'CST3', 'CD1C', 'CLEC10A', 'HLA-DPA1', 'HLA-DPB1'],
+    'Plasmacytoid DC': ['GZMB', 'IRF7', 'TCF4', 'IL3RA', 'SERPINF1'],
+    'Megakaryocytes': ['PPBP', 'PF4', 'SDPR', 'GNG11', 'NRGN'],
+}
+
+# A deliberately broad first-pass panel. It is suitable when tissue type is
+# unknown; users should use a tissue/immune panel or custom markers afterwards
+# to refine a lineage, rather than treating these labels as final subtypes.
+DEFAULT_UNIVERSAL_MARKERS = {
+    'Epithelial': ['EPCAM', 'KRT8', 'KRT18', 'KRT19', 'KRT7', 'CDH1'],
+    'Endothelial': ['PECAM1', 'VWF', 'KDR', 'EMCN', 'CLDN5'],
+    'Fibroblast': ['COL1A1', 'COL1A2', 'DCN', 'LUM', 'COL3A1'],
+    'Pericyte/Smooth muscle': ['RGS5', 'PDGFRB', 'CSPG4', 'MCAM', 'ACTA2'],
+    'Myeloid': ['LYZ', 'TYROBP', 'LST1', 'FCER1G', 'AIF1'],
+    'T cells': ['CD3D', 'CD3E', 'TRAC', 'CD247', 'LCK'],
+    'NK cells': ['NKG7', 'KLRD1', 'GNLY', 'PRF1', 'TRBC2'],
+    'B cells': ['MS4A1', 'CD79A', 'CD74', 'HLA-DRA', 'CD37'],
+    'Plasma cells': ['JCHAIN', 'MZB1', 'SDC1', 'DERL3', 'IGKC'],
+    'Mast cells': ['TPSAB1', 'TPSB2', 'KIT', 'MS4A2', 'HDC'],
+    'Cycling cells': ['MKI67', 'TOP2A', 'STMN1', 'TYMS', 'CDK1'],
+}
+
+UNIVERSAL_LABELS = {
+    'Epithelial': ('Non-immune cell', 'Epithelial cell', 'Epithelial cell', 'CL:0000066'),
+    'Endothelial': ('Non-immune cell', 'Endothelial cell', 'Endothelial cell', 'CL:0000115'),
+    'Fibroblast': ('Stromal cell', 'Fibroblast', 'Fibroblast', 'CL:0000057'),
+    'Pericyte/Smooth muscle': ('Stromal cell', 'Perivascular cell', 'Pericyte/smooth muscle cell', 'CL:0000669'),
+    'Myeloid': ('Immune cell', 'Myeloid cell', 'Myeloid cell', 'CL:0000763'),
+    'T cells': ('Immune cell', 'T cell', 'T cell', 'CL:0000084'),
+    'NK cells': ('Immune cell', 'NK cell', 'Natural killer cell', 'CL:0000623'),
+    'B cells': ('Immune cell', 'B cell', 'B cell', 'CL:0000236'),
+    'Plasma cells': ('Immune cell', 'B cell', 'Plasma cell', 'CL:0000786'),
+    'Mast cells': ('Immune cell', 'Mast cell', 'Mast cell', 'CL:0000097'),
+    'Cycling cells': ('Cell state', 'Cycling cell', 'Cycling cell', ''),
+}
+
 MARKER_SETS = {
+    'Universal': DEFAULT_UNIVERSAL_MARKERS,
     'TME': DEFAULT_TME_MARKERS,
     'Immune': DEFAULT_IMMUNE_MARKERS,
     'Blood': DEFAULT_BLOOD_MARKERS,
+    'PBMC': DEFAULT_PBMC_MARKERS,
 }
+
+
+def resolve_marker_genes(markers, var_names, min_markers_per_type=2):
+    """Match marker symbols case-insensitively and report usable coverage.
+
+    This supports common human/mouse symbol casing differences and prevents a
+    lineage with almost no measurable markers from participating in scoring.
+    """
+    lookup = {str(gene).upper(): str(gene) for gene in var_names}
+    usable, coverage = {}, {}
+    for cell_type, genes in markers.items():
+        matched = list(dict.fromkeys(lookup[g.upper()] for g in genes if g.upper() in lookup))
+        coverage[cell_type] = {'matched': len(matched), 'total': len(genes)}
+        if len(matched) >= min_markers_per_type:
+            usable[cell_type] = matched
+    return usable, coverage
 
 class AnnotationAnalysis(BaseAnalysis):
     MODULE_NAME = "annotation"
@@ -62,6 +125,8 @@ class AnnotationAnalysis(BaseAnalysis):
         import scanpy as sc
         from modules.visualization import umap_scatter
         import json
+        import numpy as np
+        import plotly.graph_objects as go
 
         self.progress(5, "Loading data...")
         adata = self.load_adata(input_path)
@@ -70,8 +135,12 @@ class AnnotationAnalysis(BaseAnalysis):
         leiden_key = f'leiden_{resolution}' if f'leiden_{resolution}' in adata.obs.columns else cluster_key
 
         self.progress(20, "Scoring cell type markers...")
-        method = self.params.get('method', 'auto_marker')
-        marker_set_name = self.params.get('marker_set', 'TME')
+        requested_method = self.params.get('method', 'auto_marker')
+        method = requested_method
+        multi_evidence = method == 'multi_evidence'
+        if multi_evidence:
+            method = 'auto_marker'
+        marker_set_name = self.params.get('marker_set', 'Universal')
         custom_markers_str = self.params.get('custom_markers', '').strip()
         confidence_method = self.params.get('confidence_method', 'none')
         mark_unknown = self.params.get('mark_unknown', True)
@@ -130,14 +199,27 @@ class AnnotationAnalysis(BaseAnalysis):
                         ct, genes_str = ct_genes.split(':', 1)
                         markers[ct.strip()] = [g.strip() for g in genes_str.split(',') if g.strip()]
                 if not markers:
-                    markers = MARKER_SETS.get(marker_set_name, DEFAULT_TME_MARKERS)
+                    markers = MARKER_SETS.get(marker_set_name, DEFAULT_UNIVERSAL_MARKERS)
             else:
-                markers = MARKER_SETS.get(marker_set_name, DEFAULT_TME_MARKERS)
+                markers = MARKER_SETS.get(marker_set_name, DEFAULT_UNIVERSAL_MARKERS)
 
-            for ct, genes in markers.items():
-                available_genes = [g for g in genes if g in adata.var_names]
-                if available_genes:
+            min_markers = int(self.params.get('min_markers_per_type', 2))
+            usable_markers, marker_coverage = resolve_marker_genes(markers, adata.var_names, min_markers)
+            skipped_types = [ct for ct in markers if ct not in usable_markers]
+            if skipped_types:
+                self.progress(-1, f"{len(skipped_types)} 个类型的可用 marker 少于 {min_markers}，未参与自动判定。")
+            for ct, available_genes in usable_markers.items():
+                try:
                     sc.tl.score_genes(adata, available_genes, score_name=f'score_{ct}', use_raw=False)
+                except RuntimeError as exc:
+                    # Tiny targeted panels can lack Scanpy control genes. Keep
+                    # the annotation usable with an explicit mean-expression
+                    # fallback rather than silently omitting the lineage.
+                    expr = adata[:, available_genes].X
+                    if hasattr(expr, 'toarray'):
+                        expr = expr.toarray()
+                    adata.obs[f'score_{ct}'] = np.asarray(expr, dtype=float).mean(axis=1)
+                    self.progress(-1, f'{ct} 使用平均 Marker 表达评分（{exc}）')
 
             self.progress(50, "Assigning cell types to clusters...")
             score_cols = [f'score_{ct}' for ct in markers if f'score_{ct}' in adata.obs.columns]
@@ -150,10 +232,72 @@ class AnnotationAnalysis(BaseAnalysis):
                     best_ct = best_col.replace('score_', '')
                     cluster_annotations[cluster] = best_ct
                 adata.obs['celltype'] = adata.obs[leiden_key].map(cluster_annotations).astype('category')
+                min_score = float(self.params.get('min_annotation_score', 0.0))
+                if min_score > 0:
+                    best_scores = adata.obs[score_cols].max(axis=1)
+                    if 'Unknown' not in adata.obs['celltype'].cat.categories:
+                        adata.obs['celltype'] = adata.obs['celltype'].cat.add_categories(['Unknown'])
+                    adata.obs.loc[best_scores < min_score, 'celltype'] = 'Unknown'
             else:
                 adata.obs['celltype'] = adata.obs[leiden_key].astype(str)
+            markers = usable_markers
+        else:
+            marker_coverage = {}
+
+        # Multi-evidence mode keeps the rule engine interpretable, then uses
+        # CellTypist as an independent human reference classifier when it is
+        # available. Missing models/network never erase the marker result.
+        if multi_evidence:
+            adata.obs['marker_label'] = adata.obs['celltype'].astype(str)
+            score_cols = [c for c in adata.obs.columns if c.startswith('score_')]
+            if score_cols:
+                score_frame = adata.obs[score_cols]
+                adata.obs['marker_score'] = score_frame.max(axis=1).astype(float)
+                ranked = np.argsort(score_frame.values, axis=1)
+                adata.obs['prediction_1'] = [score_cols[i].replace('score_', '') for i in ranked[:, -1]]
+                adata.obs['prediction_1_score'] = score_frame.max(axis=1).astype(float)
+                adata.obs['prediction_2'] = [score_cols[i].replace('score_', '') for i in ranked[:, -2]] if len(score_cols) > 1 else ''
+                if len(score_cols) > 1:
+                    adata.obs['prediction_2_score'] = score_frame.values[np.arange(adata.n_obs), ranked[:, -2]]
+            try:
+                from celltypist import annotate
+                ct_model = self.params.get('celltypist_model', 'Immune_All_Low')
+                prediction = annotate(adata, model=ct_model,
+                                      majority_voting=self.params.get('celltypist_majority_voting', True))
+                labels = prediction.predicted_labels
+                adata.obs['celltypist_label'] = labels.iloc[:, 0].astype(str).values
+                confidence = getattr(prediction, 'probability_matrix', None)
+                if confidence is not None:
+                    adata.obs['celltypist_score'] = confidence.max(axis=1).values
+            except Exception as exc:
+                self.progress(-1, f'CellTypist 不可用，保留 Marker 规则结果：{exc}')
+
+            cluster_vote = adata.obs.groupby(leiden_key, observed=True)['marker_label'].transform(
+                lambda values: values.value_counts(normalize=True).iloc[0]
+            )
+            adata.obs['cluster_annotation_agreement'] = cluster_vote.astype(float)
+            adata.obs['annotation_status'] = np.where(
+                (adata.obs.get('marker_score', 0) < float(self.params.get('min_annotation_score', 0.0))) |
+                (adata.obs['cluster_annotation_agreement'] < float(self.params.get('cluster_agreement_threshold', 0.6))),
+                'Unknown', 'review'
+            )
+            adata.obs['final_annotation'] = adata.obs['marker_label'].astype(str)
+            adata.obs.loc[adata.obs['annotation_status'] == 'Unknown', 'final_annotation'] = 'Unknown'
+            adata.obs['celltype'] = adata.obs['final_annotation'].astype('category')
+
+        if marker_set_name == 'Universal' and 'celltype' in adata.obs:
+            meta = adata.obs['celltype'].astype(str).map(UNIVERSAL_LABELS)
+            adata.obs['cell_type_l1'] = meta.map(lambda value: value[0] if isinstance(value, tuple) else 'Unknown')
+            adata.obs['cell_type_l2'] = meta.map(lambda value: value[1] if isinstance(value, tuple) else 'Unknown')
+            adata.obs['cell_type_l3'] = meta.map(lambda value: value[2] if isinstance(value, tuple) else 'Unknown')
+            adata.obs['cell_ontology_id'] = meta.map(lambda value: value[3] if isinstance(value, tuple) else '')
+            if 'final_annotation' not in adata.obs:
+                adata.obs['final_annotation'] = adata.obs['celltype'].astype(str)
+            if 'annotation_status' not in adata.obs:
+                adata.obs['annotation_status'] = np.where(adata.obs['celltype'].astype(str) == 'Unknown', 'Unknown', 'review')
 
         # 置信度评估
+        confidence_col = None
         if confidence_method != 'none' and 'celltype' in adata.obs.columns:
             self.progress(60, f"Computing annotation confidence ({confidence_method})...")
             score_cols = [c for c in adata.obs.columns if c.startswith('score_')]
@@ -165,17 +309,21 @@ class AnnotationAnalysis(BaseAnalysis):
                 entropy = -np.sum(probs * np.log(probs + 1e-10), axis=1)
                 max_entropy = np.log(len(score_cols)) if len(score_cols) > 1 else 1
                 adata.obs['annotation_confidence'] = 1 - entropy / (max_entropy + 1e-10)
+                confidence_col = 'annotation_confidence'
             elif confidence_method == 'score_margin' and score_cols:
                 import numpy as np
                 score_matrix = adata.obs[score_cols].values
                 sorted_scores = np.sort(score_matrix, axis=1)
                 if sorted_scores.shape[1] >= 2:
-                    adata.obs['annotation_confidence'] = sorted_scores[:, -1] - sorted_scores[:, -2]
+                    adata.obs['annotation_score_margin'] = sorted_scores[:, -1] - sorted_scores[:, -2]
                 else:
-                    adata.obs['annotation_confidence'] = sorted_scores[:, -1]
+                    adata.obs['annotation_score_margin'] = sorted_scores[:, -1]
+                confidence_col = 'annotation_score_margin'
 
-            if mark_unknown and 'annotation_confidence' in adata.obs.columns:
-                low_conf_mask = adata.obs['annotation_confidence'] < 0.2
+            if mark_unknown and confidence_col in adata.obs.columns:
+                low_conf_mask = adata.obs[confidence_col] < 0.2
+                if hasattr(adata.obs['celltype'], 'cat') and 'Unknown' not in adata.obs['celltype'].cat.categories:
+                    adata.obs['celltype'] = adata.obs['celltype'].cat.add_categories(['Unknown'])
                 adata.obs.loc[low_conf_mask, 'celltype'] = 'Unknown'
                 n_unknown = low_conf_mask.sum()
                 if n_unknown > 0:
@@ -204,6 +352,82 @@ class AnnotationAnalysis(BaseAnalysis):
         plots_dir = self.ensure_plots_dir()
         result_files = []
 
+        if marker_coverage:
+            coverage_types = list(marker_coverage)
+            matched = [marker_coverage[ct]['matched'] for ct in coverage_types]
+            totals = [marker_coverage[ct]['total'] for ct in coverage_types]
+            fig_coverage = go.Figure()
+            fig_coverage.add_trace(go.Bar(name='可用 marker', x=coverage_types, y=matched, marker_color='#00897b'))
+            fig_coverage.add_trace(go.Bar(name='marker 总数', x=coverage_types, y=totals, marker_color='#b0bec5'))
+            fig_coverage.update_layout(title='Marker 覆盖度（当前数据）', barmode='group',
+                                       xaxis=dict(tickangle=35), yaxis_title='基因数', plot_bgcolor='white',
+                                       width=max(750, 80 * len(coverage_types)), height=450)
+            result_files.append(self.save_plotly_json(
+                fig_coverage, plots_dir, 'annotation_marker_coverage.json', 'bar', 'Marker 覆盖度'
+            ))
+
+        if self.params.get('show_celltype_composition', True) and 'celltype' in adata.obs.columns:
+            ct_counts_plot = adata.obs['celltype'].astype(str).value_counts()
+            ct_pct = ct_counts_plot / max(int(ct_counts_plot.sum()), 1) * 100
+            fig_comp = go.Figure()
+            fig_comp.add_trace(go.Bar(
+                x=ct_counts_plot.index.tolist(),
+                y=ct_counts_plot.values.astype(int).tolist(),
+                marker_color='#00897b',
+                customdata=ct_pct.round(2).values,
+                text=[f'{p:.1f}%' for p in ct_pct.values],
+                textposition='outside',
+                hovertemplate='Cell type: %{x}<br>Cells: %{y}<br>Percent: %{customdata:.2f}%<extra></extra>',
+            ))
+            fig_comp.update_layout(
+                title='Cell Type Composition',
+                xaxis_title='Cell type',
+                yaxis_title='Cell count',
+                plot_bgcolor='white',
+                width=max(700, 85 * max(1, len(ct_counts_plot))),
+                height=460,
+                xaxis=dict(tickangle=35),
+            )
+            result_files.append(self.save_plotly_json(
+                fig_comp, plots_dir, 'annotation_celltype_composition.json',
+                'bar', '细胞类型组成'
+            ))
+
+        if self.params.get('show_marker_score_heatmap', True):
+            score_cols = [c for c in adata.obs.columns if c.startswith('score_')]
+            if score_cols and leiden_key in adata.obs.columns:
+                cluster_labels = adata.obs[leiden_key].astype(str)
+                cluster_order = sorted(cluster_labels.unique(), key=lambda x: (len(x), x))
+                mean_scores = []
+                for cluster in cluster_order:
+                    mask = cluster_labels == cluster
+                    mean_scores.append(adata.obs.loc[mask, score_cols].mean().values)
+                score_matrix = np.asarray(mean_scores, dtype=float).T
+                row_mean = score_matrix.mean(axis=1, keepdims=True)
+                row_std = score_matrix.std(axis=1, keepdims=True) + 1e-10
+                z = np.clip((score_matrix - row_mean) / row_std, -3, 3)
+                fig_score_heat = go.Figure(data=go.Heatmap(
+                    z=z,
+                    x=cluster_order,
+                    y=[c.replace('score_', '') for c in score_cols],
+                    colorscale='RdBu',
+                    zmid=0,
+                    colorbar=dict(title='Row z-score'),
+                    hovertemplate='Cluster: %{x}<br>Marker set: %{y}<br>z-score: %{z:.2f}<extra></extra>',
+                ))
+                fig_score_heat.update_layout(
+                    title=f'Marker Score Heatmap by {leiden_key}',
+                    xaxis_title='Cluster',
+                    yaxis_title='Marker set',
+                    plot_bgcolor='white',
+                    width=max(700, 55 * max(1, len(cluster_order))),
+                    height=max(450, 24 * max(1, len(score_cols))),
+                )
+                result_files.append(self.save_plotly_json(
+                    fig_score_heat, plots_dir, 'annotation_marker_score_heatmap.json',
+                    'heatmap', 'Marker Score Heatmap'
+                ))
+
         # Dotplot for marker validation
         dotplot_genes = []
         for genes in markers.values():
@@ -214,24 +438,112 @@ class AnnotationAnalysis(BaseAnalysis):
             try:
                 sc.tl.dendrogram(adata, groupby='celltype')
                 fig_dotplot = sc.pl.dotplot(adata, var_names=dotplot_genes, groupby='celltype', return_fig=True)
-                import io, base64
-                buf = io.BytesIO()
-                fig_dotplot.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+                result_files.extend(self.save_matplotlib_figure(
+                    fig_dotplot, plots_dir, 'annotation_celltype_dotplot.png', 'dotplot',
+                    'Cell Type Marker Dotplot'
+                ))
                 import matplotlib.pyplot as plt
                 plt.close('all')
-                buf.seek(0)
-                img_b64 = base64.b64encode(buf.read()).decode()
-                fpath = os.path.join(plots_dir, 'annotation_dotplot.json')
-                with open(fpath, 'w') as f:
-                    json.dump({'data': [{'type': 'image', 'source': f'data:image/png;base64,{img_b64}', 'xref': 'paper', 'yref': 'paper', 'x': 0, 'y': 1, 'sizex': 1, 'sizey': 1, 'sizing': 'stretch'}], 'layout': {'width': 800, 'height': 500, 'title': 'Cell Type Marker Dotplot'}}, f)
-                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'dotplot', 'label': 'Cell Type Dotplot'})
-            except Exception:
-                pass
+            except Exception as e:
+                self.progress(-1, f"Annotation dotplot generation failed: {e}")
+
+        # Marker expression box/violin plot for validating annotations
+        if self.params.get('show_marker_expression_violin', True) and dotplot_genes and 'celltype' in adata.obs.columns:
+            try:
+                marker_genes = dotplot_genes[:8]
+                idx = np.arange(adata.n_obs)
+                if adata.n_obs > 5000:
+                    rng = np.random.default_rng(0)
+                    idx = np.sort(rng.choice(adata.n_obs, 5000, replace=False))
+                expr = adata[idx, marker_genes].X
+                if hasattr(expr, 'toarray'):
+                    expr = expr.toarray()
+                expr = np.asarray(expr)
+                celltypes = adata.obs['celltype'].astype(str).iloc[idx].values
+                fig_marker = go.Figure()
+                for gi, gene in enumerate(marker_genes):
+                    fig_marker.add_trace(go.Box(
+                        x=celltypes,
+                        y=expr[:, gi],
+                        name=gene,
+                        boxpoints=False,
+                    ))
+                fig_marker.update_layout(
+                    title='Marker Expression by Cell Type',
+                    xaxis_title='Cell type',
+                    yaxis_title='Expression',
+                    boxmode='group',
+                    plot_bgcolor='white',
+                    width=max(850, 90 * max(1, adata.obs['celltype'].nunique())),
+                    height=480,
+                    xaxis=dict(tickangle=35),
+                )
+                result_files.append(self.save_plotly_json(
+                    fig_marker, plots_dir, 'annotation_marker_expression_box.json',
+                    'boxplot', 'Marker 表达验证图'
+                ))
+            except Exception as e:
+                self.progress(-1, f"Marker expression plot generation failed: {e}")
 
         fig_json = json.dumps(umap_scatter(adata, 'celltype', title='UMAP by Cell Type'))
         fpath = os.path.join(plots_dir, 'annotation_umap_celltype.json')
         with open(fpath, 'w') as f: f.write(fig_json)
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': 'UMAP by Cell Type'})
+        try:
+            fig_static = sc.pl.umap(
+                adata, color='celltype', title='UMAP by Cell Type', show=False,
+                return_fig=True, frameon=False, size=self.get_viz_params()['umap_point_size'],
+                legend_loc='on data',
+            )
+            result_files.extend(self.save_matplotlib_figure(
+                fig_static, plots_dir, 'annotation_umap_celltype.png', 'umap',
+                'UMAP by Cell Type'
+            ))
+            import matplotlib.pyplot as plt
+            plt.close(fig_static)
+        except Exception as exc:
+            self.progress(-1, f'静态注释 UMAP 导出失败（不影响交互图）：{exc}')
+
+        # Annotation score margin / confidence UMAP
+        if self.params.get('show_annotation_score_umap', True) and 'X_umap' in adata.obsm:
+            score_col = None
+            score_label = None
+            if 'annotation_score_margin' in adata.obs.columns:
+                score_col = 'annotation_score_margin'
+                score_label = 'Annotation score margin'
+            elif 'annotation_confidence' in adata.obs.columns:
+                score_col = 'annotation_confidence'
+                score_label = 'Annotation confidence'
+            if score_col:
+                coords = adata.obsm['X_umap'][:, :2]
+                vals = adata.obs[score_col].astype(float).values
+                fig_score = go.Figure()
+                fig_score.add_trace(go.Scattergl(
+                    x=coords[:, 0],
+                    y=coords[:, 1],
+                    mode='markers',
+                    marker=dict(
+                        size=4,
+                        color=vals,
+                        colorscale='Viridis',
+                        opacity=0.75,
+                        colorbar=dict(title=score_label),
+                    ),
+                    text=adata.obs_names.tolist(),
+                    hovertemplate='%{text}<br>' + score_label + ': %{marker.color:.3f}<extra></extra>',
+                ))
+                fig_score.update_layout(
+                    title=score_label + ' on UMAP',
+                    xaxis_title='UMAP-1',
+                    yaxis_title='UMAP-2',
+                    plot_bgcolor='white',
+                    width=700,
+                    height=520,
+                )
+                result_files.append(self.save_plotly_json(
+                    fig_score, plots_dir, 'annotation_score_umap.json',
+                    'umap', score_label + ' UMAP'
+                ))
 
         self.progress(90, "Saving output...")
         output_path = self.save_output(adata, 'annotation')
@@ -245,9 +557,14 @@ class AnnotationAnalysis(BaseAnalysis):
                 'n_celltypes': adata.obs['celltype'].nunique(),
                 'celltype_counts': {str(k): int(v) for k, v in ct_counts.items()},
                 'cluster_column': leiden_key,
-                'method_used': method,
+                'method_used': requested_method,
+                'marker_set': marker_set_name if method == 'auto_marker' or multi_evidence else None,
+                'marker_coverage': marker_coverage,
             }
         }
         if 'annotation_confidence' in adata.obs.columns:
-            result['summary']['mean_confidence'] = round(float(adata.obs['annotation_confidence'].mean()), 3)
+            confidence_value = round(float(adata.obs['annotation_confidence'].mean()), 3)
+            result['summary']['mean_confidence'] = confidence_value
+        if 'annotation_score_margin' in adata.obs.columns:
+            result['summary']['mean_score_margin'] = round(float(adata.obs['annotation_score_margin'].mean()), 3)
         return result

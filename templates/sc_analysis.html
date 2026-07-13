@@ -13,6 +13,36 @@
     <a href="/projects/{{ project.id }}/upload" class="btn btn-primary btn-sm">上传数据</a>
 </div>
 
+<!-- 流程模板一键运行 -->
+<div class="card p-4 mb-4 border-primary">
+    <h6 class="mb-3"><i class="bi bi-play-circle"></i> 流程模板一键运行</h6>
+    <div class="row g-3">
+        <div class="col-md-4">
+            <label class="form-label">选择流程模板</label>
+            <select id="pipeline-template" class="form-select">
+                <option value="">-- 选择已保存的模板 --</option>
+            </select>
+        </div>
+        <div class="col-md-4">
+            <label class="form-label">输入文件</label>
+            <select id="pipeline-input-file" class="form-select">
+                <option value="">-- 选择输入文件 --</option>
+            </select>
+        </div>
+        <div class="col-md-4 d-flex align-items-end">
+            <button id="btn-run-pipeline" class="btn btn-primary" disabled>
+                <i class="bi bi-play-fill"></i> 运行流程
+            </button>
+        </div>
+    </div>
+    <div id="pipeline-run-status" class="mt-3" style="display: none;">
+        <div class="progress mb-2" style="height: 20px;">
+            <div id="pipeline-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" style="width: 0%">0%</div>
+        </div>
+        <div id="pipeline-status-text" class="small text-muted"></div>
+    </div>
+</div>
+
 <div class="card p-4 mb-4">
     <h6 class="mb-3">分析流程（按顺序执行）</h6>
     <div class="d-flex align-items-center flex-wrap gap-2">
@@ -49,4 +79,140 @@
     </div>
     {% endfor %}
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PID = '{{ project.id }}';
+
+// 加载流程模板
+async function loadPipelineTemplates() {
+    try {
+        const resp = await fetch(`/api/presets?project_id=${PID}&type=sc`);
+        const data = await resp.json();
+        const select = document.getElementById('pipeline-template');
+        select.innerHTML = '<option value="">-- 选择已保存的模板 --</option>';
+        for (const p of (data.presets || [])) {
+            if (p.pipeline && p.pipeline.modules && p.pipeline.modules.length > 0) {
+                const opt = document.createElement('option');
+                opt.value = p._id;
+                opt.textContent = p.name + (p.description ? ` (${p.description})` : '');
+                opt.dataset.modules = JSON.stringify(p.pipeline.modules);
+                opt.dataset.params = JSON.stringify(p.params || {});
+                select.appendChild(opt);
+            }
+        }
+    } catch (e) {
+        console.error('加载模板失败:', e);
+    }
+}
+
+// 加载输入文件
+async function loadInputFiles() {
+    try {
+        const resp = await fetch(`/api/projects/${PID}/adata-info`);
+        const select = document.getElementById('pipeline-input-file');
+        select.innerHTML = '<option value="">-- 选择输入文件 --</option>';
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data.file) {
+                const opt = document.createElement('option');
+                opt.value = data.file;
+                opt.textContent = data.file;
+                select.appendChild(opt);
+            }
+        }
+        // 也加载 uploads 目录的文件
+        const uploadsResp = await fetch(`/api/data-info?project_id=${PID}`);
+        if (uploadsResp.ok) {
+            const uploadsData = await uploadsResp.json();
+            if (uploadsData.files) {
+                for (const f of uploadsData.files) {
+                    if (!select.querySelector(`option[value="${f}"]`)) {
+                        const opt = document.createElement('option');
+                        opt.value = f;
+                        opt.textContent = f;
+                        select.appendChild(opt);
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        console.error('加载输入文件失败:', e);
+    }
+}
+
+// 运行流程
+document.getElementById('btn-run-pipeline').addEventListener('click', async () => {
+    const templateSelect = document.getElementById('pipeline-template');
+    const fileSelect = document.getElementById('pipeline-input-file');
+    const selected = templateSelect.selectedOptions[0];
+    if (!selected || !selected.value) return alert('请选择流程模板');
+    if (!fileSelect.value) return alert('请选择输入文件');
+
+    const modules = JSON.parse(selected.dataset.modules || '[]');
+    const params = JSON.parse(selected.dataset.params || '{}');
+
+    try {
+        const resp = await fetch(`/api/projects/${PID}/pipeline-runs`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                name: selected.textContent,
+                analysis_type: 'sc',
+                modules: modules,
+                params: params,
+                input_path: fileSelect.value
+            })
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            document.getElementById('pipeline-run-status').style.display = 'block';
+            pollPipelineStatus(data.id);
+        } else {
+            alert('启动失败: ' + (data.error || '未知错误'));
+        }
+    } catch (e) {
+        alert('请求失败: ' + e.message);
+    }
+});
+
+// 轮询状态
+async function pollPipelineStatus(runId) {
+    const bar = document.getElementById('pipeline-progress-bar');
+    const text = document.getElementById('pipeline-status-text');
+    const interval = setInterval(async () => {
+        try {
+            const resp = await fetch(`/api/pipeline-runs/${runId}/status`);
+            const data = await resp.json();
+            bar.style.width = data.progress + '%';
+            bar.textContent = data.progress + '%';
+            text.textContent = `当前模块: ${data.current_module || '—'} | 状态: ${data.status}`;
+            if (data.status === 'completed' || data.status === 'failed') {
+                clearInterval(interval);
+                bar.classList.remove('progress-bar-animated');
+                if (data.status === 'completed') {
+                    bar.classList.add('bg-success');
+                    text.textContent = '✅ 流程完成';
+                } else {
+                    bar.classList.add('bg-danger');
+                    text.textContent = '❌ 流程失败: ' + (data.error_traceback || '').split('\n').pop();
+                }
+            }
+        } catch (e) {
+            clearInterval(interval);
+            text.textContent = '轮询失败: ' + e.message;
+        }
+    }, 2000);
+}
+
+// 启用/禁用运行按钮
+document.getElementById('pipeline-template').addEventListener('change', (e) => {
+    document.getElementById('btn-run-pipeline').disabled = !e.target.value;
+});
+
+// 初始化
+loadPipelineTemplates();
+loadInputFiles();
+</script>
 {% endblock %}

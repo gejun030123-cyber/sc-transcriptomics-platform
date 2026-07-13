@@ -21,6 +21,7 @@ class BulkPCAAnalysis(BaseAnalysis):
         self.progress(5, "加载数据...")
         from modules.io_utils import read_expression_matrix
         adata = read_expression_matrix(input_path)
+        from modules.io_utils import infer_expression_measurement
 
         # 清理 inf/NaN
         import numpy as _np
@@ -32,8 +33,14 @@ class BulkPCAAnalysis(BaseAnalysis):
 
         self.progress(20, "标准化数据...")
         if 'normalization' not in adata.uns:
-            sc.pp.normalize_total(adata, target_sum=1e6)
-            sc.pp.log1p(adata)
+            input_measurement = infer_expression_measurement(adata, input_path)
+            if input_measurement == 'raw_counts':
+                sc.pp.normalize_total(adata, target_sum=1e6)
+                sc.pp.log1p(adata)
+                adata.uns['normalization'] = {'method': 'pca_auto_cpm_log1p', 'is_log_transformed': True}
+            else:
+                adata.X = np.log2(np.maximum(adata.X, 0) + 1)
+                adata.uns['normalization'] = {'method': 'pca_auto_log2', 'is_log_transformed': True}
         sc.pp.scale(adata, max_value=10)
 
         self.progress(40, "运行 PCA...")
