@@ -74,7 +74,7 @@ class ClusteringAnalysis(BaseAnalysis):
                     fig_static = sc.pl.umap(
                         adata, color=key, title=f'Leiden (res={res}, {n_clusters} clusters)',
                         show=False, return_fig=True, frameon=False,
-                        size=self.get_viz_params()['umap_point_size'], legend_loc='on data',
+                        size=self.get_viz_params()['umap_point_size'], legend_loc='right margin',
                     )
                     result_files.extend(self.save_matplotlib_figure(
                         fig_static, plots_dir, f'cluster_umap_{res}.png',

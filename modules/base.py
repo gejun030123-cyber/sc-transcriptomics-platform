@@ -143,19 +143,60 @@ class BaseAnalysis(ABC):
         """
         import os
 
+        viz = self.params.get('_visualization', {})
         if formats is None:
-            formats = self.params.get('_visualization', {}).get(
+            formats = viz.get(
                 'static_formats', ('png', 'svg')
             )
         formats = [fmt.lower() for fmt in formats if fmt.lower() in ('png', 'svg')]
         if not formats:
             return []
 
+        # Normalize the native Scanpy/Matplotlib canvas for publication output.
+        # This changes the figure itself before both PNG and SVG are written, so
+        # the browser preview and the vector download share the same composition.
+        try:
+            width = max(6.5, float(viz.get('figure_width', 900)) / 100)
+            height = max(4.8, float(viz.get('figure_height', 600)) / 100)
+            fig.set_size_inches(width, height, forward=True)
+            font_size = max(9, float(viz.get('font_size', 12)))
+            font_family = viz.get('font_family', 'Arial')
+            for axis in getattr(fig, 'axes', []):
+                axis.set_facecolor(viz.get('bg_color', 'white'))
+                axis.tick_params(labelsize=max(8, font_size - 2), width=0.7,
+                                 colors='#374151')
+                axis.xaxis.label.set_size(font_size)
+                axis.yaxis.label.set_size(font_size)
+                axis.xaxis.label.set_color('#1f2937')
+                axis.yaxis.label.set_color('#1f2937')
+                title = axis.title
+                title.set_fontsize(font_size + 1)
+                title.set_fontweight('semibold')
+                title.set_color('#111827')
+                title.set_fontfamily(font_family)
+                for spine in axis.spines.values():
+                    spine.set_linewidth(0.65)
+                    spine.set_color('#c7cdd6')
+                legend = axis.get_legend()
+                if legend is not None:
+                    legend.set_frame_on(False)
+                    for text in legend.get_texts():
+                        text.set_fontsize(max(8, font_size - 2))
+                        text.set_fontfamily(font_family)
+            fig.tight_layout(pad=1.1)
+        except Exception:
+            # A third-party figure may expose a non-standard Axes object; export
+            # it unchanged rather than making a successful analysis fail.
+            pass
+
         stem, _ = os.path.splitext(filename)
         result_files = []
         for fmt in formats:
             output_path = os.path.join(plots_dir, f'{stem}.{fmt}')
-            save_kwargs = {'format': fmt, 'bbox_inches': 'tight', 'facecolor': 'white'}
+            save_kwargs = {
+                'format': fmt, 'bbox_inches': 'tight', 'pad_inches': 0.15,
+                'facecolor': 'white',
+            }
             if fmt == 'png':
                 save_kwargs['dpi'] = dpi
             fig.savefig(output_path, **save_kwargs)

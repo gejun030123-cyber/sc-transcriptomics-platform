@@ -199,6 +199,19 @@ class DEGAnalysis(BaseAnalysis):
                 fpath = os.path.join(plots_dir, f'deg_gene_umap_{gene}.json')
                 with open(fpath, 'w') as f: f.write(json.dumps(fig_gene))
                 result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'{gene} Expression'})
+                try:
+                    fig_static = sc.pl.umap(
+                        adata, color=gene, title=f'{gene} Expression', show=False,
+                        return_fig=True, frameon=False, cmap='viridis',
+                    )
+                    result_files.extend(self.save_matplotlib_figure(
+                        fig_static, plots_dir, f'deg_gene_umap_{gene}.png', 'umap',
+                        f'{gene} Expression'
+                    ))
+                    import matplotlib.pyplot as plt
+                    plt.close(fig_static)
+                except Exception as exc:
+                    self.progress(-1, f'{gene} 静态表达 UMAP 导出失败（不影响交互图）：{exc}')
 
         if self.params.get('show_top_marker_umap_panel', True) and 'X_umap' in adata.obsm and not deg_df.empty:
             try:

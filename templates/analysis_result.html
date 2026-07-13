@@ -147,6 +147,10 @@
     </div>
     {% endfor %}
 </div>
+{% elif plotly_files %}
+<div class="alert alert-info small mb-3">
+    当前任务没有静态 PNG/SVG 结果，网页暂时显示 Plotly 交互图。重新运行该分析模块后，将自动生成 300 dpi PNG 和 SVG 科研图。
+</div>
 {% endif %}
 
 {% if plotly_files %}

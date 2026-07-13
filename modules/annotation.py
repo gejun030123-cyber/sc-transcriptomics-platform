@@ -493,7 +493,7 @@ class AnnotationAnalysis(BaseAnalysis):
             fig_static = sc.pl.umap(
                 adata, color='celltype', title='UMAP by Cell Type', show=False,
                 return_fig=True, frameon=False, size=self.get_viz_params()['umap_point_size'],
-                legend_loc='on data',
+                legend_loc='right margin',
             )
             result_files.extend(self.save_matplotlib_figure(
                 fig_static, plots_dir, 'annotation_umap_celltype.png', 'umap',
