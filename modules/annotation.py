@@ -490,10 +490,8 @@ class AnnotationAnalysis(BaseAnalysis):
         with open(fpath, 'w') as f: f.write(fig_json)
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': 'UMAP by Cell Type'})
         try:
-            fig_static = sc.pl.umap(
-                adata, color='celltype', title='UMAP by Cell Type', show=False,
-                return_fig=True, frameon=False, size=self.get_viz_params()['umap_point_size'],
-                legend_loc='right margin',
+            fig_static = self.build_publication_umap(
+                adata, 'celltype', title='UMAP by Cell Type'
             )
             result_files.extend(self.save_matplotlib_figure(
                 fig_static, plots_dir, 'annotation_umap_celltype.png', 'umap',

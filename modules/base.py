@@ -208,6 +208,84 @@ class BaseAnalysis(ABC):
             })
         return result_files
 
+    def build_publication_umap(self, adata, color_key, title='', basis='X_umap'):
+        """Build a compact, publication-oriented UMAP Matplotlib figure.
+
+        Scanpy's default figure is excellent for exploration, but its point size
+        and legend/colorbar scale poorly when embedded in a web result card. This
+        renderer keeps OmicVerse-aligned categorical colors while adapting marker
+        size and layout to the number of cells.
+        """
+        import math
+        import numpy as np
+        import pandas as pd
+        import matplotlib.pyplot as plt
+
+        coords = np.asarray(adata.obsm[basis])[:, :2]
+        viz = self.params.get('_visualization', {})
+        n_obs = max(1, int(coords.shape[0]))
+        point_size = float(viz.get('umap_point_size', 5))
+        marker_size = max(7, min(30, point_size * math.sqrt(10000 / n_obs)))
+        opacity = float(viz.get('umap_opacity', 0.78))
+        font_size = max(9, float(viz.get('font_size', 12)))
+        font_family = viz.get('font_family', 'Arial')
+        fig, ax = plt.subplots(figsize=(9, 6.8), dpi=150)
+
+        values = adata.obs[color_key] if color_key in adata.obs.columns else None
+        is_numeric = values is not None and pd.api.types.is_numeric_dtype(values)
+        if values is None:
+            ax.scatter(coords[:, 0], coords[:, 1], s=marker_size, c='#455a9b',
+                       alpha=opacity, linewidths=0, rasterized=True)
+        elif is_numeric:
+            scatter = ax.scatter(
+                coords[:, 0], coords[:, 1], s=marker_size,
+                c=np.asarray(values, dtype=float), cmap='viridis', alpha=opacity,
+                linewidths=0, rasterized=True,
+            )
+            colorbar = fig.colorbar(scatter, ax=ax, fraction=0.035, pad=0.025,
+                                    aspect=32)
+            colorbar.ax.tick_params(labelsize=max(8, font_size - 2), width=0.6)
+            colorbar.set_label(str(color_key), fontsize=font_size - 1,
+                               labelpad=6)
+        else:
+            from modules.visualization import categorical_color_map
+            categorical = values.astype('category')
+            color_map = categorical_color_map(adata, color_key)
+            for category in categorical.cat.categories:
+                mask = np.asarray(categorical == category)
+                if not mask.any():
+                    continue
+                ax.scatter(
+                    coords[mask, 0], coords[mask, 1], s=marker_size,
+                    color=color_map.get(str(category), '#9aa3b2'),
+                    alpha=opacity, linewidths=0, rasterized=True,
+                    label=str(category),
+                )
+            n_categories = len(categorical.cat.categories)
+            if n_categories:
+                legend = ax.legend(
+                    loc='center left', bbox_to_anchor=(1.01, 0.5),
+                    frameon=False, fontsize=max(8, font_size - 2),
+                    markerscale=1.25, borderaxespad=0,
+                    ncol=2 if n_categories > 16 else 1,
+                )
+                legend.set_title(str(color_key), prop={'size': font_size - 1})
+
+        ax.set_title(title, fontsize=font_size + 2, fontweight='semibold',
+                     color='#172033', pad=12, family=font_family)
+        ax.set_xlabel('UMAP 1', fontsize=font_size, color='#374151', family=font_family)
+        ax.set_ylabel('UMAP 2', fontsize=font_size, color='#374151', family=font_family)
+        ax.tick_params(labelsize=max(8, font_size - 2), colors='#4b5563', width=0.6)
+        ax.set_facecolor('white')
+        ax.grid(False)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.margins(0.035)
+        fig.patch.set_facecolor('white')
+        fig.subplots_adjust(left=0.09, right=0.82 if values is not None and not is_numeric else 0.94,
+                            bottom=0.1, top=0.88)
+        return fig
+
     def export_results(self, adata, output_dir, export_format='h5ad',
                        include_layers=None, include_obsm=None, compression='gzip'):
         """将 adata 导出为指定格式。返回导出文件路径列表。"""

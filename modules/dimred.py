@@ -101,10 +101,8 @@ class DimredAnalysis(BaseAnalysis):
                 with open(fpath, 'w') as f: f.write(fig_json)
                 result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'UMAP by {color_key}'})
                 try:
-                    fig_static = sc.pl.umap(
-                        adata, color=color_key, title=f'UMAP colored by {color_key}',
-                        show=False, return_fig=True, frameon=False,
-                        size=self.get_viz_params()['umap_point_size'],
+                    fig_static = self.build_publication_umap(
+                        adata, color_key, title=f'UMAP colored by {color_key}'
                     )
                     result_files.extend(self.save_matplotlib_figure(
                         fig_static, plots_dir, f'dimred_umap_{color_key}.png',

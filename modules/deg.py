@@ -200,9 +200,8 @@ class DEGAnalysis(BaseAnalysis):
                 with open(fpath, 'w') as f: f.write(json.dumps(fig_gene))
                 result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'{gene} Expression'})
                 try:
-                    fig_static = sc.pl.umap(
-                        adata, color=gene, title=f'{gene} Expression', show=False,
-                        return_fig=True, frameon=False, cmap='viridis',
+                    fig_static = self.build_publication_umap(
+                        adata, gene, title=f'{gene} Expression'
                     )
                     result_files.extend(self.save_matplotlib_figure(
                         fig_static, plots_dir, f'deg_gene_umap_{gene}.png', 'umap',

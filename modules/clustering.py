@@ -71,10 +71,8 @@ class ClusteringAnalysis(BaseAnalysis):
                 with open(fpath, 'w') as f: f.write(fig_json)
                 result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'Clusters (res={res})'})
                 try:
-                    fig_static = sc.pl.umap(
-                        adata, color=key, title=f'Leiden (res={res}, {n_clusters} clusters)',
-                        show=False, return_fig=True, frameon=False,
-                        size=self.get_viz_params()['umap_point_size'], legend_loc='right margin',
+                    fig_static = self.build_publication_umap(
+                        adata, key, title=f'Leiden (res={res}, {n_clusters} clusters)'
                     )
                     result_files.extend(self.save_matplotlib_figure(
                         fig_static, plots_dir, f'cluster_umap_{res}.png',
