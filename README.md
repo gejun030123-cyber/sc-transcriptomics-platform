@@ -125,6 +125,7 @@ resolution 0.8 的单核细胞群太混，帮我设计几个候选参数。
 - `.csv`、`.txt`、`.tsv`：表达矩阵或样本表。
 - `.xlsx`、`.xls`：Bulk 表达矩阵。
 - `.mtx.gz` / 10x 文件组合：上传 `barcodes.tsv(.gz)`、`features.tsv(.gz)` 或 `genes.tsv(.gz)`、`matrix.mtx(.gz)` 后可转换为 `.h5ad`。
+- 两批次 10x ZIP：上传两个分别包含 `filtered_feature_bc_matrix` 的 ZIP，平台会解压、添加 `obs["batch"]`，并合并为一个标准 `.h5ad`。
 
 项目目录结构遵循：
 
@@ -255,6 +256,7 @@ AI_API_TOKEN=""
 | `/api/projects/<pid>/tasks` | `GET` | 列出项目任务 |
 | `/api/projects/<pid>/adata-info` | `GET` | 获取当前 AnnData 信息 |
 | `/api/result-file/<file_id>` | `GET` | 下载 PNG、SVG、CSV 或其他结果文件 |
+| `/projects/<pid>/upload/import-10x-batches` | `POST` | 接收两个 `batch_zip` 和两个 `batch_name`，合并为带 `batch` 列的 h5ad |
 | `/api/projects/<pid>/pipeline-runs` | `POST/GET` | 创建或列出批量 pipeline run |
 | `/api/pipeline-runs/<run_id>/status` | `GET` | 查看 pipeline run 状态 |
 | `/api/projects/<pid>/current-context` | `GET` | 查看当前分析基线 |

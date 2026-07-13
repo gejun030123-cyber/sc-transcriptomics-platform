@@ -19,6 +19,22 @@
                     选择文件
                 </button>
             </div>
+            <div class="card border-primary-subtle p-3 mt-3">
+                <h6 class="mb-1">两批次 10x ZIP 合并导入</h6>
+                <p class="small text-muted mb-2">
+                    分别选择两个 ZIP；每个 ZIP 内需包含一套 filtered_feature_bc_matrix（matrix.mtx、barcodes.tsv、features/genes.tsv）。
+                    导入后会自动写入 <code>obs["batch"]</code>。
+                </p>
+                <input type="file" id="batch-zip-input" class="form-control form-control-sm mb-2" accept=".zip" multiple>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-6"><input type="text" id="batch-name-1" class="form-control form-control-sm" placeholder="批次 1 名称，如 Control"></div>
+                    <div class="col-md-6"><input type="text" id="batch-name-2" class="form-control form-control-sm" placeholder="批次 2 名称，如 Treatment"></div>
+                </div>
+                <button class="btn btn-outline-primary btn-sm w-100" id="btn-import-batches" onclick="startBatchImport10x()">
+                    合并两个批次并导入 h5ad
+                </button>
+                <div id="batch-import-msg" class="small mt-2 text-muted"></div>
+            </div>
             <div id="upload-progress" class="mt-3 d-none">
                 <div class="d-flex justify-content-between mb-1">
                     <span id="upload-filename"></span>
@@ -298,6 +314,45 @@ function startImportSc() {
     });
 }
 
+function startBatchImport10x() {
+    const input = document.getElementById('batch-zip-input');
+    const files = Array.from(input.files || []);
+    const msg = document.getElementById('batch-import-msg');
+    const btn = document.getElementById('btn-import-batches');
+    if (files.length !== 2) {
+        msg.className = 'small mt-2 text-danger';
+        msg.textContent = '请同时选择两个 ZIP 文件。';
+        return;
+    }
+    const formData = new FormData();
+    files.forEach(file => formData.append('batch_zip', file));
+    formData.append('batch_name', document.getElementById('batch-name-1').value || 'batch_1');
+    formData.append('batch_name', document.getElementById('batch-name-2').value || 'batch_2');
+    const species = document.getElementById('tenx-species').value;
+    const genome = document.getElementById('tenx-genome').value;
+    if (species) formData.append('species', species);
+    if (genome) formData.append('genome', genome);
+
+    btn.disabled = true;
+    btn.textContent = '提交中...';
+    msg.className = 'small mt-2 text-muted';
+    msg.textContent = '正在上传两个 ZIP...';
+    fetch('/projects/{{ project.id }}/upload/import-10x-batches', {
+        method: 'POST',
+        body: formData,
+    }).then(r => r.json()).then(data => {
+        if (data.error) throw new Error(data.error);
+        msg.textContent = `已提交：${(data.batch_names || []).join('、')}，正在合并...`;
+        document.getElementById('sc-import-progress').classList.remove('d-none');
+        pollScImportTask(data.task_id);
+    }).catch(error => {
+        btn.disabled = false;
+        btn.textContent = '合并两个批次并导入 h5ad';
+        msg.className = 'small mt-2 text-danger';
+        msg.textContent = '导入失败：' + error.message;
+    });
+}
+
 function pollScImportTask(taskId) {
     const interval = setInterval(() => {
         fetch(`/api/tasks/${taskId}/status`)
@@ -322,6 +377,11 @@ function pollScImportTask(taskId) {
                     document.getElementById('sc-import-result-msg').innerHTML = msg;
                     document.getElementById('btn-import-sc').disabled = false;
                     document.getElementById('btn-import-sc').textContent = '导入为标准 h5ad';
+                    const batchBtn = document.getElementById('btn-import-batches');
+                    if (batchBtn) {
+                        batchBtn.disabled = false;
+                        batchBtn.textContent = '合并两个批次并导入 h5ad';
+                    }
                     checkScImport();
                 } else if (data.status === 'failed') {
                     clearInterval(interval);
@@ -332,6 +392,11 @@ function pollScImportTask(taskId) {
                         '导入失败：' + (data.error_traceback || data.progress_message || '未知错误');
                     document.getElementById('btn-import-sc').disabled = false;
                     document.getElementById('btn-import-sc').textContent = '导入为标准 h5ad';
+                    const batchBtn = document.getElementById('btn-import-batches');
+                    if (batchBtn) {
+                        batchBtn.disabled = false;
+                        batchBtn.textContent = '合并两个批次并导入 h5ad';
+                    }
                 }
             });
     }, 2000);

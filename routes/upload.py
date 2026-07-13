@@ -9,6 +9,7 @@ upload_bp = Blueprint('upload', __name__)
 ALLOWED_EXT = {
     '.h5ad', '.h5', '.hdf5', '.loom', '.zarr',
     '.csv', '.txt', '.mtx', '.gz', '.xlsx', '.xls', '.tsv',
+    '.zip',
 }
 
 # 10x 文件名匹配模式
@@ -229,3 +230,76 @@ def import_sc(pid):
     submit_task(task.id, pid, 'convert_10x', params, proj_dir, source_path)
 
     return jsonify({'task_id': task.id})
+
+
+@upload_bp.route('/<pid>/upload/import-10x-batches', methods=['POST'])
+def import_10x_batches(pid):
+    """Upload and merge two zipped 10x batches with an explicit batch label."""
+    import json as _json
+    from models import AnalysisTask
+    from worker import submit_task
+
+    p = Project.get_by_id(pid)
+    if not p:
+        return jsonify({'error': '项目未找到'}), 404
+
+    files = request.files.getlist('batch_zip')
+    if not files:
+        files = [item for item in (
+            request.files.get('batch_a_zip') or request.files.get('batch_a'),
+            request.files.get('batch_b_zip') or request.files.get('batch_b'),
+        ) if item]
+    if len(files) < 2:
+        return jsonify({'error': '请上传两组 ZIP 文件'}), 400
+    if len(files) > 2:
+        return jsonify({'error': '当前接口只支持两组 ZIP 文件'}), 400
+
+    names = request.form.getlist('batch_name')
+    if not names:
+        names = [request.form.get('batch_a_name', ''), request.form.get('batch_b_name', '')]
+    while len(names) < 2:
+        names.append('')
+    default_names = []
+    for index, file in enumerate(files, start=1):
+        original = secure_filename(file.filename or '')
+        if not original.lower().endswith('.zip'):
+            return jsonify({'error': f'第 {index} 个文件不是 ZIP'}), 400
+        stem = os.path.splitext(original)[0] or f'batch_{index}'
+        name = names[index - 1].strip() or stem
+        name = ''.join(ch if ch.isalnum() or ch in '._-' else '_' for ch in name).strip('._-')
+        if not name:
+            name = f'batch_{index}'
+        default_names.append(name)
+    if len(set(default_names)) != len(default_names):
+        return jsonify({'error': '两组批次名称不能相同'}), 400
+
+    species = request.form.get('species', '').strip() or None
+    genome = request.form.get('genome', '').strip() or None
+    uploads_dir = Config.uploads_dir(pid)
+    zip_dir = os.path.join(uploads_dir, 'batch_zips')
+    os.makedirs(zip_dir, exist_ok=True)
+    batch_sources = []
+    for index, (file, batch_name) in enumerate(zip(files, default_names), start=1):
+        original = secure_filename(file.filename or '')
+        stored_name = f'{index}_{batch_name}_{original}'
+        zip_path = os.path.join(zip_dir, stored_name)
+        file.save(zip_path)
+        batch_sources.append({'zip_path': zip_path, 'batch_name': batch_name})
+
+    params = {
+        'batch_sources': batch_sources,
+        'species': species,
+        'genome': genome,
+    }
+    task = AnalysisTask(
+        project_id=pid,
+        module_name='convert_10x',
+        status='pending',
+        params_json=_json.dumps(params, ensure_ascii=False),
+    )
+    task.save()
+    p.status = 'processing'
+    p.save()
+    submit_task(task.id, pid, 'convert_10x', params,
+                Config.project_dir(pid), uploads_dir)
+    return jsonify({'task_id': task.id, 'batch_names': default_names})

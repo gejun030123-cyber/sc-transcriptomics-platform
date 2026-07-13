@@ -33,7 +33,6 @@ class SubclusterAnalysis(BaseAnalysis):
         """
         import os
         import pandas as pd
-        import plotly.graph_objects as go
 
         try:
             import gseapy as gp
@@ -73,24 +72,32 @@ class SubclusterAnalysis(BaseAnalysis):
         result_files.append({'file_path': csv_path, 'file_type': 'csv', 'category': 'table',
                              'label': '子簇通路富集结果'})
 
+        from modules.bulk_enrichment import _enrichment_figure
+
+        # Render one publication-style chart per subcluster.  Keeping the
+        # panels separate avoids mixing pathway labels from unrelated clusters
+        # and matches the BP/MF/KEGG + overlap-count layout used by Bulk.
         term_col = 'Term' if 'Term' in combined.columns else combined.columns[0]
         p_col = 'Adjusted P-value' if 'Adjusted P-value' in combined.columns else 'P-value'
         plot_df = combined.sort_values(p_col).groupby('subcluster', group_keys=False).head(top_n)
-        if not plot_df.empty:
-            fig = go.Figure()
-            for group, group_df in plot_df.groupby('subcluster'):
-                fig.add_trace(go.Scatter(
-                    x=-__import__('numpy').log10(group_df[p_col].clip(lower=1e-300)),
-                    y=group_df[term_col], mode='markers', name=f'子簇 {group}',
-                    marker=dict(size=10),
-                    hovertemplate='%{y}<br>-log10(adjusted p): %{x:.2f}<extra></extra>',
-                ))
-            fig.update_layout(title='子簇 Top 通路富集', xaxis_title='-log10(Adjusted P-value)',
-                              yaxis=dict(autorange='reversed'), plot_bgcolor='white', width=900,
-                              height=max(450, 24 * len(plot_df)))
-            result_files.append(self.save_plotly_json(
-                fig, plots_dir, 'subcluster_enrichment_bubble.json', 'enrichment', '子簇通路富集气泡图'
+        for group, group_df in plot_df.groupby('subcluster'):
+            fig = _enrichment_figure(
+                group_df,
+                title=f'子簇 {group} enrich result',
+                database=database,
+            )
+            if fig is None:
+                continue
+            safe_group = ''.join(ch if ch.isalnum() or ch in '._-' else '_' for ch in str(group)).strip('_') or 'cluster'
+            result_files.extend(self.save_matplotlib_figure(
+                fig,
+                plots_dir,
+                f'subcluster_enrichment_{safe_group}.png',
+                'enrichment',
+                f'子簇 {group} 通路富集图',
             ))
+            import matplotlib.pyplot as plt
+            plt.close(fig)
         return result_files, len(combined)
 
     def run(self, input_path):
