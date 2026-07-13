@@ -197,6 +197,11 @@ def main():
     parser.add_argument('--output-dir', default='./bulk_reference_output', help='输出根目录')
     parser.add_argument('--method', default='t-test', help='DEG 统计方法（默认 t-test）')
     parser.add_argument('--normalize-method', default='deseq2', help='归一化方法（默认 deseq2）')
+    parser.add_argument('--fc-threshold', type=float, default=2.0, help='DEG Fold Change 阈值（默认 2.0）')
+    parser.add_argument('--padj-threshold', type=float, default=0.05, help='DEG FDR/padj 阈值（默认 0.05）')
+    parser.add_argument('--top-n', type=int, default=50, help='DEG/热图展示基因数（默认 50）')
+    parser.add_argument('--min-expr-value', type=float, default=1.0, help='标准化前最小表达阈值（默认 1）')
+    parser.add_argument('--min-expr-samples', type=int, default=3, help='基因至少在 N 个样本中达到表达阈值（默认 3）')
     parser.add_argument('--organism', default='Human', help='物种（默认 Human）')
     parser.add_argument('--run-optional', action='store_true', help='运行可选步骤（enrichment/timecourse/deg_integration）')
     parser.add_argument('--heatmap-source', default='top_var', choices=['top_var', 'deg'],
@@ -279,15 +284,23 @@ def main():
         params = build_default_params(step_name)
         params['groupby'] = args.groupby
 
-        if step_name == 'bulk_deg':
+        if step_name == 'bulk_qc':
+            params['group_column'] = args.groupby
+
+        elif step_name == 'bulk_deg':
             params['comparisons'] = comparisons_str
             if args.group1 and args.group2:
                 params['group1'] = args.group1
                 params['group2'] = args.group2
             params['method'] = args.method
+            params['fc_threshold'] = args.fc_threshold
+            params['pval_threshold'] = args.padj_threshold
+            params['top_n'] = args.top_n
 
         elif step_name == 'bulk_normalize':
             params['method'] = args.normalize_method
+            params['min_expr_value'] = args.min_expr_value
+            params['min_expr_samples'] = args.min_expr_samples
 
         elif step_name == 'bulk_pca':
             params['color_by'] = args.groupby
@@ -296,9 +309,13 @@ def main():
             params['groupby'] = args.groupby
             params['gene_import_source'] = args.heatmap_source
             params['heatmap_type'] = args.heatmap_source
+            params['top_n'] = args.top_n
 
         elif step_name == 'bulk_enrichment':
             params['organism'] = args.organism
+            params['pvalue_cutoff'] = args.padj_threshold
+            params['top_n'] = min(args.top_n, 30)
+            params['split_direction'] = True
             # 自动查找 DEG CSV 作为 input_source
             deg_csv = find_deg_csv(project_dir)
             if deg_csv:
@@ -327,6 +344,9 @@ def main():
             # 传字符串而非 list
             # 留空让模块自动使用所有 DEG CSV（selected_comparisons 期望文件 key，非比较名）
             params['selected_comparisons'] = ''
+            params['fc_threshold'] = args.fc_threshold
+            params['pval_threshold'] = args.padj_threshold
+            params['consistency_n'] = args.top_n
 
         step_record = {
             'module': step_name,
@@ -335,6 +355,7 @@ def main():
             'started_at': None,
             'finished_at': None,
             'summary': None,
+            'params': params,
             'result_files': [],
             'output_adata_path': None,
             'error': None,
@@ -363,6 +384,17 @@ def main():
 
             if result.get('output_adata'):
                 current_input = result['output_adata']
+
+            if step_name == 'bulk_deg':
+                comparison_names = (result.get('summary') or {}).get('comparisons', [])
+                if comparison_names:
+                    label_path = os.path.join(project_dir, 'results', 'bulk_deg_comparison_labels.json')
+                    label_map = {
+                        f'bulk_deg_results_{idx}.csv': name
+                        for idx, name in enumerate(comparison_names)
+                    }
+                    with open(label_path, 'w', encoding='utf-8') as f:
+                        json.dump(label_map, f, ensure_ascii=False, indent=2)
 
             print(f"  ✅ {step_name} 完成 ({elapsed:.1f}s)")
             summary = result.get('summary', {})

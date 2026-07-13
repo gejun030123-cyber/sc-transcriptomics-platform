@@ -21,6 +21,7 @@ class BulkHeatmapAnalysis(BaseAnalysis):
         self.progress(5, "加载数据...")
         from modules.io_utils import read_expression_matrix
         adata = read_expression_matrix(input_path)
+        from modules.io_utils import infer_expression_measurement
 
         top_n = int(self.params.get('top_n', 50))
         groupby = self.params.get('groupby', '')
@@ -33,8 +34,14 @@ class BulkHeatmapAnalysis(BaseAnalysis):
         counts = np.nan_to_num(counts, nan=0.0, posinf=0.0, neginf=0.0)
 
         if 'normalization' not in adata.uns:
-            sc.pp.normalize_total(adata, target_sum=1e6)
-            sc.pp.log1p(adata)
+            input_measurement = infer_expression_measurement(adata, input_path)
+            if input_measurement == 'raw_counts':
+                sc.pp.normalize_total(adata, target_sum=1e6)
+                sc.pp.log1p(adata)
+                adata.uns['normalization'] = {'method': 'heatmap_auto_cpm_log1p', 'is_log_transformed': True}
+            else:
+                adata.X = np.log2(np.maximum(adata.X, 0) + 1)
+                adata.uns['normalization'] = {'method': 'heatmap_auto_log2', 'is_log_transformed': True}
         norm_data = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
         norm_data = norm_data.astype(float)
         norm_data = np.nan_to_num(norm_data, nan=0.0, posinf=0.0, neginf=0.0)

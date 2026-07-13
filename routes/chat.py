@@ -31,6 +31,14 @@ class ChatHistoryStore:
 _chat_histories = ChatHistoryStore()
 
 
+@chat_bp.route('/api/chat/config')
+@require_ai_token
+def chat_config():
+    """返回 AI 对话的非敏感配置状态，供前端显示诊断信息。"""
+    from modules.ai_adapter import get_ai_config_status
+    return jsonify(get_ai_config_status())
+
+
 @chat_bp.route('/api/chat', methods=['POST'])
 @require_ai_token
 def chat_endpoint():
@@ -50,6 +58,10 @@ def chat_endpoint():
 
     if not project_id:
         return jsonify({"error": "需要指定项目 ID"}), 400
+    try:
+        Config._validate_pid(project_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     # 获取聊天历史
     history = _chat_histories.get(project_id)
@@ -67,6 +79,10 @@ def chat_endpoint():
             "reply": result["reply"],
             "tool_calls": result["tool_calls"],
             "proposed_tools": result.get("proposed_tools", []),
+            "config": {
+                "model": Config.AI_MODEL,
+                "message_count": len(result["messages"]),
+            },
         })
     except Exception as e:
         return jsonify({"error": f"AI 调用失败: {str(e)}"}), 500

@@ -1,6 +1,8 @@
 """Result route and analysis input path security tests."""
 import json
+import io
 import os
+import zipfile
 
 import pytest
 
@@ -87,6 +89,36 @@ def test_project_result_file_api_requires_matching_project(client):
     ok = client.get(f"/api/projects/project_b/result-file/{result_file.id}")
     assert ok.status_code == 200
     assert ok.get_json() == {"data": [], "layout": {}}
+
+
+def test_project_plot_archive_contains_gallery_and_sources(client):
+    _make_project("project_a")
+    _, result_file = _make_task_with_result("project_a")
+
+    resp = client.get('/projects/project_a/results/plots-archive')
+
+    assert resp.status_code == 200
+    assert resp.mimetype == 'application/zip'
+    with zipfile.ZipFile(io.BytesIO(resp.data)) as archive:
+        names = archive.namelist()
+        assert 'plot_gallery.html' in names
+        assert 'manifest.json' in names
+        plot_sources = [name for name in names if name.startswith('plotly_json/')]
+        assert len(plot_sources) == 1
+        manifest = json.loads(archive.read('manifest.json'))
+        assert manifest[0]['label'] == 'QC plot'
+        assert manifest[0]['archive_path'] == plot_sources[0]
+
+
+def test_task_result_page_has_individual_and_batch_plot_exports(client):
+    _make_project("project_a")
+    task, _ = _make_task_with_result("project_a")
+
+    resp = client.get(f'/projects/project_a/task/{task.id}')
+
+    assert resp.status_code == 200
+    assert '全部导出 PNG'.encode() in resp.data
+    assert 'exportTaskPlot'.encode() in resp.data
 
 
 def test_analysis_submit_rejects_input_outside_project(client, tmp_path):

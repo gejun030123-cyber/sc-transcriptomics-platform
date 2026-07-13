@@ -422,8 +422,7 @@ def obs_columns():
     if not _validate_file_path(file_path):
         return jsonify({'error': '文件路径不在允许范围内'}), 403
     try:
-        from modules.io_utils import read_expression_matrix
-        import re
+        from modules.io_utils import read_expression_matrix, infer_sample_group_candidates
         import pandas as pd
         adata = read_expression_matrix(file_path)
         qc_columns = {'total_counts', 'n_genes_by_counts', 'pct_counts_mt', 'size_factor',
@@ -443,29 +442,14 @@ def obs_columns():
         if cols:
             return jsonify({'columns': cols, 'sample_groups': {}, 'time_candidates': time_candidates})
 
-        # 如果 obs 没有注释列，尝试从样本名中提取分组前缀
+        # 如果 obs 没有注释列，从样本名推断多因素候选分组。
         sample_groups = {}
         if adata.n_obs > 0:
             sample_names = adata.obs.index.tolist()
-            prefixes = []
-            valid_indices = []
-            for i, name in enumerate(sample_names):
-                name_str = str(name)
-                name_clean = re.sub(r'_(count|FPKM|TPM|fpkm|tpm|Counts|normalized)$', '', name_str)
-                prefix = re.sub(r'[-_]\d+.*$', '', name_clean)
-                # 只保留匹配 prefix-number 模式的样本名（排除注释列）
-                if prefix and re.match(r'^[a-zA-Z][a-zA-Z0-9]*[-_]\d', name_clean):
-                    prefixes.append(prefix)
-                    valid_indices.append(i)
-                else:
-                    prefixes.append(None)
-            unique_prefixes = sorted(set(p for p in prefixes if p is not None))
-            if len(unique_prefixes) > 1 and len(valid_indices) > len(unique_prefixes):
-                mapping = {str(sample_names[i]): prefixes[i] for i in valid_indices}
-                sample_groups['auto_group'] = {
-                    'values': unique_prefixes,
-                    'mapping': mapping
-                }
+            candidates = infer_sample_group_candidates(sample_names)
+            if candidates:
+                sample_groups['auto_group'] = candidates[0]
+                sample_groups['auto_group_candidates'] = candidates
 
         return jsonify({'columns': cols, 'sample_groups': sample_groups, 'time_candidates': time_candidates})
     except Exception:
@@ -667,7 +651,7 @@ def create_pipeline_run(pid):
         # 兼容旧形态：扁平参数应用到所有匹配的模块
         for key, val in params.items():
             if key not in ('qc', 'normalize', 'hvg', 'dimred', 'batch_correct',
-                          'clustering', 'qc_reassess', 'annotation', 'deg',
+                          'clustering', 'subcluster', 'qc_reassess', 'annotation', 'deg',
                           'trajectory', 'proportion', 'cell_communication',
                           'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca',
                           'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',

@@ -36,6 +36,23 @@ def _parse_custom_groups(cg_str):
     return mapping
 
 
+def _welch_ttest_log_expression(data, group1_samples, group2_samples, padj_method='fdr_bh'):
+    """Run Welch t-test on a genes x samples matrix already on a log2 scale."""
+    from scipy.stats import ttest_ind
+    from statsmodels.stats.multitest import multipletests
+
+    g1 = data[group1_samples].to_numpy(dtype=float)
+    g2 = data[group2_samples].to_numpy(dtype=float)
+    _, pvalues = ttest_ind(g1, g2, axis=1, equal_var=False, nan_policy='omit')
+    pvalues = np.nan_to_num(np.asarray(pvalues), nan=1.0, posinf=1.0, neginf=1.0)
+    padj = multipletests(pvalues, method=padj_method)[1]
+    return pd.DataFrame({
+        'pvalue': pvalues,
+        'qvalue': padj,
+        'log2FC': np.nanmean(g1, axis=1) - np.nanmean(g2, axis=1),
+    }, index=data.index)
+
+
 def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1, group2,
                            method, fc_threshold, pval_threshold, top_n, gene_id_to_name,
                            plots_dir, results_dir, suffix='', viz_params=None,
@@ -78,8 +95,11 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         except ImportError:
             raise ImportError(f"方法 {method} 需要安装 inmoose: pip install inmoose patsy")
 
-    # 仅对简单统计方法调用 normalize；DESeq2/edgeR/limma 内部自行处理标准化
-    if ov_method in ('ttest', 'wilcox'):
+    normalization_meta = adata.uns.get('normalization', {}) if hasattr(adata, 'uns') else {}
+    is_log_transformed = bool(normalization_meta.get('is_log_transformed', False))
+
+    # 原始计数上的简单检验沿用 pyDEG 标准化；已标准化的 log 表达矩阵不再二次标准化。
+    if ov_method in ('ttest', 'wilcox') and not is_log_transformed:
         dds.normalize()
 
     # cooks_filter / independent_filter 仅对 DESeq2 有意义
@@ -88,7 +108,13 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         deg_kwargs['cooks_filter'] = cooks_filter
         deg_kwargs['independent_filter'] = independent_filter
 
-    result = dds.deg_analysis(group1_samples, group2_samples, method=ov_method, **deg_kwargs)
+    if ov_method == 'ttest' and is_log_transformed:
+        # 连续表达值（FPKM/TPM 等）经 log2 标准化后，直接在 log 尺度上做 Welch t-test。
+        # log2FC 应为两组 log2 均值之差，不能再对 log 值均值取比值。
+        result = _welch_ttest_log_expression(
+            dds.data, group1_samples, group2_samples, padj_method=padj_method)
+    else:
+        result = dds.deg_analysis(group1_samples, group2_samples, method=ov_method, **deg_kwargs)
 
     # Extract results
     gene_ids_list = result.index.tolist()
@@ -330,11 +356,17 @@ class BulkDEGAnalysis(BaseAnalysis):
         self.progress(5, "加载数据...")
         from modules.io_utils import read_expression_matrix
         adata = read_expression_matrix(input_path)
+        from modules.io_utils import infer_expression_measurement
 
         groupby = self.params.get('groupby', 'condition')
         group1 = self.params.get('group1', '')
         group2 = self.params.get('group2', '')
         method = self.params.get('method', 't-test')
+        input_measurement = infer_expression_measurement(adata, input_path)
+        if input_measurement != 'raw_counts' and method in {'deseq2', 'edger', 'limma'}:
+            raise ValueError(f'{method} 需要原始整数 counts；当前输入为 {input_measurement}。请选择 t-test/Mann-Whitney，或从原始 counts 重新分析。')
+        if input_measurement == 'continuous_expression' and method in {'t-test', 'mann-whitney'}:
+            raise ValueError('FPKM/TPM 等连续表达值需先运行 bulk_normalize(method=log2)，再做差异分析。')
         fc_threshold = float(self.params.get('fc_threshold', 2.0))
         pval_threshold = float(self.params.get('pval_threshold', 0.05))
         top_n = int(self.params.get('top_n', 20))

@@ -7,7 +7,7 @@
 - 用户可以上传数据，在网页中按模块执行 scRNA-seq 或 Bulk RNA-seq 分析。
 - AI 助手可以读取项目状态、理解已完成步骤、调用分析工具并提出参数调整方案。
 - 对“分群不满意”“必须找到最接近某种细胞类型的分群”等需求，平台提供 marker 评分、候选分支、参数 sweep 和人工采纳机制。
-- 所有分析结果会落到项目目录下，包含 h5ad 中间文件、CSV 表格和 Plotly JSON 图表。
+- 所有分析结果会落到项目目录下，包含 h5ad 中间文件、CSV 表格、科研级静态图和 Plotly 交互图表。
 
 ## 核心能力
 
@@ -17,7 +17,8 @@
 - 异步任务：分析任务通过后台 worker 执行，前端可查看进度、日志和失败信息。
 - 参数面板：每个模块有结构化参数 schema，包含中文标签、默认值、类型和帮助说明。
 - 结果管理：任务结果写入数据库，支持图表查看、表格下载和 h5ad 中间文件下载。
-- Plotly 图表：结果图以 Plotly JSON 保存，前端支持缩放、平移、悬停和导出。
+- 科研级图表：Scanpy/Matplotlib 原生图默认保存为 300 dpi PNG 和 SVG 矢量图，结果页优先展示 PNG，并提供 PNG/SVG 下载。
+- Plotly 图表：结果图同时以 Plotly JSON 保存，前端支持缩放、平移、悬停和交互导出。
 - 安全路径校验：API 读取和 AI 工具调用会限制在项目目录内，拒绝路径穿越和符号链接输入。
 
 ### 单细胞转录组分析
@@ -131,7 +132,7 @@ resolution 0.8 的单核细胞群太混，帮我设计几个候选参数。
 data/projects/<project_id>/
   uploads/       # 用户上传原始文件
   intermediate/  # 各模块输出 h5ad
-  plots/         # Plotly JSON 图表
+  plots/         # PNG/SVG 科研图、Plotly JSON 交互图表
   results/       # CSV、报告、下载结果
   branches/      # AI/Agent 候选分支
   presets/       # 项目级参数预设
@@ -169,9 +170,19 @@ python app.py
 http://localhost:5000
 ```
 
+### 图像输出与下载
+
+单细胞的 UMAP、聚类 UMAP、注释 UMAP，以及聚类/注释/差异表达 DotPlot 会同时生成两类结果：
+
+- `PNG`：300 dpi 位图，网页默认展示，适合汇报和快速预览。
+- `SVG`：矢量图，适合论文排版和后续编辑。
+- `Plotly JSON`：交互式结果，支持浏览器缩放、悬停查看细胞/样本信息和再次导出。
+
+新的静态图只会在任务重新运行时生成；历史任务需要重新执行对应模块才能获得 PNG/SVG。若在分析参数面板关闭某种导出格式，平台会按所选格式保存结果。
+
 ## AI API 配置
 
-通过环境变量配置 AI：
+通过环境变量或项目根目录的 `.env` 配置 AI。`.env` 已被 `.gitignore` 忽略，适合本地保存 API key：
 
 ```bash
 export AI_API_KEY="your-api-key"
@@ -181,10 +192,20 @@ export AI_API_TOKEN="optional-local-api-token"
 python app.py
 ```
 
+DeepSeek Anthropic-compatible 示例：
+
+```bash
+AI_API_URL="https://api.deepseek.com/anthropic"
+AI_API_KEY="your-deepseek-key"
+AI_MODEL="deepseek-chat"
+AI_API_TOKEN=""
+```
+
 说明：
 
 - `AI_API_KEY` 为空时，`/api/chat` 会返回未配置错误。
-- `AI_API_URL` 中包含 `anthropic` 或 `claude` 时走 Anthropic messages 格式，否则走 OpenAI compatible chat completions 格式。
+- `AI_API_URL` 中包含 `anthropic` 或 `claude` 时走 Anthropic Messages 格式，否则走 OpenAI compatible Chat Completions 格式。
+- Anthropic-compatible 调用使用内置 HTTP 客户端，不强依赖本地安装 `anthropic` SDK。
 - `AI_API_TOKEN` 为空时跳过本地 API token 认证；设置后需要请求头 `Authorization: Bearer <token>`。
 - 写操作工具不会直接执行，会先返回 `proposed_tools`，前端确认后再调用 `/api/chat/approve`。
 
@@ -348,8 +369,8 @@ data/                       # 本地项目数据，默认不纳入 git
 | `MIN_FREE_RAM_GB` | `4` | 资源保护阈值 |
 | `CUDA_DEVICES` | `0,1` | GPU 设备配置 |
 | `AI_API_KEY` | 空 | AI API key |
-| `AI_API_URL` | 默认兼容 Anthropic 的 URL | AI API endpoint |
-| `AI_MODEL` | `mimo-v2.5-pro` | AI 模型名 |
+| `AI_API_URL` | 默认兼容 Anthropic 的 URL | AI API endpoint；DeepSeek 可用 `https://api.deepseek.com/anthropic` |
+| `AI_MODEL` | `mimo-v2.5-pro` | AI 模型名；DeepSeek 常用 `deepseek-chat` |
 | `AI_API_TOKEN` | 空 | 本地 API Bearer token |
 
 ## 功能边界

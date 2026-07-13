@@ -44,3 +44,16 @@ def test_non_single_cell_review_module_returns_none():
     from modules.reporting.review_evidence import build_review_evidence
 
     assert build_review_evidence("bulk_qc", {"n_samples": 6}, []) is None
+
+
+def test_result_interpretation_has_safe_generic_fallback():
+    from modules.reporting.review_evidence import build_result_interpretation
+    text = build_result_interpretation('hvg', {'n_cells': 100, 'n_hvgs': 2000}, [])
+    assert text['title'] == '结果解读'
+    assert '100' in text['conclusion']
+
+
+def test_result_interpretation_uses_review_evidence_when_available():
+    from modules.reporting.review_evidence import build_result_interpretation
+    text = build_result_interpretation('annotation', {'n_celltypes': 1, 'celltype_counts': {'Unknown': 10}}, [])
+    assert text['cautions']

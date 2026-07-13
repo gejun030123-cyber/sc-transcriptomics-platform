@@ -72,6 +72,9 @@ def test_write_plot_gallery_and_project_report(tmp_path, monkeypatch):
     gallery = gallery_path.read_text(encoding="utf-8")
     assert "QC overview" in gallery
     assert "Plotly.newPlot" in gallery
+    assert "全部导出 PNG" in gallery
+    assert "exportAllPlots" in gallery
+    assert "导出 SVG" in gallery
 
     report = report_path.read_text(encoding="utf-8")
     assert "# 项目结果报告：Demo Project" in report

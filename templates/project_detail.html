@@ -245,56 +245,93 @@ function loadAdataInfo() {
 #chat-toggle:hover { transform: scale(1.1); }
 #chat-panel {
     position: fixed; bottom: 90px; right: 24px; z-index: 9999;
-    width: 380px; height: 520px; background: white;
-    border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+    width: min(460px, calc(100vw - 32px)); height: min(680px, calc(100vh - 120px)); background: white;
+    border-radius: 10px; box-shadow: 0 8px 32px rgba(0,0,0,0.2);
     display: flex; flex-direction: column; overflow: hidden;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 #chat-header {
-    background: #1a237e; color: white; padding: 12px 16px;
+    background: #1a237e; color: white; padding: 10px 14px;
     display: flex; justify-content: space-between; align-items: center;
     font-weight: 600; font-size: 14px;
 }
+#chat-subtitle {
+    font-size: 11px; color: rgba(255,255,255,0.78); font-weight: 400;
+    margin-top: 2px;
+}
+#chat-status {
+    display: inline-flex; align-items: center; gap: 5px;
+}
+#chat-status-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: #fdd835;
+}
+#chat-status-dot.ok { background: #66bb6a; }
+#chat-status-dot.error { background: #ef5350; }
+#chat-status-dot.loading { background: #fdd835; }
+#chat-header button {
+    background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.25);
+    color: white; cursor: pointer; border-radius: 6px; padding: 3px 8px; font-size: 12px;
+}
 #chat-messages {
     flex: 1; overflow-y: auto; padding: 12px;
-    background: #f5f5f5;
+    background: #f6f7fb;
 }
-.chat-msg { margin-bottom: 10px; display: flex; }
+.chat-msg { margin-bottom: 10px; display: flex; flex-direction: column; }
 .chat-msg.user { justify-content: flex-end; }
 .chat-msg.assistant { justify-content: flex-start; }
+.chat-meta {
+    font-size: 10px; color: #7b8190; margin-bottom: 3px;
+}
+.chat-msg.user .chat-meta { text-align: right; }
 .chat-bubble {
-    max-width: 85%; padding: 10px 14px; border-radius: 12px;
+    max-width: 88%; padding: 10px 12px; border-radius: 10px;
     font-size: 13px; line-height: 1.5; word-wrap: break-word;
 }
 .chat-msg.user .chat-bubble {
     background: #1a237e; color: white;
     border-bottom-right-radius: 4px;
+    margin-left: auto;
 }
 .chat-msg.assistant .chat-bubble {
     background: white; color: #333;
     border-bottom-left-radius: 4px;
     box-shadow: 0 1px 2px rgba(0,0,0,0.1);
 }
+.chat-msg.system .chat-bubble {
+    background: #eef2ff; color: #334155; border: 1px solid #c7d2fe;
+    max-width: 100%;
+}
 .chat-tool-call {
-    background: #e3f2fd; padding: 6px 10px; border-radius: 8px;
-    font-size: 11px; color: #1565c0; margin-bottom: 6px;
+    background: #e3f2fd; padding: 7px 10px; border-radius: 8px;
+    font-size: 11px; color: #1565c0; margin-bottom: 8px;
     border-left: 3px solid #1565c0;
 }
+#chat-quick-actions {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    padding: 8px 10px; border-top: 1px solid #e6e8ef; background: #fbfcff;
+}
+.chat-chip {
+    border: 1px solid #c8d1ea; background: white; color: #1a237e;
+    border-radius: 999px; padding: 4px 9px; font-size: 12px; cursor: pointer;
+}
+.chat-chip:hover { background: #eef2ff; }
 #chat-input-area {
-    display: flex; padding: 10px; border-top: 1px solid #e0e0e0;
-    background: white;
+    display: flex; gap: 8px; padding: 10px; border-top: 1px solid #e0e0e0;
+    background: white; align-items: flex-end;
 }
 #chat-input {
-    flex: 1; border: 1px solid #ddd; border-radius: 20px;
-    padding: 8px 16px; font-size: 13px; outline: none;
+    flex: 1; border: 1px solid #d6d9e6; border-radius: 10px;
+    padding: 8px 10px; font-size: 13px; outline: none;
+    resize: none; min-height: 38px; max-height: 110px; line-height: 1.4;
 }
 #chat-input:focus { border-color: #1a237e; }
 #chat-input-area button {
-    margin-left: 8px; background: #1a237e; color: white;
-    border: none; border-radius: 20px; padding: 8px 16px;
+    background: #1a237e; color: white;
+    border: none; border-radius: 10px; padding: 8px 14px;
     cursor: pointer; font-size: 13px;
 }
 #chat-input-area button:hover { background: #283593; }
+#chat-input-area button:disabled { background: #9aa3b2; cursor: not-allowed; }
 .chat-typing { display: flex; align-items: center; gap: 4px; padding: 8px 14px; }
 .chat-typing span {
     width: 6px; height: 6px; background: #999; border-radius: 50%;
@@ -308,10 +345,15 @@ function loadAdataInfo() {
 }
 .proposed-tool-card {
     background: #fff3e0; border: 1px solid #ff9800; border-radius: 10px;
-    padding: 10px 14px; margin: 6px 0; font-size: 12px;
+    padding: 10px 12px; margin: 8px 0; font-size: 12px;
 }
 .proposed-tool-card .tool-title { font-weight: 600; color: #e65100; margin-bottom: 4px; }
-.proposed-tool-card .tool-params { color: #555; font-size: 11px; margin-bottom: 8px; word-break: break-all; }
+.proposed-tool-card .tool-desc { color: #6b4f00; margin-bottom: 6px; }
+.proposed-tool-card .tool-params {
+    color: #555; font-size: 11px; margin-bottom: 8px; word-break: break-word;
+    max-height: 160px; overflow: auto; background: rgba(255,255,255,0.65);
+    border-radius: 6px; padding: 6px;
+}
 .proposed-tool-card .tool-actions { display: flex; gap: 8px; }
 .proposed-tool-card .btn-confirm {
     background: #1a237e; color: white; border: none; border-radius: 6px;
@@ -332,20 +374,31 @@ function loadAdataInfo() {
 </button>
 <div id="chat-panel" style="display:none;">
     <div id="chat-header">
-        <span>AI 生信助手</span>
         <div>
-            <button onclick="clearChat()" title="清空对话" style="background:none;border:none;color:white;cursor:pointer;margin-right:8px;">🗑</button>
-            <button onclick="toggleChat()" title="关闭" style="background:none;border:none;color:white;cursor:pointer;">✕</button>
+            <div id="chat-status"><span id="chat-status-dot" class="loading"></span><span>AI 生信助手</span></div>
+            <div id="chat-subtitle">正在读取模型配置...</div>
+        </div>
+        <div>
+            <button onclick="clearChat()" title="清空对话">清空</button>
+            <button onclick="toggleChat()" title="关闭">关闭</button>
         </div>
     </div>
     <div id="chat-messages">
         <div class="chat-msg assistant">
-            <div class="chat-bubble">你好！我是 AI 生信助手，可以帮你执行分析、解读结果、配置参数。试试说"查看项目状态"或"对数据做差异分析"。</div>
+            <div class="chat-meta">AI</div>
+            <div class="chat-bubble">你好！我是 AI 生信助手，可以帮你检查项目状态、解释结果、建议参数，并在你确认后提交分析任务。</div>
         </div>
     </div>
+    <div id="chat-quick-actions">
+        <button class="chat-chip" onclick="useQuickPrompt('查看当前项目状态，告诉我下一步建议')">项目状态</button>
+        <button class="chat-chip" onclick="useQuickPrompt('列出当前可用分析模块，并按单细胞和 Bulk 分组')">可用模块</button>
+        <button class="chat-chip" onclick="useQuickPrompt('检查当前 h5ad 的聚类、嵌入和注释列')">检查 h5ad</button>
+        <button class="chat-chip" onclick="useQuickPrompt('帮我规划一个目标驱动的参数优化实验，但先不要执行')">参数优化方案</button>
+        <button class="chat-chip" onclick="useQuickPrompt('请先读取当前数据特征，为下一步分析推荐方法、分组和完整参数，说明理由与备选，先不要执行')">方法与参数推荐</button>
+    </div>
     <div id="chat-input-area">
-        <input type="text" id="chat-input" placeholder="输入消息..." onkeydown="if(event.key==='Enter')sendChat()">
-        <button onclick="sendChat()">发送</button>
+        <textarea id="chat-input" rows="1" placeholder="输入需求，Shift+Enter 换行..." onkeydown="handleChatKeydown(event)" oninput="autosizeChatInput()"></textarea>
+        <button id="chat-send-btn" onclick="sendChat()">发送</button>
     </div>
 </div>
 
@@ -442,10 +495,78 @@ function loadAdataInfo() {
 
 <script>
 const PROJECT_ID = '{{ project.id }}';
+let _chatLoaded = false;
+let _chatBusy = false;
 
 function toggleChat() {
     const panel = document.getElementById('chat-panel');
-    panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
+    const willOpen = panel.style.display === 'none';
+    panel.style.display = willOpen ? 'flex' : 'none';
+    if (willOpen && !_chatLoaded) {
+        _chatLoaded = true;
+        loadChatConfig();
+        loadChatHistory();
+        document.getElementById('chat-input').focus();
+    }
+}
+
+function handleChatKeydown(event) {
+    if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        sendChat();
+    }
+}
+
+function autosizeChatInput() {
+    const input = document.getElementById('chat-input');
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 110) + 'px';
+}
+
+function useQuickPrompt(text) {
+    const input = document.getElementById('chat-input');
+    input.value = text;
+    autosizeChatInput();
+    input.focus();
+}
+
+function setChatStatus(kind, text) {
+    const dot = document.getElementById('chat-status-dot');
+    const subtitle = document.getElementById('chat-subtitle');
+    dot.className = kind || '';
+    subtitle.textContent = text;
+}
+
+async function loadChatConfig() {
+    try {
+        const r = await fetch('/api/chat/config');
+        const data = await r.json();
+        if (!r.ok || data.error) {
+            setChatStatus('error', data.error || 'AI 配置读取失败');
+            return;
+        }
+        if (!data.configured) {
+            setChatStatus('error', 'AI API Key 未配置');
+            return;
+        }
+        setChatStatus('ok', data.provider + ' | ' + data.model);
+    } catch (e) {
+        setChatStatus('error', 'AI 配置读取失败: ' + e.message);
+    }
+}
+
+async function loadChatHistory() {
+    try {
+        const r = await fetch('/api/chat/history/' + PROJECT_ID);
+        const data = await r.json();
+        if (!r.ok || data.error || !data.messages || data.messages.length === 0) return;
+        document.getElementById('chat-messages').innerHTML = '';
+        for (const msg of data.messages) {
+            addMessage(msg.role, msg.content || '');
+        }
+    } catch (e) {
+        addSystemNotice('历史记录加载失败: ' + e.message);
+    }
 }
 
 function toggleAgentPanel() {
@@ -650,33 +771,57 @@ async function deleteBranch(branchId) {
 // 初始加载 agent 状态
 setTimeout(loadAgentState, 500);
 
+function formatChatTime() {
+    return new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+}
+
 function addMessage(role, content) {
     const div = document.createElement('div');
     div.className = 'chat-msg ' + role;
-    div.innerHTML = '<div class="chat-bubble">' + escapeHtml(content) + '</div>';
+    const label = role === 'user' ? '你' : (role === 'system' ? '系统' : 'AI');
+    div.innerHTML =
+        '<div class="chat-meta">' + label + ' · ' + formatChatTime() + '</div>' +
+        '<div class="chat-bubble">' + escapeHtml(content) + '</div>';
     document.getElementById('chat-messages').appendChild(div);
     div.scrollIntoView({ behavior: 'smooth' });
+}
+
+function addSystemNotice(content) {
+    addMessage('system', content);
 }
 
 function addToolCall(name, args) {
     const div = document.createElement('div');
     div.className = 'chat-tool-call';
-    const argStr = Object.keys(args).length > 0 ? ': ' + JSON.stringify(args) : '';
-    div.textContent = '🔧 调用: ' + name + argStr;
+    const argStr = Object.keys(args || {}).length > 0 ? ': ' + JSON.stringify(args) : '';
+    div.textContent = '工具调用: ' + name + argStr;
     document.getElementById('chat-messages').appendChild(div);
+}
+
+function describeTool(toolName) {
+    const labels = {
+        run_analysis: '会提交新的分析任务，需要你确认后执行。',
+        propose_parameter_sweep: '会生成候选参数方案，不会直接运行分析。',
+        run_parameter_sweep: '会启动后台参数搜索任务，可能耗时较长。',
+        start_goal_agent: '会创建目标驱动 Agent 会话并准备候选方案。',
+        continue_goal_agent: '会继续已有 Agent 目标，可能采纳约束或触发新候选。'
+    };
+    return labels[toolName] || '该操作需要你确认后执行。';
 }
 
 function addProposedTool(tool, index) {
     const div = document.createElement('div');
     div.className = 'proposed-tool-card';
+    div.id = 'proposed-tool-' + index;
     const paramStr = Object.keys(tool.args || {}).length > 0
         ? JSON.stringify(tool.args, null, 2) : '（默认参数）';
     div.innerHTML =
-        '<div class="tool-title">📋 AI 建议执行: ' + escapeHtml(tool.name) + '</div>' +
+        '<div class="tool-title">AI 建议执行: ' + escapeHtml(tool.name) + '</div>' +
+        '<div class="tool-desc">' + escapeHtml(describeTool(tool.name)) + '</div>' +
         '<div class="tool-params"><pre style="margin:0;font-size:11px;white-space:pre-wrap;">' + escapeHtml(paramStr) + '</pre></div>' +
         '<div class="tool-actions">' +
-        '<button class="btn-confirm" onclick="approveTool(\'' + escapeHtml(tool.name) + '\', ' + index + ')">✓ 确认执行</button>' +
-        '<button class="btn-reject" onclick="this.closest(\'.proposed-tool-card\').remove()">✕ 取消</button>' +
+        '<button class="btn-confirm" onclick="approveTool(' + index + ')">确认执行</button>' +
+        '<button class="btn-reject" onclick="this.closest(\'.proposed-tool-card\').remove()">取消</button>' +
         '</div>';
     document.getElementById('chat-messages').appendChild(div);
     div.scrollIntoView({ behavior: 'smooth' });
@@ -684,13 +829,13 @@ function addProposedTool(tool, index) {
 
 let _pendingTools = [];
 
-async function approveTool(toolName, index) {
+async function approveTool(index) {
     const tool = _pendingTools[index];
     if (!tool) return;
 
-    const cards = document.querySelectorAll('.proposed-tool-card');
-    if (cards[index]) {
-        cards[index].querySelector('.tool-actions').innerHTML = '<span style="color:#1a237e;">⏳ 执行中...</span>';
+    const card = document.getElementById('proposed-tool-' + index);
+    if (card) {
+        card.querySelector('.tool-actions').innerHTML = '<span style="color:#1a237e;">执行中...</span>';
     }
 
     try {
@@ -707,15 +852,16 @@ async function approveTool(toolName, index) {
         if (data.error) {
             addMessage('assistant', '执行失败: ' + data.error);
         } else {
-            addMessage('assistant', '✓ 任务已提交: ' + (data.message || JSON.stringify(data)));
+            addMessage('assistant', '任务已提交: ' + (data.message || JSON.stringify(data)));
+            loadAgentState();
         }
-        if (cards[index]) cards[index].remove();
+        if (card) card.remove();
     } catch (e) {
         addMessage('assistant', '网络错误: ' + e.message);
-        if (cards[index]) {
-            cards[index].querySelector('.tool-actions').innerHTML =
-                '<button class="btn-confirm" onclick="approveTool(\'' + escapeHtml(tool.name) + '\', ' + index + ')">↻ 重试</button>' +
-                '<button class="btn-reject" onclick="this.closest(\'.proposed-tool-card\').remove()">✕ 取消</button>';
+        if (card) {
+            card.querySelector('.tool-actions').innerHTML =
+                '<button class="btn-confirm" onclick="approveTool(' + index + ')">重试</button>' +
+                '<button class="btn-reject" onclick="this.closest(\'.proposed-tool-card\').remove()">取消</button>';
         }
     }
 }
@@ -736,18 +882,27 @@ function hideTyping() {
 
 function escapeHtml(text) {
     const d = document.createElement('div');
-    d.textContent = text;
+    d.textContent = text == null ? '' : String(text);
     return d.innerHTML.replace(/\n/g, '<br>');
 }
 
+function setChatBusy(isBusy) {
+    _chatBusy = isBusy;
+    document.getElementById('chat-send-btn').disabled = isBusy;
+    document.getElementById('chat-input').disabled = isBusy;
+}
+
 async function sendChat() {
+    if (_chatBusy) return;
     const input = document.getElementById('chat-input');
     const msg = input.value.trim();
     if (!msg) return;
     input.value = '';
+    input.style.height = 'auto';
 
     addMessage('user', msg);
     showTyping();
+    setChatBusy(true);
 
     try {
         const r = await fetch('/api/chat', {
@@ -757,10 +912,17 @@ async function sendChat() {
         });
         const data = await r.json();
         hideTyping();
+        setChatBusy(false);
 
         if (data.error) {
             addMessage('assistant', '错误: ' + data.error);
+            setChatStatus('error', 'AI 调用失败');
             return;
+        }
+
+        if (data.config && data.config.model) {
+            const countText = data.config.message_count ? ' | ' + data.config.message_count + ' 条上下文' : '';
+            setChatStatus('ok', data.config.model + countText);
         }
 
         // 显示工具调用
@@ -772,10 +934,13 @@ async function sendChat() {
 
         // 显示待确认的工具调用
         if (data.proposed_tools && data.proposed_tools.length > 0) {
+            document.querySelectorAll('.proposed-tool-card').forEach(el => el.remove());
             _pendingTools = data.proposed_tools;
             for (let i = 0; i < data.proposed_tools.length; i++) {
                 addProposedTool(data.proposed_tools[i], i);
             }
+        } else {
+            _pendingTools = [];
         }
 
         // 显示回复
@@ -784,14 +949,20 @@ async function sendChat() {
         }
     } catch (e) {
         hideTyping();
+        setChatBusy(false);
+        setChatStatus('error', '网络错误');
         addMessage('assistant', '网络错误: ' + e.message);
     }
 }
 
 async function clearChat() {
-    await fetch('/api/chat/clear/' + PROJECT_ID, { method: 'POST' });
-    document.getElementById('chat-messages').innerHTML =
-        '<div class="chat-msg assistant"><div class="chat-bubble">对话已清空。有什么可以帮你的？</div></div>';
+    try {
+        await fetch('/api/chat/clear/' + PROJECT_ID, { method: 'POST' });
+        document.getElementById('chat-messages').innerHTML = '';
+        addMessage('assistant', '对话已清空。可以直接说你的分析目标，我会先检查项目状态，再给出下一步建议。');
+    } catch (e) {
+        addSystemNotice('清空失败: ' + e.message);
+    }
 }
 </script>
 {% endblock %}

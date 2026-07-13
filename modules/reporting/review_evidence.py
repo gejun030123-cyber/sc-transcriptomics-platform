@@ -236,3 +236,34 @@ def build_review_evidence(module_name, summary, result_files=None):
         "status": _overall(checks),
     })
     return card
+
+
+def build_result_interpretation(module_name, summary, result_files=None):
+    """Create concise, evidence-bound interpretation for every result page."""
+    summary = summary or {}
+    evidence = build_review_evidence(module_name, summary, result_files)
+    display = {
+        'qc': '质控', 'normalize': '标准化', 'hvg': '高变基因', 'dimred': '降维',
+        'batch_correct': '批次校正', 'clustering': '聚类', 'subcluster': '子簇精细分析',
+        'annotation': '细胞注释', 'deg': '差异表达', 'trajectory': '轨迹分析',
+        'proportion': '细胞比例', 'cell_communication': '细胞通讯',
+    }.get(module_name, module_name)
+    if evidence:
+        cautions = [check['message'] for check in evidence['checks'] if check['status'] != 'pass']
+        passes = [check['message'] for check in evidence['checks'] if check['status'] == 'pass']
+        return {
+            'title': '结果解读',
+            'conclusion': f'已完成{display}；当前结果应结合下方证据图和参数进行生物学解释。',
+            'evidence': passes[:2],
+            'cautions': cautions[:2],
+            'next_step': '优先查看标记为“需复核”或“警告”的项目，再决定是否调整参数或进入下一步。',
+        }
+    n_cells = summary.get('n_cells') or summary.get('n_samples')
+    count_text = f'输出包含 {n_cells} 个分析对象。' if n_cells is not None else '已生成该步骤的结果文件。'
+    return {
+        'title': '结果解读',
+        'conclusion': f'已完成{display}；{count_text}',
+        'evidence': [],
+        'cautions': ['该模块暂无自动判定阈值，请结合图表、参数和实验设计解读。'],
+        'next_step': '确认结果符合预期后再进入下游分析。',
+    }

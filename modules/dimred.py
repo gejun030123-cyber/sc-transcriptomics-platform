@@ -100,6 +100,20 @@ class DimredAnalysis(BaseAnalysis):
                 fpath = os.path.join(plots_dir, f'dimred_umap_{color_key}.json')
                 with open(fpath, 'w') as f: f.write(fig_json)
                 result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'UMAP by {color_key}'})
+                try:
+                    fig_static = sc.pl.umap(
+                        adata, color=color_key, title=f'UMAP colored by {color_key}',
+                        show=False, return_fig=True, frameon=False,
+                        size=self.get_viz_params()['umap_point_size'],
+                    )
+                    result_files.extend(self.save_matplotlib_figure(
+                        fig_static, plots_dir, f'dimred_umap_{color_key}.png',
+                        'umap', f'UMAP by {color_key}'
+                    ))
+                    import matplotlib.pyplot as plt
+                    plt.close(fig_static)
+                except Exception as exc:
+                    self.progress(-1, f'静态 UMAP 导出失败（不影响交互图）：{exc}')
 
         # PCA scatter for early detection of outliers and batch/sample structure
         if self.params.get('show_pca_scatter', True) and 'X_pca' in adata.obsm:

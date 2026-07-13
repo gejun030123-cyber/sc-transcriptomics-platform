@@ -1,5 +1,5 @@
 # modules/ai_adapter.py
-"""AI 对话适配器 — 支持 Anthropic (Claude) 和 OpenAI 兼容 API"""
+"""AI 对话适配器 — 支持 Anthropic Messages 和 OpenAI 兼容 API"""
 import json
 from config import Config
 
@@ -18,7 +18,7 @@ TOOLS_ANTHROPIC = [
                 },
                 "input_path": {
                     "type": "string",
-                    "description": "输入数据文件路径（h5ad/csv）。留空则自动查找最新可用文件。"
+                    "description": "输入数据文件路径（h5ad/csv/tsv/txt/xlsx/xls）。留空则自动查找最新可用文件。"
                 },
                 "params": {
                     "type": "object",
@@ -67,6 +67,28 @@ TOOLS_ANTHROPIC = [
         }
     },
     {
+        "name": "recommend_analysis_config",
+        "description": "[只读] 根据实际输入数据的 count/连续表达类型、样本数、分组结构、已完成步骤和用户目标，推荐分析方法与参数。返回数据证据、推荐值、理由、替代方案、前置步骤和风险；不执行分析。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "module_name": {
+                    "type": "string",
+                    "description": "要决策的分析模块，如 bulk_normalize、bulk_deg、clustering、batch_correct"
+                },
+                "input_path": {
+                    "type": "string",
+                    "description": "可选输入路径。留空时按模块自动选择原始上传或最新中间文件"
+                },
+                "objective": {
+                    "type": "string",
+                    "description": "用户目标或约束，如保留 B/En 差异、优先发现稀有细胞、避免过度校正"
+                }
+            },
+            "required": ["module_name"]
+        }
+    },
+    {
         "name": "inspect_analysis_state",
         "description": "[只读] 检查项目当前分析状态：最新 h5ad、已完成任务、可用聚类键、可用嵌入、细胞数等。用于了解分析进展。",
         "input_schema": {
@@ -77,13 +99,13 @@ TOOLS_ANTHROPIC = [
     },
     {
         "name": "inspect_adata",
-        "description": "[只读] 检查指定 AnnData 文件的详细结构：obs/var 列、嵌入键、聚类键、数据维度。",
+        "description": "[只读] 检查 AnnData 或 Bulk 表达矩阵的结构：样本数、基因数、样本名及可用元数据。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "adata_path": {
                     "type": "string",
-                    "description": "h5ad 文件路径。留空则自动查找最新文件。"
+                    "description": "h5ad 或 Bulk 表格文件路径。留空则自动查找最新文件。"
                 }
             },
             "required": []
@@ -261,9 +283,10 @@ AUTO_EXEC_TOOLS = {
     'get_project_status', 'get_task_results', 'list_modules',
     'inspect_analysis_state', 'inspect_adata', 'get_cluster_summary',
     'score_cell_type_signature', 'list_builtin_markers',
+    'recommend_analysis_config', 'propose_parameter_sweep',
 }
 # 需要用户确认的工具
-CONFIRM_TOOLS = {'run_analysis', 'propose_parameter_sweep', 'run_parameter_sweep',
+CONFIRM_TOOLS = {'run_analysis', 'run_parameter_sweep',
                  'start_goal_agent', 'continue_goal_agent'}
 # 注：accept_branch 仅通过前端 Branch API 调用（POST /api/branches/<id>/accept），
 # 不作为 AI 工具暴露，确保用户在前端显式操作采纳。
@@ -275,7 +298,7 @@ SYSTEM_PROMPT = """你是一个生信分析助手，帮助用户进行 RNA-seq �
 ## 你的能力
 1. **自然语言触发分析**：用户说"对 hmc3 和 ctrl 做差异分析"，你调用 run_analysis(module_name="bulk_deg", params={{...}})
 2. **结果解读**：用户问"哪些基因在所有药物中共同上调？"，你调用 get_task_results 查看结果并解读
-3. **参数建议**：用户问"用哪个方法好？"，你根据数据情况给出建议
+3. **方法与参数决策**：调用 recommend_analysis_config，用实际数据画像区分 raw counts、连续表达值和已 log 数据，再推荐方法、参数和分组
 4. **项目概览**：用户问"现在分析到哪一步了？"，你调用 get_project_status 了解情况
 5. **分析状态检查**：使用 inspect_analysis_state 查看当前聚类/嵌入/注释信息
 6. **细胞类型打分**：使用 score_cell_type_signature 对已有分群进行 marker 评分
@@ -288,6 +311,14 @@ SYSTEM_PROMPT = """你是一个生信分析助手，帮助用户进行 RNA-seq �
 3. 用户确认后，调用 run_parameter_sweep 执行搜索
 4. 展示结果：最佳候选、评分、推荐 cluster
 5. 用户选择采纳 branch 或继续调整
+
+## 方法与参数推进流程
+当用户询问“怎么分析”“用什么方法”“帮我设置参数”或要求运行新模块时：
+1. 先调用 recommend_analysis_config(module_name, objective)，不得只凭文件名或通用经验猜测。
+2. 向用户展示：数据类型证据、推荐方法、完整参数、分组/比较、替代方法、前置步骤与风险。
+3. 如 should_run=false，停止提交并说明缺少的元数据或不适用原因。
+4. 只有用户确认后，才使用 recommend_analysis_config 返回的 input_path 和 recommended_params 调用 run_analysis。
+5. 不得把 DESeq2/edgeR 用于 FPKM/TPM 连续值；不得对已 log 数据重复标准化；不得在无时间列时推荐时序分析。
 
 ## 可用模块（完整列表）
 单细胞：qc, normalize, hvg, dimred, batch_correct, clustering, qc_reassess, annotation, deg, trajectory, proportion, cell_communication
@@ -308,6 +339,30 @@ def _is_anthropic():
     return 'anthropic' in url or 'claude' in url
 
 
+def _provider_name():
+    url = Config.AI_API_URL.lower()
+    if 'deepseek' in url:
+        return 'deepseek-anthropic' if _is_anthropic() else 'deepseek-openai'
+    return 'anthropic' if _is_anthropic() else 'openai-compatible'
+
+
+def _safe_api_url():
+    """Return API URL without query strings for display/logging."""
+    return Config.AI_API_URL.split('?', 1)[0]
+
+
+def get_ai_config_status():
+    """Expose non-secret AI configuration status for UI diagnostics."""
+    return {
+        "configured": bool(Config.AI_API_KEY),
+        "provider": _provider_name(),
+        "mode": "anthropic_messages" if _is_anthropic() else "openai_chat_completions",
+        "api_url": _safe_api_url(),
+        "model": Config.AI_MODEL,
+        "requires_local_token": bool(Config.AI_API_TOKEN),
+    }
+
+
 def chat(messages, project_id=None):
     """
     与 LLM 对话，支持工具调用循环。自动检测 Anthropic / OpenAI 格式。
@@ -321,15 +376,12 @@ def chat(messages, project_id=None):
 
 
 def _chat_anthropic(messages, project_id, tool_calls_log):
-    """Anthropic API 格式对话"""
-    import anthropic
-    from modules.ai_tools import execute_tool
+    """Anthropic Messages API 格式对话.
 
-    client = anthropic.Anthropic(
-        base_url=Config.AI_API_URL,
-        api_key=Config.AI_API_KEY,
-        timeout=60.0,
-    )
+    这里直接用 HTTP 调用，避免 DeepSeek Anthropic-compatible endpoint
+    依赖本地安装 anthropic SDK。
+    """
+    from modules.ai_tools import execute_tool
 
     proposed_tools = []
 
@@ -348,25 +400,20 @@ def _chat_anthropic(messages, project_id, tool_calls_log):
 
     # 第一次尝试：带 tools 调用
     try:
-        response = client.messages.create(
-            model=Config.AI_MODEL,
-            system=SYSTEM_PROMPT,
-            messages=api_messages,
-            tools=TOOLS_ANTHROPIC,
-            max_tokens=2048,
-        )
+        response = _anthropic_messages_create(api_messages)
+        content_blocks = response.get("content", [])
 
         has_tool_use = False
         tool_results = []
         text_content = ""
 
-        for block in response.content:
-            if block.type == "text":
-                text_content += block.text
-            elif block.type == "tool_use":
+        for block in content_blocks:
+            if block.get("type") == "text":
+                text_content += block.get("text", "")
+            elif block.get("type") == "tool_use":
                 has_tool_use = True
-                func_name = block.name
-                args = block.input if isinstance(block.input, dict) else {}
+                func_name = block.get("name", "")
+                args = block.get("input") if isinstance(block.get("input"), dict) else {}
                 tool_calls_log.append({"name": func_name, "args": args})
                 if func_name in CONFIRM_TOOLS:
                     proposed_tools.append({"name": func_name, "args": args})
@@ -376,32 +423,27 @@ def _chat_anthropic(messages, project_id, tool_calls_log):
                     result_str = json.dumps(result, ensure_ascii=False, default=str)
                 tool_results.append({
                     "type": "tool_result",
-                    "tool_use_id": block.id,
+                    "tool_use_id": block.get("id"),
                     "content": result_str,
                 })
 
         if has_tool_use:
             # 工具调用成功，继续对话循环
-            api_messages.append({"role": "assistant", "content": response.content})
+            api_messages.append({"role": "assistant", "content": content_blocks})
             api_messages.append({"role": "user", "content": tool_results})
             for _ in range(4):
-                response = client.messages.create(
-                    model=Config.AI_MODEL,
-                    system=SYSTEM_PROMPT,
-                    messages=api_messages,
-                    tools=TOOLS_ANTHROPIC,
-                    max_tokens=2048,
-                )
+                response = _anthropic_messages_create(api_messages)
+                content_blocks = response.get("content", [])
                 new_text = ""
                 new_tool_results = []
                 has_more_tools = False
-                for block in response.content:
-                    if block.type == "text":
-                        new_text += block.text
-                    elif block.type == "tool_use":
+                for block in content_blocks:
+                    if block.get("type") == "text":
+                        new_text += block.get("text", "")
+                    elif block.get("type") == "tool_use":
                         has_more_tools = True
-                        fn = block.name
-                        ar = block.input if isinstance(block.input, dict) else {}
+                        fn = block.get("name", "")
+                        ar = block.get("input") if isinstance(block.get("input"), dict) else {}
                         tool_calls_log.append({"name": fn, "args": ar})
                         if fn in CONFIRM_TOOLS:
                             proposed_tools.append({"name": fn, "args": ar})
@@ -409,11 +451,11 @@ def _chat_anthropic(messages, project_id, tool_calls_log):
                         else:
                             r = execute_tool(fn, ar, project_id)
                             rs = json.dumps(r, ensure_ascii=False, default=str)
-                        new_tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": rs})
+                        new_tool_results.append({"type": "tool_result", "tool_use_id": block.get("id"), "content": rs})
                 if not has_more_tools:
                     all_msgs = messages + [{"role": "assistant", "content": new_text}]
                     return {"reply": new_text, "tool_calls": tool_calls_log, "messages": all_msgs, "proposed_tools": proposed_tools}
-                api_messages.append({"role": "assistant", "content": response.content})
+                api_messages.append({"role": "assistant", "content": content_blocks})
                 api_messages.append({"role": "user", "content": new_tool_results})
 
             reply_text = new_text or "工具调用已执行，但回复生成超出轮次限制。请查看任务状态了解结果。"
@@ -426,6 +468,46 @@ def _chat_anthropic(messages, project_id, tool_calls_log):
 
     except Exception as e:
         return {"reply": f"AI 调用失败: {str(e)}", "tool_calls": tool_calls_log, "messages": messages, "proposed_tools": proposed_tools}
+
+
+def _anthropic_messages_endpoint():
+    base_url = Config.AI_API_URL.rstrip("/")
+    if base_url.endswith("/v1/messages") or base_url.endswith("/messages"):
+        return base_url
+    return base_url + "/v1/messages"
+
+
+def _anthropic_messages_create(api_messages):
+    import requests
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": Config.AI_API_KEY,
+        "Authorization": f"Bearer {Config.AI_API_KEY}",
+        "anthropic-version": "2023-06-01",
+    }
+    payload = {
+        "model": Config.AI_MODEL,
+        "system": SYSTEM_PROMPT,
+        "messages": api_messages,
+        "tools": TOOLS_ANTHROPIC,
+        "max_tokens": 2048,
+    }
+    response = requests.post(
+        _anthropic_messages_endpoint(),
+        headers=headers,
+        json=payload,
+        timeout=60.0,
+    )
+    if response.status_code >= 400:
+        detail = response.text[:500]
+        try:
+            body = response.json()
+            detail = body.get("error", body)
+        except ValueError:
+            pass
+        raise RuntimeError(f"Anthropic-compatible API 返回 {response.status_code}: {detail}")
+    return response.json()
 
 
 def _chat_openai(messages, project_id, tool_calls_log):

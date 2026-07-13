@@ -20,7 +20,7 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         import plotly.graph_objects as go
 
         self.progress(5, "加载数据...")
-        from modules.io_utils import read_expression_matrix
+        from modules.io_utils import read_expression_matrix, infer_expression_measurement
         adata = read_expression_matrix(input_path)
 
         method = self.params.get('method', 'deseq2')
@@ -31,15 +31,28 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         min_expr_samples = int(self.params.get('min_expr_samples', 3))
         max_zero_pct = float(self.params.get('max_zero_pct', 0))
 
+        input_measurement = infer_expression_measurement(adata, input_path)
+        count_only_methods = {'deseq2', 'tmm', 'cpm', 'vst', 'rlog'}
+        if input_measurement == 'continuous_expression' and method in count_only_methods:
+            raise ValueError(
+                f"检测到 FPKM/TPM 类连续表达值，{method} 仅适用于原始整数 counts。"
+                "请使用 log2；仅在确认样本分布必须强制一致时使用 log2_quantile。"
+            )
+
         # 低表达基因前置过滤
         n_genes_before = adata.n_vars
+        # CPM 是 count 数据的文库大小标准化单位；对 FPKM/TPM 直接用
+        # CPM 过滤会扭曲其含义，因此连续表达值只按原始表达阈值过滤。
         if min_expr_samples > 0:
             from scipy import sparse as _sp
             raw_for_filter = adata.X.toarray() if _sp.issparse(adata.X) else np.asarray(adata.X)
-            lib_for_filter = raw_for_filter.sum(axis=1, keepdims=True)
-            lib_for_filter[lib_for_filter == 0] = 1
-            cpm_check = raw_for_filter / lib_for_filter * 1e6
-            n_expr = np.array((cpm_check >= min_expr_value).sum(axis=0)).flatten()
+            if input_measurement == 'raw_counts':
+                lib_for_filter = raw_for_filter.sum(axis=1, keepdims=True)
+                lib_for_filter[lib_for_filter == 0] = 1
+                expr_for_filter = raw_for_filter / lib_for_filter * 1e6
+            else:
+                expr_for_filter = raw_for_filter
+            n_expr = np.array((expr_for_filter >= min_expr_value).sum(axis=0)).flatten()
             gene_mask = n_expr >= min_expr_samples
             if max_zero_pct > 0:
                 zero_pct = np.array((raw_for_filter == 0).sum(axis=0)).flatten() / adata.n_obs * 100
@@ -67,12 +80,16 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         elif method == 'tmm':
             tmm_factors = _tmm_normalize(raw_counts)
             tmm_factors = np.where(tmm_factors > 0, tmm_factors, 1.0)
-            adata.obs['size_factor'] = tmm_factors
-            norm_counts = raw_counts / tmm_factors[:, None]
-            adata.layers['normalized'] = norm_counts
-            adata.X = np.log2(norm_counts + 1)
+            lib_sizes = raw_counts.sum(axis=1)
+            effective_lib_sizes = lib_sizes * tmm_factors
+            effective_lib_sizes = np.where(effective_lib_sizes > 0, effective_lib_sizes, 1.0)
+            adata.obs['tmm_factor'] = tmm_factors
+            adata.obs['effective_library_size'] = effective_lib_sizes
+            cpm_tmm = raw_counts / effective_lib_sizes[:, None] * 1e6
+            adata.layers['normalized'] = cpm_tmm
+            adata.X = np.log2(cpm_tmm + 1)
             adata.X = _sanitize(adata.X, 'tmm X')
-            adata.layers['normalized'] = _sanitize(adata.layers['normalized'], 'tmm normalized')
+            adata.layers['normalized'] = _sanitize(adata.layers['normalized'], 'tmm CPM normalized')
 
         elif method == 'cpm':
             cpm_target = float(self.params.get('cpm_target', 1e6))
@@ -82,6 +99,13 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             adata.X = np.log2(cpm + 1)
             adata.X = _sanitize(adata.X, 'cpm X')
             adata.layers['normalized'] = _sanitize(adata.layers['normalized'], 'cpm normalized')
+
+        elif method == 'log2':
+            # FPKM/TPM 等已按文库归一化的连续表达值：仅做 log2 变换，
+            # 保留样本间真实的整体分布差异。
+            adata.layers['normalized'] = raw_counts.copy()
+            adata.X = np.log2(raw_counts + 1)
+            adata.X = _sanitize(adata.X, 'log2 X')
 
         elif method == 'log2_quantile':
             log_counts = np.log2(raw_counts + 1)
@@ -115,15 +139,19 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             adata.layers['normalized'] = rlog_vals
 
         else:
-            raise ValueError(f"未知标准化方法: {method}，支持: deseq2/tmm/cpm/log2_quantile/vst/rlog")
+            raise ValueError(f"未知标准化方法: {method}，支持: deseq2/tmm/cpm/log2/log2_quantile/vst/rlog")
 
         # 统一输出标记
         linear_layer_methods = ('deseq2', 'tmm', 'cpm')
         adata.uns['normalization'] = {
             'method': method,
-            'is_log_transformed': method in ('deseq2', 'tmm', 'cpm', 'vst', 'log2_quantile', 'rlog'),
-            'X_scale': 'log2(CPM+1)' if method in linear_layer_methods else ('log2(normed+0.5)' if method in ('vst', 'rlog') else 'quantile-normalized'),
-            'normalized_layer_scale': 'linear' if method in linear_layer_methods else ('same as X' if method in ('vst', 'rlog') else 'linear(2^X-1)'),
+            'is_log_transformed': method in ('deseq2', 'tmm', 'cpm', 'vst', 'log2', 'log2_quantile', 'rlog'),
+            'X_scale': ('log2(TMM-CPM+1)' if method == 'tmm' else
+                        'log2(CPM+1)' if method in linear_layer_methods else
+                        'log2(input+1)' if method == 'log2' else
+                        ('log2(normed+0.5)' if method in ('vst', 'rlog') else 'quantile-normalized')),
+            'normalized_layer_scale': ('linear' if method in linear_layer_methods or method == 'log2' else
+                                       ('same as X' if method in ('vst', 'rlog') else 'linear(2^X-1)')),
             'note': '近似实现：log2(normed + 0.5)，非 DESeq2 原始 VST/rlog' if method in ('vst', 'rlog') else '',
         }
 
@@ -153,11 +181,12 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         with open(fpath, 'w') as f: f.write(fig.to_json(engine="json"))
         result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': '文库大小对比'})
 
-        if method in ('deseq2', 'tmm') and 'size_factor' in adata.obs.columns:
+        if method in ('deseq2', 'tmm') and ('size_factor' in adata.obs.columns or 'tmm_factor' in adata.obs.columns):
+            factor_col = 'tmm_factor' if method == 'tmm' else 'size_factor'
             fig_sf = go.Figure()
-            fig_sf.add_trace(go.Bar(x=adata.obs.index.tolist(), y=adata.obs['size_factor'].values,
+            fig_sf.add_trace(go.Bar(x=adata.obs.index.tolist(), y=adata.obs[factor_col].values,
                                    marker_color='#1a237e'))
-            fig_sf.update_layout(title=f'{method.upper()} Size Factors', yaxis_title='Size Factor',
+            fig_sf.update_layout(title=f'{method.upper()} Normalization Factors', yaxis_title='Factor',
                                 plot_bgcolor='white', width=600, height=300)
             fpath = os.path.join(plots_dir, 'bulk_norm_sizefactors.json')
             with open(fpath, 'w') as f: f.write(fig_sf.to_json(engine="json"))
@@ -216,17 +245,26 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             'result_files': result_files,
             'summary': {
                 'method': method,
+                'input_measurement': input_measurement,
                 'n_samples': adata.n_obs,
                 'n_genes_before_filter': n_genes_before,
                 'n_genes_after_filter': adata.n_vars,
                 'genes_filtered': n_genes_before - adata.n_vars,
                 'median_size_factor': round(float(adata.obs['size_factor'].median()), 3) if 'size_factor' in adata.obs.columns else None,
+                'median_tmm_factor': round(float(adata.obs['tmm_factor'].median()), 3) if 'tmm_factor' in adata.obs.columns else None,
                 'is_log_transformed': adata.uns.get('normalization', {}).get('is_log_transformed', True),
             }
         }
 
 
 # --- 辅助函数 ---
+
+
+def _infer_measurement_type(matrix, input_path=''):
+    """Backward-compatible matrix-only classifier used by older callers/tests."""
+    from anndata import AnnData
+    from modules.io_utils import infer_expression_measurement
+    return infer_expression_measurement(AnnData(X=matrix), input_path)
 
 
 def _tmm_normalize(counts):

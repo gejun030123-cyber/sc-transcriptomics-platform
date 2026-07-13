@@ -52,7 +52,7 @@ class TestAnnotationMarkers:
     def test_marker_sets_keys(self):
         """MARKER_SETS 包含内置注释基因集。"""
         from modules.annotation import MARKER_SETS
-        assert set(MARKER_SETS.keys()) == {'TME', 'Immune', 'Blood', 'PBMC'}
+        assert set(MARKER_SETS.keys()) == {'Universal', 'TME', 'Immune', 'Blood', 'PBMC'}
 
     def test_tme_markers_not_empty(self):
         """DEFAULT_TME_MARKERS 中每个细胞类型的基因列表非空。"""
@@ -69,6 +69,16 @@ class TestAnnotationMarkers:
                     assert isinstance(gene, str), (
                         f"{set_name}/{cell_type} 中存在非字符串基因: {gene!r}"
                     )
+
+    def test_marker_resolution_is_case_insensitive_and_applies_coverage_gate(self):
+        """鼠/人符号大小写差异应匹配，低覆盖类型不可参与打分。"""
+        from modules.annotation import resolve_marker_genes
+        usable, coverage = resolve_marker_genes(
+            {'T': ['CD3D', 'TRAC'], 'B': ['MS4A1', 'CD79A']},
+            ['Cd3d', 'Trac', 'Ms4a1'], min_markers_per_type=2,
+        )
+        assert usable == {'T': ['Cd3d', 'Trac']}
+        assert coverage['B'] == {'matched': 1, 'total': 2}
 
 
 # ============================================================

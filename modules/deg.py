@@ -182,17 +182,11 @@ class DEGAnalysis(BaseAnalysis):
                 if top_genes_list:
                     sc.tl.dendrogram(adata, groupby=groupby)
                     fig_dot = sc.pl.dotplot(adata, var_names=top_genes_list, groupby=groupby, return_fig=True)
-                    import io, base64
-                    buf = io.BytesIO()
-                    fig_dot.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+                    result_files.extend(self.save_matplotlib_figure(
+                        fig_dot, plots_dir, 'deg_dotplot.png', 'dotplot', dotplot_label
+                    ))
                     import matplotlib.pyplot as plt
                     plt.close('all')
-                    buf.seek(0)
-                    img_b64 = base64.b64encode(buf.read()).decode()
-                    fpath = os.path.join(plots_dir, 'deg_dotplot.json')
-                    with open(fpath, 'w') as f:
-                        json.dump({'data': [{'type': 'image', 'source': f'data:image/png;base64,{img_b64}', 'xref': 'paper', 'yref': 'paper', 'x': 0, 'y': 1, 'sizex': 1, 'sizey': 1, 'sizing': 'stretch'}], 'layout': {'width': 900, 'height': 500, 'title': 'DEG Dotplot'}}, f)
-                    result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'dotplot', 'label': dotplot_label})
             except Exception as e:
                 self.progress(-1, f"DEG dotplot generation failed: {e}")
 

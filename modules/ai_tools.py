@@ -5,6 +5,41 @@ import json
 from config import Config
 
 
+BULK_UPLOAD_EXTENSIONS = ('.h5ad', '.csv', '.txt', '.tsv', '.xlsx', '.xls')
+
+
+def _latest_bulk_upload(project_id):
+    """Return the newest supported Bulk upload, or None."""
+    uploads_dir = Config.uploads_dir(project_id)
+    if not os.path.isdir(uploads_dir):
+        return None
+    files = [
+        os.path.join(uploads_dir, name)
+        for name in os.listdir(uploads_dir)
+        if name.lower().endswith(BULK_UPLOAD_EXTENSIONS)
+        and os.path.isfile(os.path.join(uploads_dir, name))
+    ]
+    return max(files, key=os.path.getmtime) if files else None
+
+
+def resolve_current_analysis_input(project_id, module_name=''):
+    """Resolve the current analysis input, including raw Bulk uploads."""
+    ctx = resolve_current_adata_path(project_id, allow_upload=True)
+    if ctx['path']:
+        return ctx
+    if module_name.startswith('bulk_'):
+        bulk_path = _latest_bulk_upload(project_id)
+        if bulk_path:
+            return {
+                'source': 'bulk_upload',
+                'path': bulk_path,
+                'accepted_branch_id': None,
+                'task_id': None,
+                'warnings': [],
+            }
+    return ctx
+
+
 def execute_tool(name, args, project_id):
     """执行指定的工具函数"""
     if name == "run_analysis":
@@ -15,6 +50,8 @@ def execute_tool(name, args, project_id):
         return _get_task_results(args.get("task_id", ""))
     elif name == "list_modules":
         return _list_modules(args.get("pipeline_type", "all"))
+    elif name == "recommend_analysis_config":
+        return _recommend_analysis_config(args, project_id)
     elif name == "inspect_analysis_state":
         return _inspect_analysis_state(project_id)
     elif name == "inspect_adata":
@@ -54,8 +91,8 @@ def _run_analysis(args, project_id):
     input_path = args.get("input_path", "")
     input_source = "manual"
     if not input_path:
-        # 使用统一 context resolver（优先 accepted branch > 主线任务 > intermediate > uploads）
-        ctx = resolve_current_adata_path(project_id, allow_upload=True)
+        # 优先使用已有 h5ad；Bulk 首次分析则回退到原始表格上传文件。
+        ctx = resolve_current_analysis_input(project_id, module_name)
         if ctx['path']:
             input_path = ctx['path']
             input_source = ctx['source']
@@ -80,6 +117,19 @@ def _run_analysis(args, project_id):
     params, err = _validate_analysis_params(module_name, params)
     if err:
         return {"error": f"参数校验失败: {err}"}
+
+    # AI 选择样本名自动分组时，由受信任后端注入映射；
+    # 不允许模型直接伪造下划线内部参数。
+    auto_group_fields = ('groupby', 'group_column')
+    if any(params.get(field) == '_auto_group_' for field in auto_group_fields):
+        mapping = _infer_auto_group_mapping(input_path)
+        if not mapping:
+            return {"error": "无法从样本名生成可靠的自动分组映射"}
+        params['_auto_group_mapping'] = mapping
+
+    compatibility_error = _validate_method_compatibility(module_name, input_path, params)
+    if compatibility_error:
+        return {"error": f"方法与数据不兼容: {compatibility_error}"}
 
     # 创建任务
     task = AnalysisTask(
@@ -118,9 +168,20 @@ def _get_project_status(project_id):
     # 已上传文件
     uploads_dir = os.path.join(project_dir, 'uploads')
     uploaded = []
+    uploaded_details = []
     if os.path.isdir(uploads_dir):
-        uploaded = [f for f in os.listdir(uploads_dir)
-                    if f.endswith(('.h5ad', '.csv', '.txt', '.xlsx'))]
+        uploaded = sorted(
+            f for f in os.listdir(uploads_dir)
+            if f.lower().endswith(BULK_UPLOAD_EXTENSIONS)
+        )
+        for name in uploaded:
+            path = os.path.join(uploads_dir, name)
+            uploaded_details.append({
+                "name": name,
+                "path": path,
+                "extension": os.path.splitext(name)[1].lower(),
+                "size_mb": round(os.path.getsize(path) / (1024 ** 2), 2),
+            })
 
     # 已完成任务（排除分支任务，避免候选任务污染主线列表）
     completed_tasks = []
@@ -152,6 +213,7 @@ def _get_project_status(project_id):
     return {
         "project_id": project_id,
         "uploaded_files": uploaded,
+        "uploaded_file_details": uploaded_details,
         "completed_tasks": completed_tasks,
         "intermediate_files": intermediates,
         "n_tasks_total": len(tasks),
@@ -212,6 +274,406 @@ def _list_modules(pipeline_type="all"):
         }
 
     return {"modules": modules}
+
+
+def _matrix_value_profile(matrix, n_obs, n_vars):
+    """Summarize matrix values without densifying large sparse matrices."""
+    import numpy as np
+    from scipy import sparse
+
+    total_values = max(1, int(n_obs) * int(n_vars))
+    if sparse.issparse(matrix):
+        observed = np.asarray(matrix.data, dtype=float)
+        zero_fraction = 1.0 - float(matrix.nnz) / total_values
+    else:
+        flat = np.asarray(matrix, dtype=float).reshape(-1)
+        zero_fraction = float(np.mean(flat == 0)) if flat.size else 0.0
+        observed = flat
+    if observed.size > 200000:
+        step = max(1, observed.size // 200000)
+        observed = observed[::step][:200000]
+    finite = observed[np.isfinite(observed)]
+    if finite.size:
+        integer_fraction = float(np.mean(np.isclose(finite, np.round(finite))))
+        nonnegative_fraction = float(np.mean(finite >= 0))
+        value_min = float(np.min(finite))
+        value_max = float(np.max(finite))
+        positive = finite[finite > 0]
+        median_positive = float(np.median(positive)) if positive.size else 0.0
+    else:
+        integer_fraction = 0.0
+        nonnegative_fraction = 0.0
+        value_min = value_max = median_positive = 0.0
+
+    measurement_type = (
+        'raw_counts'
+        if nonnegative_fraction >= 0.999 and integer_fraction >= 0.995
+        else 'continuous_expression'
+    )
+    return {
+        'measurement_type': measurement_type,
+        'integer_fraction': round(integer_fraction, 4),
+        'nonnegative_fraction': round(nonnegative_fraction, 4),
+        'zero_fraction': round(zero_fraction, 4),
+        'value_min': round(value_min, 4),
+        'value_max': round(value_max, 4),
+        'median_positive': round(median_positive, 4),
+    }
+
+
+def _profile_analysis_input(input_path):
+    """Build a bounded data profile for deterministic method/parameter selection."""
+    from modules.io_utils import read_expression_matrix, infer_sample_group_candidates
+
+    adata = read_expression_matrix(input_path)
+    value_profile = _matrix_value_profile(adata.X, adata.n_obs, adata.n_vars)
+    normalization = dict(adata.uns.get('normalization', {})) if hasattr(adata, 'uns') else {}
+    measurement_type = (
+        'log_transformed'
+        if normalization.get('is_log_transformed')
+        else value_profile['measurement_type']
+    )
+    source_measurement_type = value_profile['measurement_type']
+    if 'raw' in adata.layers:
+        source_measurement_type = _matrix_value_profile(
+            adata.layers['raw'], adata.n_obs, adata.n_vars)['measurement_type']
+
+    grouping_candidates = []
+    preferred_columns = [
+        'analysis_group', 'condition', 'treatment', 'group', 'sample_group',
+        'batch', 'celltype', 'cell_type', 'annotation', 'leiden',
+    ]
+    ordered_obs = preferred_columns + [c for c in adata.obs.columns if c not in preferred_columns]
+    for column in ordered_obs:
+        if column not in adata.obs.columns:
+            continue
+        series = adata.obs[column].astype(str)
+        counts = series.value_counts()
+        if 2 <= len(counts) <= 50 and int(counts.min()) >= 2:
+            grouping_candidates.append({
+                'source': 'obs',
+                'column': str(column),
+                'label': str(column),
+                'values': sorted(counts.index.tolist()),
+                'group_sizes': {str(k): int(v) for k, v in counts.sort_index().items()},
+            })
+    if not grouping_candidates:
+        for candidate in infer_sample_group_candidates(adata.obs_names.tolist()):
+            grouping_candidates.append({
+                'source': 'sample_names',
+                'column': '_auto_group_',
+                **candidate,
+            })
+
+    return {
+        'n_samples_or_cells': int(adata.n_obs),
+        'n_genes': int(adata.n_vars),
+        'measurement_type': measurement_type,
+        'source_measurement_type': source_measurement_type,
+        **{key: value for key, value in value_profile.items() if key != 'measurement_type'},
+        'normalization': normalization,
+        'obs_columns': [str(c) for c in adata.obs.columns[:50]],
+        'sample_names': [str(name) for name in adata.obs_names[:100]],
+        'grouping_candidates': grouping_candidates[:8],
+    }
+
+
+def _infer_auto_group_mapping(input_path):
+    """Return the recommended sample-name mapping for a trusted project input."""
+    from modules.io_utils import read_expression_matrix, infer_sample_group_candidates
+
+    adata = read_expression_matrix(input_path)
+    candidates = infer_sample_group_candidates(adata.obs_names.tolist())
+    return candidates[0]['mapping'] if candidates else {}
+
+
+def _validate_method_compatibility(module_name, input_path, params):
+    """Reject high-risk method/data combinations before an AI-submitted task is created."""
+    if module_name not in {'bulk_normalize', 'bulk_deg'}:
+        return None
+    try:
+        profile = _profile_analysis_input(input_path)
+    except Exception as exc:
+        return f'无法确认输入数据类型: {exc}'
+
+    measurement = profile['measurement_type']
+    source_measurement = profile.get('source_measurement_type', measurement)
+    normalization_method = str(profile.get('normalization', {}).get('method', '')).lower()
+    compromised_normalization = (
+        measurement == 'log_transformed'
+        and source_measurement == 'continuous_expression'
+        and normalization_method in {'deseq2', 'tmm', 'cpm', 'vst', 'rlog'}
+    )
+    method = str(params.get('method', '') or '').lower()
+    count_only_normalizers = {'deseq2', 'tmm', 'cpm', 'vst', 'rlog'}
+    count_only_deg = {'deseq2', 'edger', 'limma'}
+
+    if module_name == 'bulk_normalize':
+        if measurement == 'continuous_expression' and method in count_only_normalizers:
+            return f'连续 FPKM/TPM 类表达值不应使用 {method}；请选择 log2'
+        if measurement == 'log_transformed':
+            return '输入已是 log/标准化尺度，不应重复运行 bulk_normalize'
+
+    if module_name == 'bulk_deg':
+        if compromised_normalization:
+            return f'当前中间文件用 {normalization_method} 处理了连续表达值；请从原始上传文件重新运行 log2'
+        if measurement in {'continuous_expression', 'log_transformed'} and method in count_only_deg:
+            return f'{method} 需要原始整数 counts，当前为 {measurement}'
+        if measurement == 'continuous_expression' and method == 't-test':
+            return '连续表达值需先运行 bulk_normalize(method=log2)，再做 Welch t-test'
+    return None
+
+
+def _infer_reference_comparisons(group_values):
+    """Infer treatment-vs-control comparisons while preserving suffix strata."""
+    values = [str(value) for value in group_values]
+    controls = [
+        value for value in values
+        if value.lower().split('_', 1)[0] in {'ctr', 'ctrl', 'control', 'vehicle', 'untreated'}
+    ]
+    if not controls:
+        return []
+    comparisons = []
+    for value in values:
+        if value in controls:
+            continue
+        suffix = value.split('_', 1)[1] if '_' in value else ''
+        matched = next(
+            (control for control in controls
+             if (control.split('_', 1)[1] if '_' in control else '') == suffix),
+            controls[0],
+        )
+        comparisons.append(f'{value}-vs-{matched}')
+    return comparisons[:20]
+
+
+def _recommendation_input(args, project_id, module_name):
+    explicit = str(args.get('input_path', '') or '').strip()
+    if explicit:
+        return explicit, 'manual'
+    if module_name in {'bulk_qc', 'bulk_normalize'}:
+        raw_upload = _latest_bulk_upload(project_id)
+        if raw_upload:
+            return raw_upload, 'bulk_upload'
+    ctx = resolve_current_analysis_input(project_id, module_name)
+    return ctx.get('path'), ctx.get('source', 'none')
+
+
+def _recommend_analysis_config(args, project_id):
+    """[Read-only] Recommend method and parameters from the actual input profile."""
+    from modules import MODULE_REGISTRY
+    from modules.schemas import PARAM_SCHEMAS
+
+    module_name = str(args.get('module_name', '') or '').strip()
+    objective = str(args.get('objective', '') or '').strip()
+    if module_name not in MODULE_REGISTRY:
+        return {'error': f'未知模块: {module_name}'}
+
+    input_path, input_source = _recommendation_input(args, project_id, module_name)
+    if not input_path:
+        return {'error': '未找到可用输入文件'}
+    path_error = _validate_project_path(input_path, project_id)
+    if path_error:
+        return {'error': path_error}
+
+    try:
+        profile = _profile_analysis_input(input_path)
+    except Exception as exc:
+        return {'error': f'数据画像读取失败: {exc}'}
+
+    schema = PARAM_SCHEMAS.get(module_name, [])
+    params = {entry['key']: entry.get('default') for entry in schema}
+    rationale = []
+    warnings = []
+    prerequisites = []
+    alternatives = []
+    should_run = True
+
+    def recommend(key, value, reason):
+        if any(entry['key'] == key for entry in schema):
+            params[key] = value
+            rationale.append({'parameter': key, 'value': value, 'reason': reason})
+
+    groups = profile.get('grouping_candidates') or []
+    preferred_group = groups[0] if groups else None
+    group_column = preferred_group.get('column') if preferred_group else ''
+    group_sizes = preferred_group.get('group_sizes', {}) if preferred_group else {}
+    min_group_size = min(group_sizes.values()) if group_sizes else 0
+    measurement = profile['measurement_type']
+    source_measurement = profile.get('source_measurement_type', measurement)
+    normalization_method = str(profile.get('normalization', {}).get('method', '')).lower()
+    compromised_normalization = (
+        measurement == 'log_transformed'
+        and source_measurement == 'continuous_expression'
+        and normalization_method in {'deseq2', 'tmm', 'cpm', 'vst', 'rlog'}
+    )
+    n_obs = profile['n_samples_or_cells']
+    n_genes = profile['n_genes']
+
+    if module_name == 'bulk_qc':
+        if measurement == 'continuous_expression':
+            recommend('filter_strategy', 'custom', '连续表达值不适用 raw read-count 硬阈值')
+            recommend('min_counts', 0, '避免用 count 文库大小阈值错误过滤 FPKM/TPM 样本')
+            recommend('min_genes', max(100, min(5000, int(n_genes * 0.2))), '仅保留基础检测基因数质控')
+        if group_column:
+            recommend('group_column', group_column, '使用检测到的样本分组生成分组 QC')
+        recommend('detect_outliers', True, '保留 PCA 离群告警，不自动删除样本')
+
+    elif module_name == 'bulk_normalize':
+        if measurement == 'raw_counts':
+            recommend('method', 'deseq2', '近似整数 raw counts 适合中位比率归一化')
+            alternatives.append({'method': 'tmm', 'when': '样本间组成偏差明显时'})
+        elif measurement == 'continuous_expression':
+            recommend('method', 'log2', '连续 FPKM/TPM 类表达值仅做 log2(x+1)，保留真实分布差异')
+            alternatives.append({'method': 'log2_quantile', 'when': '仅在确认所有样本应具有相同分布时'})
+        else:
+            should_run = False
+            warnings.append('输入已是 log/标准化尺度，不建议重复标准化')
+        recommend('min_expr_samples', min_group_size or min(3, n_obs), '使用最小生物学分组样本数过滤低表达基因')
+
+    elif module_name == 'bulk_deg':
+        if group_column:
+            recommend('groupby', group_column, '使用数据中最可解释的分组候选')
+            comparisons = _infer_reference_comparisons(preferred_group.get('values', []))
+            if comparisons:
+                recommend('comparisons', ';'.join(comparisons), '在相同层次内将各处理与对照比较')
+        else:
+            warnings.append('未检测到可靠分组，执行前需指定 groupby/group1/group2')
+            should_run = False
+        if measurement == 'raw_counts':
+            recommend('method', 'deseq2', '原始整数 count 适用负二项分布模型')
+            alternatives.append({'method': 'edger', 'when': '小样本或组成偏差明显，并使用 raw counts'})
+        elif measurement in {'continuous_expression', 'log_transformed'}:
+            recommend('method', 't-test', '连续表达值在 log2 尺度上使用 Welch t-test')
+            if measurement == 'continuous_expression':
+                prerequisites.append({'module': 'bulk_normalize', 'params': {'method': 'log2'}, 'reason': 'DEG 前先进行 log2(x+1)'})
+                should_run = False
+        if compromised_normalization:
+            should_run = False
+            prerequisites.append({'module': 'bulk_normalize', 'params': {'method': 'log2'}, 'reason': '原始连续表达值曾被 count-only 方法处理，需从原始上传重新 log2'})
+            warnings.append(f'当前中间文件用 {normalization_method} 处理了连续表达值，不建议直接用于 DEG')
+        objective_lower = objective.lower()
+        strict = any(word in objective_lower for word in ('严格', '严谨', '验证', 'strict'))
+        exploratory = any(word in objective_lower for word in ('探索', '敏感', '召回', 'explor'))
+        fc_threshold = 2.0 if strict else (1.5 if exploratory or (min_group_size and min_group_size <= 3) else 2.0)
+        fdr_threshold = 0.01 if strict else (0.1 if exploratory else 0.05)
+        recommend('fc_threshold', fc_threshold, '根据用户目标和最小分组样本数设置效应量阈值')
+        recommend('pval_threshold', fdr_threshold, '验证目标使用严格 FDR，探索目标允许 FDR 0.1 但必须标注为候选')
+        recommend('padj_method', 'fdr_bh', '使用 Benjamini-Hochberg 控制 FDR')
+        recommend('top_n', 50, '保留足够候选基因用于图表和复核')
+
+    elif module_name == 'bulk_pca':
+        recommend('n_comps', max(2, min(10, n_obs - 1)), '主成分数不超过样本数-1')
+        if group_column:
+            recommend('color_by', group_column if group_column != '_auto_group_' else '_auto_group', '按推荐分组着色检查样本结构')
+        if measurement == 'continuous_expression':
+            prerequisites.append({'module': 'bulk_normalize', 'params': {'method': 'log2'}, 'reason': 'PCA 前先稳定连续表达值方差'})
+            should_run = False
+        elif compromised_normalization:
+            prerequisites.append({'module': 'bulk_normalize', 'params': {'method': 'log2'}, 'reason': '从原始连续表达文件重新 log2 后再做 PCA'})
+            warnings.append(f'当前中间文件用 {normalization_method} 处理了连续表达值')
+            should_run = False
+
+    elif module_name == 'bulk_heatmap':
+        has_deg = bool([name for name in os.listdir(Config.results_dir(project_id)) if name.startswith('bulk_deg_results')]) if os.path.isdir(Config.results_dir(project_id)) else False
+        recommend('gene_import_source', 'deg' if has_deg else 'top_var', '有 DEG 结果时优先显示差异基因，否则显示高变基因')
+        recommend('top_n', 50, '在可读性和信息量之间取平衡')
+        if group_column:
+            recommend('groupby', group_column if group_column != '_auto_group_' else '_auto_group', '显示样本分组注释')
+        if measurement == 'continuous_expression':
+            prerequisites.append({'module': 'bulk_normalize', 'params': {'method': 'log2'}, 'reason': '热图前先对连续表达值做 log2(x+1)'})
+            should_run = False
+        elif compromised_normalization:
+            prerequisites.append({'module': 'bulk_normalize', 'params': {'method': 'log2'}, 'reason': '从原始连续表达文件重新 log2 后再生成热图'})
+            warnings.append(f'当前中间文件用 {normalization_method} 处理了连续表达值')
+            should_run = False
+
+    elif module_name == 'bulk_enrichment':
+        recommend('method', 'GSEA', '当单基因 DEG 较少时，全基因排序 GSEA 比 ORA 稳健')
+        recommend('database', 'GO_BP', '先检查生物学过程层面的整体变化')
+        recommend('pvalue_cutoff', 0.05, '使用标准富集 FDR 阈值')
+        recommend('top_n', 20, '展示主要通路并控制图表长度')
+        results_dir = Config.results_dir(project_id)
+        deg_files = sorted(
+            [os.path.join(results_dir, name) for name in os.listdir(results_dir)
+             if name.startswith('bulk_deg_results') and name.endswith('.csv')],
+            key=os.path.getmtime,
+            reverse=True,
+        ) if os.path.isdir(results_dir) else []
+        if deg_files:
+            recommend('input_source', deg_files[0], '使用最新的差异分析全基因排序表')
+        else:
+            prerequisites.append({'module': 'bulk_deg', 'reason': 'GSEA 需要含 gene/log2FC 的差异分析结果'})
+            should_run = False
+
+    elif module_name == 'bulk_timecourse':
+        time_columns = []
+        for candidate in groups:
+            if candidate.get('source') == 'obs' and candidate.get('column', '').lower() in {'time', 'minute', 'hour', 'day'}:
+                time_columns.append(candidate['column'])
+        if time_columns:
+            recommend('time_column', time_columns[0], '使用检测到的时间列')
+        else:
+            should_run = False
+            warnings.append('未检测到时间列，不应执行时序分析')
+
+    elif module_name == 'normalize':
+        recommend('method', 'log1p', '标准 UMI 单细胞数据默认使用 log1p CPM')
+        recommend('target_sum', 10000, '使用 Scanpy 常用的每细胞总数')
+
+    elif module_name == 'hvg':
+        recommend('n_top_genes', min(3000, max(1000, int(n_genes * 0.1))), '根据数据基因总数调整 HVG 规模')
+        recommend('hvg_flavor', 'seurat_v3', '使用方差稳定的常用 HVG 方法')
+
+    elif module_name == 'dimred':
+        recommend('n_comps', 30 if n_obs < 5000 else 50, '根据细胞规模设置 PCA 维度')
+        recommend('umap_n_neighbors', 15 if n_obs < 20000 else 30, '大数据增大邻居数以保留全局结构')
+
+    elif module_name == 'clustering':
+        rare_target = any(word in objective.lower() for word in ('稀有', '少数', 'rare'))
+        resolutions = ('0.8,1.2,1.5' if rare_target else
+                       ('0.4,0.6,0.8' if n_obs < 5000 else ('0.6,0.8,1.0' if n_obs < 50000 else '0.8,1.0,1.2')))
+        recommend('resolutions', resolutions, '根据细胞数生成可对比的多分辨率候选')
+        recommend('n_neighbors', 10 if rare_target else (15 if n_obs < 20000 else 30), '稀有细胞目标强调局部结构，否则按数据规模平衡局部与全局结构')
+        recommend('auto_select_resolution', True, '运行多分辨率评分并保留人工复核')
+
+    elif module_name == 'batch_correct':
+        batch_candidate = next((g for g in groups if g.get('column') in {'batch', 'sample', 'sample_id'}), None)
+        if not batch_candidate:
+            should_run = False
+            warnings.append('未检测到可靠批次列，不应盲目进行批次校正')
+        else:
+            recommend('batch_key', batch_candidate['column'], '使用检测到的批次列')
+            recommend('method', 'harmony', '作为稳健、快速的 PCA 空间批次校正基线')
+            alternatives.extend([
+                {'method': 'bbknn', 'when': '目标是构建批次平衡邻居图'},
+                {'method': 'scvi', 'when': '数据量大且需要生成模型潜在空间'},
+            ])
+
+    elif module_name == 'deg':
+        recommend('method', 'wilcoxon', '单细胞表达稀疏且非正态，优先使用 Wilcoxon')
+        if group_column:
+            recommend('groupby', group_column, '使用已有聚类或注释列')
+
+    cleaned_params, validation_error = _validate_analysis_params(module_name, params)
+    if validation_error:
+        return {'error': validation_error}
+
+    return {
+        'module_name': module_name,
+        'objective': objective,
+        'input_path': input_path,
+        'input_source': input_source,
+        'data_profile': profile,
+        'should_run': should_run,
+        'recommended_params': cleaned_params,
+        'rationale': rationale,
+        'alternatives': alternatives,
+        'prerequisites': prerequisites,
+        'warnings': warnings,
+        'needs_confirmation': False,
+        'next_action': '向用户展示方法、参数、理由和风险；用户确认后再调用 run_analysis。',
+    }
 
 
 def _validate_analysis_params(module_name, params):
@@ -490,23 +952,29 @@ def _inspect_analysis_state(project_id):
 
 def _inspect_adata(args, project_id):
     """
-    [只读] 检查指定 AnnData 文件的详细结构。
-    输入：{"adata_path": "..."}
+    [只读] 检查指定 AnnData 或 Bulk 表达矩阵的详细结构。
+    输入：{"adata_path": "..."}（兼容旧参数名）
     """
-    adata_path = args.get("adata_path", "")
+    adata_path = args.get("adata_path", "") or args.get("input_path", "")
     if not adata_path:
-        ctx = resolve_current_adata_path(project_id, allow_upload=True)
+        ctx = resolve_current_analysis_input(project_id, 'bulk_qc')
         if ctx['path']:
             adata_path = ctx['path']
         else:
-            return {"error": "未找到当前 h5ad 文件，请先上传数据或指定路径"}
+            return {"error": "未找到当前数据文件，请先上传数据或指定路径"}
     err = _validate_project_path(adata_path, project_id)
     if err:
         return {"error": err}
 
     try:
-        import scanpy as sc
-        adata = sc.read(adata_path, backed='r')
+        if adata_path.lower().endswith('.h5ad'):
+            import scanpy as sc
+            adata = sc.read(adata_path, backed='r')
+            data_type = 'anndata'
+        else:
+            from modules.io_utils import read_expression_matrix
+            adata = read_expression_matrix(adata_path)
+            data_type = 'bulk_expression_matrix'
 
         # 检测可能的聚类键
         cluster_keys = []
@@ -530,8 +998,12 @@ def _inspect_adata(args, project_id):
             pass
 
         return {
+            "data_type": data_type,
+            "input_file": os.path.basename(adata_path),
             "n_obs": adata.n_obs,
             "n_vars": adata.n_vars,
+            "sample_names": [str(name) for name in adata.obs_names[:100]],
+            "gene_names_preview": [str(name) for name in adata.var_names[:20]],
             "obs_columns": list(adata.obs.columns)[:50],
             "var_columns": list(adata.var.columns)[:20],
             "layers": layers,
@@ -541,7 +1013,7 @@ def _inspect_adata(args, project_id):
             "sample_preview": preview,
         }
     except Exception as e:
-        return {"error": f"无法读取 AnnData: {e}"}
+        return {"error": f"无法读取表达数据: {e}"}
 
 
 def _get_cluster_summary(args, project_id):

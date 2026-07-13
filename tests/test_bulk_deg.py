@@ -5,7 +5,11 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
-from modules.bulk_deg import _parse_comparisons, _parse_custom_groups
+from modules.bulk_deg import (
+    _parse_comparisons,
+    _parse_custom_groups,
+    _welch_ttest_log_expression,
+)
 
 
 class TestParseComparisons:
@@ -105,3 +109,20 @@ class TestParseCustomGroups:
         """空成员被跳过。"""
         result = _parse_custom_groups('High=')
         assert result == {}
+
+
+def test_welch_ttest_log_expression_uses_mean_difference_as_log2fc():
+    """Log-scale input must use a difference, not a ratio of log values."""
+    import pandas as pd
+
+    data = pd.DataFrame({
+        't1': [4.0, 2.0], 't2': [4.1, 2.1], 't3': [3.9, 1.9],
+        'c1': [2.0, 2.0], 'c2': [2.1, 2.1], 'c3': [1.9, 1.9],
+    }, index=['changed', 'stable'])
+
+    result = _welch_ttest_log_expression(
+        data, ['t1', 't2', 't3'], ['c1', 'c2', 'c3'])
+
+    assert result.loc['changed', 'log2FC'] == pytest.approx(2.0)
+    assert result.loc['stable', 'log2FC'] == pytest.approx(0.0)
+    assert result.loc['changed', 'qvalue'] < 0.05

@@ -110,13 +110,65 @@
 </div>
 {% endif %}
 
+{% if result_interpretation %}
+<div class="card p-4 mb-4 border-primary-subtle">
+    <h5 class="mb-2">{{ result_interpretation.title }}</h5>
+    <p class="mb-2">{{ result_interpretation.conclusion }}</p>
+    {% if result_interpretation.evidence %}
+    <div class="small text-success mb-2">依据：{{ result_interpretation.evidence | join('；') }}</div>
+    {% endif %}
+    {% if result_interpretation.cautions %}
+    <div class="small text-warning-emphasis mb-2">注意：{{ result_interpretation.cautions | join('；') }}</div>
+    {% endif %}
+    <div class="small text-muted">下一步：{{ result_interpretation.next_step }}</div>
+</div>
+{% endif %}
+
+{% if image_files %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">科研图（默认展示）</h5>
+    <span class="small text-muted">Scanpy / Matplotlib 原生渲染，PNG 为 300 dpi；SVG 可用于论文排版。</span>
+</div>
+<div class="row">
+    {% for f in image_files %}
+    <div class="col-md-6 mb-4">
+        <div class="card p-3">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h6 class="mb-0">{{ f.label }}</h6>
+                <div class="d-flex gap-1">
+                    <a href="/projects/{{ project.id }}/results/file/{{ f.id }}" download class="btn btn-outline-secondary btn-sm">下载 PNG</a>
+                    {% if f.svg_variant %}
+                    <a href="/projects/{{ project.id }}/results/file/{{ f.svg_variant.id }}" download class="btn btn-outline-secondary btn-sm">下载 SVG</a>
+                    {% endif %}
+                </div>
+            </div>
+            <img src="/projects/{{ project.id }}/results/file/{{ f.id }}" class="img-fluid rounded" alt="{{ f.label }}">
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
 {% if plotly_files %}
-<h5 class="mb-3">可视化图表</h5>
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">交互图表</h5>
+    <div class="d-flex gap-2">
+        <button type="button" class="btn btn-outline-primary btn-sm" onclick="exportTaskPlots('png')">全部导出 PNG</button>
+        <button type="button" class="btn btn-outline-primary btn-sm" onclick="exportTaskPlots('svg')">全部导出 SVG</button>
+    </div>
+</div>
+<div id="plot-export-status" class="small text-muted mb-2"></div>
 <div class="row">
     {% for f in plotly_files %}
     <div class="col-md-6 mb-4">
         <div class="card p-3">
-            <h6 class="mb-2">{{ f.label }}</h6>
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h6 class="mb-0">{{ f.label }}</h6>
+                <div class="d-flex gap-1">
+                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="exportTaskPlot('plot-{{ f.id }}', {{ f.label|tojson }}, 'png')">PNG</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="exportTaskPlot('plot-{{ f.id }}', {{ f.label|tojson }}, 'svg')">SVG</button>
+                </div>
+            </div>
             <div id="plot-{{ f.id }}" class="plotly-chart"></div>
         </div>
     </div>
@@ -124,19 +176,6 @@
 </div>
 {% endif %}
 
-{% if image_files %}
-<h5 class="mb-3">图表</h5>
-<div class="row">
-    {% for f in image_files %}
-    <div class="col-md-6 mb-4">
-        <div class="card p-3">
-            <h6 class="mb-2">{{ f.label }}</h6>
-            <img src="/projects/{{ project.id }}/results/file/{{ f.id }}" class="img-fluid rounded" alt="{{ f.label }}">
-        </div>
-    </div>
-    {% endfor %}
-</div>
-{% endif %}
 
 {% if csv_files %}
 <h5 class="mb-3">数据表格</h5>
@@ -409,5 +448,37 @@ fetch('/api/projects/{{ project.id }}/result-file/{{ f.id }}')
                 displaylogo: false
             }));
 {% endfor %}
+
+const taskExportCharts = [
+{% for f in plotly_files %}{id: 'plot-{{ f.id }}', name: {{ f.label|tojson }}},{% endfor %}
+];
+
+function safePlotFilename(name) {
+    return String(name || 'plot').replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'plot';
+}
+
+async function exportTaskPlot(divId, name, format) {
+    const el = document.getElementById(divId);
+    if (!el || !el.data) return;
+    const url = await Plotly.toImage(el, {
+        format: format, width: 1600, height: 1000, scale: format === 'png' ? 2 : 1
+    });
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = safePlotFilename(name) + '.' + format;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+}
+
+async function exportTaskPlots(format) {
+    const status = document.getElementById('plot-export-status');
+    for (let i = 0; i < taskExportCharts.length; i++) {
+        if (status) status.textContent = `正在导出 ${i + 1}/${taskExportCharts.length}`;
+        await exportTaskPlot(taskExportCharts[i].id, taskExportCharts[i].name, format);
+        await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    if (status) status.textContent = `已请求导出 ${taskExportCharts.length} 张 ${format.toUpperCase()}；如浏览器拦截，请允许此站点下载多个文件。`;
+}
 </script>
 {% endblock %}

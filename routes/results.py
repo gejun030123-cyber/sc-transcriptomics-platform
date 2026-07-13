@@ -1,5 +1,8 @@
 import json
 import os
+import io
+import re
+import zipfile
 from flask import Blueprint, render_template, send_file, flash, redirect, url_for
 from models import Project, AnalysisTask, ResultFile, PipelineRun
 from modules.schemas import MODULE_DISPLAY_MAP, STATUS_MAP
@@ -31,6 +34,24 @@ def task_detail(pid, task_id):
             f._file_size = 0
     plotly_files = [f for f in files if f.file_type == 'plotly_json']
     image_files = [f for f in files if f.file_type in ('png', 'svg', 'jpg', 'jpeg')]
+    # A Matplotlib figure is emitted as both 300 dpi PNG and SVG.  Show PNG once
+    # in the browser (predictable cross-browser rendering), while preserving the
+    # SVG companion as a publication-ready download.
+    image_groups = {}
+    for image in image_files:
+        key = (image.category, image.label)
+        current = image_groups.get(key)
+        if current is None or (image.file_type == 'png' and current.file_type != 'png'):
+            image_groups[key] = image
+    preferred_image_files = list(image_groups.values())
+    for image in preferred_image_files:
+        image.svg_variant = next(
+            (candidate for candidate in image_files
+             if candidate.category == image.category
+             and candidate.label == image.label
+             and candidate.file_type == 'svg'),
+            None,
+        )
     csv_files = [f for f in files if f.file_type == 'csv']
     json_files = [f for f in files if f.file_type == 'json']
     result_data = {}
@@ -39,9 +60,11 @@ def task_detail(pid, task_id):
     except Exception:
         pass
     review_evidence = None
+    result_interpretation = None
     try:
-        from modules.reporting.review_evidence import build_review_evidence
+        from modules.reporting.review_evidence import build_review_evidence, build_result_interpretation
         review_evidence = build_review_evidence(t.module_name, result_data, files)
+        result_interpretation = build_result_interpretation(t.module_name, result_data, files)
     except Exception:
         review_evidence = None
 
@@ -56,9 +79,10 @@ def task_detail(pid, task_id):
         pass
 
     return render_template('analysis_result.html', project=p, task=t,
-                          plotly_files=plotly_files, image_files=image_files, csv_files=csv_files,
+                          plotly_files=plotly_files, image_files=preferred_image_files, csv_files=csv_files,
                           json_files=json_files,
                           review_evidence=review_evidence,
+                          result_interpretation=result_interpretation,
                           result_data=result_data,
                           module_display=MODULE_DISPLAY_MAP.get(t.module_name, t.module_name),
                           status_cn=STATUS_MAP.get(t.status, t.status),
@@ -136,6 +160,60 @@ def plot_gallery(pid):
         flash('图库路径不合法', 'danger')
         return redirect(url_for('main.index'))
     return send_file(gallery_path, as_attachment=False)
+
+
+@results_bp.route('/<pid>/results/plots-archive')
+def plots_archive(pid):
+    """Download the offline gallery and every project Plotly source as one ZIP."""
+    p = Project.get_by_id(pid)
+    if not p:
+        flash('未找到', 'danger')
+        return redirect(url_for('main.index'))
+
+    tasks = AnalysisTask.get_by_project(pid)
+    files_by_task = {t.id: ResultFile.get_by_task(t.id) for t in tasks}
+    from modules.reporting.project_report import ensure_project_report
+    report_info = ensure_project_report(
+        project=p,
+        project_dir=Config.project_dir(pid),
+        tasks=tasks,
+        files_by_task=files_by_task,
+        module_display_map=MODULE_DISPLAY_MAP,
+    )
+
+    buffer = io.BytesIO()
+    manifest = []
+    with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        gallery_path = report_info.get('gallery_path')
+        if _validate_path(gallery_path, pid):
+            archive.write(gallery_path, 'plot_gallery.html')
+
+        for task in tasks:
+            for rf in files_by_task.get(task.id, []):
+                if rf.file_type not in {'plotly_json', 'png', 'svg', 'jpg', 'jpeg'} or not _validate_path(rf.file_path, pid):
+                    continue
+                safe_label = re.sub(r'[^a-zA-Z0-9._-]+', '_', rf.label or rf.category or 'plot').strip('_') or 'plot'
+                if rf.file_type == 'plotly_json':
+                    arcname = f'plotly_json/{task.module_name}_{task.id}_{safe_label}_{rf.id}.json'
+                else:
+                    extension = os.path.splitext(rf.file_path)[1].lower() or f'.{rf.file_type}'
+                    arcname = f'static_images/{task.module_name}_{task.id}_{safe_label}_{rf.id}{extension}'
+                archive.write(rf.file_path, arcname)
+                manifest.append({
+                    'task_id': task.id,
+                    'module': task.module_name,
+                    'label': rf.label,
+                    'archive_path': arcname,
+                })
+        archive.writestr('manifest.json', json.dumps(manifest, ensure_ascii=False, indent=2))
+
+    buffer.seek(0)
+    return send_file(
+        buffer,
+        mimetype='application/zip',
+        as_attachment=True,
+        download_name=f'{pid}_all_plots.zip',
+    )
 
 
 def _pipeline_artifacts(pid, run):

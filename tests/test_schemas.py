@@ -16,7 +16,7 @@ class TestModuleMetadata:
 
     def test_sc_module_count(self):
         """单细胞模块有 12 个。"""
-        assert len(SC_MODULE_LIST) == 12
+        assert len(SC_MODULE_LIST) == 13
 
     def test_bulk_module_count(self):
         """Bulk 模块有 8 个。"""

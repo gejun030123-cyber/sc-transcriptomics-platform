@@ -133,6 +133,40 @@ class BaseAnalysis(ABC):
                     self.progress(-1, f"静态导出 {fmt} 失败: {e}")
         return exported
 
+    def save_matplotlib_figure(self, fig, plots_dir, filename, category, label,
+                               formats=None, dpi=300):
+        """Persist a publication-quality Matplotlib/Scanpy figure and register it.
+
+        Static figures are intentionally generated independently of Plotly/Kaleido:
+        Scanpy and OmicVerse native plots can therefore retain their typography and
+        vector geometry even when the optional Kaleido renderer is unavailable.
+        """
+        import os
+
+        if formats is None:
+            formats = self.params.get('_visualization', {}).get(
+                'static_formats', ('png', 'svg')
+            )
+        formats = [fmt.lower() for fmt in formats if fmt.lower() in ('png', 'svg')]
+        if not formats:
+            return []
+
+        stem, _ = os.path.splitext(filename)
+        result_files = []
+        for fmt in formats:
+            output_path = os.path.join(plots_dir, f'{stem}.{fmt}')
+            save_kwargs = {'format': fmt, 'bbox_inches': 'tight', 'facecolor': 'white'}
+            if fmt == 'png':
+                save_kwargs['dpi'] = dpi
+            fig.savefig(output_path, **save_kwargs)
+            result_files.append({
+                'file_path': output_path,
+                'file_type': fmt,
+                'category': category,
+                'label': label,
+            })
+        return result_files
+
     def export_results(self, adata, output_dir, export_format='h5ad',
                        include_layers=None, include_obsm=None, compression='gzip'):
         """将 adata 导出为指定格式。返回导出文件路径列表。"""

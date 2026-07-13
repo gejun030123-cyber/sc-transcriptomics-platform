@@ -2,6 +2,34 @@ import os
 import re
 
 
+def _load_dotenv(path=None):
+    """Load simple KEY=VALUE pairs from .env without overriding real env vars."""
+    env_path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+    if not os.path.exists(env_path):
+        return
+    try:
+        with open(env_path, encoding='utf-8') as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+                if not key or key in os.environ:
+                    continue
+                if (value.startswith('"') and value.endswith('"')) or (
+                    value.startswith("'") and value.endswith("'")
+                ):
+                    value = value[1:-1]
+                os.environ[key] = value
+    except OSError:
+        return
+
+
+_load_dotenv()
+
+
 class Config:
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -34,7 +62,7 @@ class Config:
     MIN_FREE_RAM_GB = float(os.environ.get('MIN_FREE_RAM_GB', '4'))
     CUDA_DEVICES = os.environ.get('CUDA_DEVICES', '0,1')
 
-    # AI 对话配置（支持任意 OpenAI 兼容 API）
+    # AI 对话配置（支持 OpenAI compatible 和 Anthropic messages compatible API）
     AI_API_KEY = os.environ.get('AI_API_KEY', '')
     AI_API_URL = os.environ.get('AI_API_URL', 'https://token-plan-cn.xiaomimimo.com/anthropic')
     AI_MODEL = os.environ.get('AI_MODEL', 'mimo-v2.5-pro')

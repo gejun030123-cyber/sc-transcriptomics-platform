@@ -14,6 +14,7 @@ class TestExecuteToolRegistry:
 
         readonly_tools = [
             'get_project_status', 'get_task_results', 'list_modules',
+            'recommend_analysis_config',
             'inspect_analysis_state', 'inspect_adata', 'get_cluster_summary',
             'score_cell_type_signature', 'list_builtin_markers',
         ]
@@ -130,6 +131,197 @@ class TestAIToolsCoverage:
                     return
 
         pytest.skip("没有找到带 number 类型参数的模块")
+
+
+class TestBulkUploadDiscovery:
+    """Bulk 原始表格应能被 AI 发现和检查。"""
+
+    @staticmethod
+    def _write_bulk_table(path):
+        path.write_text(
+            "Geneid\tGeneName\tStart\tCtrl_1\tTreat_1\n"
+            "ENSG1\tGENE1\t1\t10\t20\n"
+            "ENSG2\tGENE2\t2\t30\t40\n",
+            encoding='utf-8',
+        )
+
+    def test_project_status_lists_xls_and_tsv(self, test_project):
+        from config import Config
+        from modules.ai_tools import _get_project_status
+
+        uploads = Config.uploads_dir(test_project)
+        self._write_bulk_table(__import__('pathlib').Path(uploads) / 'counts.xls')
+        self._write_bulk_table(__import__('pathlib').Path(uploads) / 'counts.tsv')
+
+        result = _get_project_status(test_project)
+        assert 'counts.xls' in result['uploaded_files']
+        assert 'counts.tsv' in result['uploaded_files']
+        xls_detail = next(item for item in result['uploaded_file_details']
+                          if item['name'] == 'counts.xls')
+        assert xls_detail['path'].endswith('/uploads/counts.xls')
+        assert xls_detail['extension'] == '.xls'
+
+    def test_bulk_analysis_resolver_falls_back_to_xls(self, test_project):
+        from config import Config
+        from modules.ai_tools import resolve_current_analysis_input
+
+        path = __import__('pathlib').Path(Config.uploads_dir(test_project)) / 'counts.xls'
+        self._write_bulk_table(path)
+
+        result = resolve_current_analysis_input(test_project, 'bulk_qc')
+        assert result['source'] == 'bulk_upload'
+        assert result['path'] == str(path)
+
+    def test_inspect_adata_reads_tab_delimited_xls(self, test_project):
+        from config import Config
+        from modules.ai_tools import _inspect_adata
+
+        path = __import__('pathlib').Path(Config.uploads_dir(test_project)) / 'counts.xls'
+        self._write_bulk_table(path)
+
+        result = _inspect_adata({}, test_project)
+        assert 'error' not in result
+        assert result['data_type'] == 'bulk_expression_matrix'
+        assert result['input_file'] == 'counts.xls'
+        assert result['n_obs'] == 2
+        assert result['n_vars'] == 2
+        assert result['sample_names'] == ['Ctrl_1', 'Treat_1']
+
+
+class TestAnalysisConfigRecommendation:
+    """对话 AI 应基于数据证据决策方法和参数。"""
+
+    @staticmethod
+    def _write_multifactor_table(path, continuous=True):
+        samples = [
+            'Ctr_B_1', 'Ctr_B_2', 'Ctr_En_1', 'Ctr_En_2',
+            'PEA_B_1', 'PEA_B_2', 'PEA_En_1', 'PEA_En_2',
+        ]
+        rows = ['gene\t' + '\t'.join(samples)]
+        values = [
+            [1.1, 1.2, 2.1, 2.2, 3.1, 3.2, 4.1, 4.2],
+            [2.2, 2.3, 1.2, 1.3, 5.2, 5.3, 3.2, 3.3],
+            [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+        ]
+        if not continuous:
+            values = [[int(round(value * 10)) for value in row] for row in values]
+        for idx, row in enumerate(values, 1):
+            rows.append(f'G{idx}\t' + '\t'.join(map(str, row)))
+        path.write_text('\n'.join(rows) + '\n', encoding='utf-8')
+
+    def test_continuous_bulk_recommends_log2(self, test_project):
+        from pathlib import Path
+        from config import Config
+        from modules.ai_tools import _recommend_analysis_config
+
+        path = Path(Config.uploads_dir(test_project)) / 'continuous.tsv'
+        self._write_multifactor_table(path, continuous=True)
+        result = _recommend_analysis_config({
+            'module_name': 'bulk_normalize', 'input_path': str(path),
+        }, test_project)
+
+        assert result['data_profile']['measurement_type'] == 'continuous_expression'
+        assert result['recommended_params']['method'] == 'log2'
+        assert result['should_run'] is True
+
+    def test_raw_counts_recommend_deseq2_normalization(self, test_project):
+        from pathlib import Path
+        from config import Config
+        from modules.ai_tools import _recommend_analysis_config
+
+        path = Path(Config.uploads_dir(test_project)) / 'counts.tsv'
+        self._write_multifactor_table(path, continuous=False)
+        result = _recommend_analysis_config({
+            'module_name': 'bulk_normalize', 'input_path': str(path),
+        }, test_project)
+
+        assert result['data_profile']['measurement_type'] == 'raw_counts'
+        assert result['recommended_params']['method'] == 'deseq2'
+
+    def test_bulk_deg_recommends_stratified_comparisons_and_prerequisite(self, test_project):
+        from pathlib import Path
+        from config import Config
+        from modules.ai_tools import _recommend_analysis_config
+
+        path = Path(Config.uploads_dir(test_project)) / 'continuous.tsv'
+        self._write_multifactor_table(path, continuous=True)
+        result = _recommend_analysis_config({
+            'module_name': 'bulk_deg',
+            'input_path': str(path),
+            'objective': '保留 B/En 分层差异',
+        }, test_project)
+
+        params = result['recommended_params']
+        assert params['method'] == 't-test'
+        assert params['groupby'] == '_auto_group_'
+        assert params['comparisons'] == 'PEA_B-vs-Ctr_B;PEA_En-vs-Ctr_En'
+        assert result['should_run'] is False
+        assert result['prerequisites'][0]['params'] == {'method': 'log2'}
+
+    def test_strict_objective_tightens_deg_thresholds(self, test_project):
+        from pathlib import Path
+        from config import Config
+        from modules.ai_tools import _recommend_analysis_config
+
+        path = Path(Config.uploads_dir(test_project)) / 'counts.tsv'
+        self._write_multifactor_table(path, continuous=False)
+        result = _recommend_analysis_config({
+            'module_name': 'bulk_deg', 'input_path': str(path), 'objective': '严格验证',
+        }, test_project)
+
+        assert result['recommended_params']['fc_threshold'] == 2
+        assert result['recommended_params']['pval_threshold'] == 0.01
+
+    def test_compatibility_gate_rejects_deseq2_for_continuous_values(self, test_project):
+        from pathlib import Path
+        from config import Config
+        from modules.ai_tools import _validate_method_compatibility
+
+        path = Path(Config.uploads_dir(test_project)) / 'continuous.tsv'
+        self._write_multifactor_table(path, continuous=True)
+
+        error = _validate_method_compatibility(
+            'bulk_deg', str(path), {'method': 'deseq2'})
+        assert '原始整数 counts' in error
+
+    def test_run_analysis_does_not_create_incompatible_task(self, test_project):
+        from pathlib import Path
+        from config import Config
+        from models import AnalysisTask
+        from modules.ai_tools import _run_analysis
+
+        path = Path(Config.uploads_dir(test_project)) / 'continuous.tsv'
+        self._write_multifactor_table(path, continuous=True)
+        result = _run_analysis({
+            'module_name': 'bulk_normalize',
+            'input_path': str(path),
+            'params': {'method': 'deseq2'},
+        }, test_project)
+
+        assert '方法与数据不兼容' in result['error']
+        assert AnalysisTask.get_by_project(test_project) == []
+
+    def test_auto_group_mapping_for_ai_uses_combined_groups(self, test_project):
+        from pathlib import Path
+        from config import Config
+        from modules.ai_tools import _infer_auto_group_mapping
+
+        path = Path(Config.uploads_dir(test_project)) / 'continuous.tsv'
+        self._write_multifactor_table(path, continuous=True)
+        mapping = _infer_auto_group_mapping(str(path))
+
+        assert mapping['Ctr_B_1'] == 'Ctr_B'
+        assert mapping['Ctr_En_1'] == 'Ctr_En'
+        assert mapping['PEA_B_1'] == 'PEA_B'
+
+    def test_recommendation_tool_is_read_only_and_auto_executed(self):
+        from modules.ai_adapter import AUTO_EXEC_TOOLS, CONFIRM_TOOLS, TOOLS_ANTHROPIC
+
+        tool_names = {tool['name'] for tool in TOOLS_ANTHROPIC}
+        assert 'recommend_analysis_config' in tool_names
+        assert 'recommend_analysis_config' in AUTO_EXEC_TOOLS
+        assert 'recommend_analysis_config' not in CONFIRM_TOOLS
+        assert 'propose_parameter_sweep' in AUTO_EXEC_TOOLS
 
 
 class TestProposeParameterSweep:

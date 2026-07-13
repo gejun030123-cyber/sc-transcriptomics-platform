@@ -2,6 +2,7 @@
 flask
 flask-cors
 psutil
+requests
 
 # Numeric/data stack
 numpy

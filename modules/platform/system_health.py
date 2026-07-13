@@ -7,6 +7,7 @@ DEPENDENCY_GROUPS = {
     "core": [
         ("flask", "flask"),
         ("flask-cors", "flask_cors"),
+        ("requests", "requests"),
         ("numpy", "numpy"),
         ("pandas", "pandas"),
         ("scipy", "scipy"),

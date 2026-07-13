@@ -3,6 +3,84 @@ import numpy as np
 import pandas as pd
 
 
+def infer_expression_measurement(adata, input_path=''):
+    """Classify a bulk expression matrix without silently changing its scale."""
+    normalization = dict(getattr(adata, 'uns', {}).get('normalization', {}) or {})
+    if normalization.get('is_log_transformed'):
+        return 'log_transformed'
+    matrix = adata.X
+    values = matrix.data if hasattr(matrix, 'data') else np.asarray(matrix).ravel()
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    hint = str(input_path).lower()
+    if any(token in hint for token in ('fpkm', 'tpm', 'rpkm')):
+        return 'continuous_expression'
+    if values.size == 0:
+        return 'raw_counts'
+    integer_fraction = float(np.mean(np.isclose(values, np.round(values))))
+    return 'raw_counts' if np.min(values) >= 0 and integer_fraction >= 0.995 else 'continuous_expression'
+
+
+def infer_sample_group_candidates(sample_names):
+    """Infer reusable grouping candidates from names ending in a replicate number.
+
+    Examples:
+      Ctr_1 -> Ctr
+      Ctr_B_1 -> combined=Ctr_B, factor_1=Ctr, factor_2=B
+    """
+    import re
+    from collections import Counter
+
+    parsed = []
+    for raw_name in sample_names:
+        name = str(raw_name)
+        clean = re.sub(
+            r'_(count|FPKM|TPM|fpkm|tpm|Counts|normalized)$', '', name)
+        tokens = [token for token in re.split(r'[-_]', clean) if token]
+        if len(tokens) < 2 or not re.fullmatch(r'(?:rep)?\d+', tokens[-1], re.I):
+            return []
+        parsed.append((name, tokens[:-1]))
+
+    if not parsed:
+        return []
+
+    raw_candidates = []
+    max_factors = max(len(tokens) for _, tokens in parsed)
+
+    # The full pre-replicate name preserves treatment x stratum designs.
+    raw_candidates.append({
+        'key': 'combined',
+        'label': '联合分组（推荐）' if max_factors > 1 else '自动分组（推荐）',
+        'mapping': {name: '_'.join(tokens) for name, tokens in parsed},
+    })
+
+    for factor_idx in range(max_factors):
+        if not all(len(tokens) > factor_idx for _, tokens in parsed):
+            continue
+        raw_candidates.append({
+            'key': f'factor_{factor_idx + 1}',
+            'label': f'第 {factor_idx + 1} 因素',
+            'mapping': {name: tokens[factor_idx] for name, tokens in parsed},
+        })
+
+    candidates = []
+    seen_mappings = set()
+    for candidate in raw_candidates:
+        mapping = candidate['mapping']
+        signature = tuple(mapping[name] for name, _ in parsed)
+        if signature in seen_mappings:
+            continue
+        seen_mappings.add(signature)
+        counts = Counter(mapping.values())
+        if len(counts) < 2 or any(count < 2 for count in counts.values()):
+            continue
+        candidate['values'] = sorted(counts)
+        candidate['group_sizes'] = dict(sorted(counts.items()))
+        candidates.append(candidate)
+
+    return candidates
+
+
 def read_expression_matrix(file_path):
     """读取表达矩阵文件，自动检测格式，只保留数值列"""
     import scanpy as sc

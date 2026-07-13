@@ -40,6 +40,22 @@ def test_progress_allows_missing_callback():
     analysis.progress(10, 'running')
 
 
+def test_save_matplotlib_figure_writes_publication_formats(tmp_path):
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    files = _make_analysis().save_matplotlib_figure(
+        fig, str(tmp_path), 'quality_plot.png', 'qc', 'Quality plot'
+    )
+    plt.close(fig)
+
+    assert {item['file_type'] for item in files} == {'png', 'svg'}
+    assert (tmp_path / 'quality_plot.png').is_file()
+    assert (tmp_path / 'quality_plot.svg').is_file()
+    assert all(item['label'] == 'Quality plot' for item in files)
+
+
 def _make_adata(n_obs=10, obs_dict=None):
     """创建测试用 AnnData。"""
     X = np.random.rand(n_obs, 5)

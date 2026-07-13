@@ -79,6 +79,10 @@ def write_plot_gallery(project_dir, tasks, files_by_task, module_display_map=Non
         ".chart{background:white;border:1px solid #d9e2ec;border-radius:8px;padding:16px;margin:0 0 20px}",
         ".meta{color:#6b7280;font-size:12px;margin:4px 0 12px}",
         ".plot{width:100%;min-height:460px}",
+        ".toolbar{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 22px}",
+        ".toolbar button,.chart-actions button{border:1px solid #2563eb;background:white;color:#1d4ed8;border-radius:6px;padding:7px 11px;cursor:pointer}",
+        ".toolbar button:hover,.chart-actions button:hover{background:#eff6ff}",
+        ".chart-actions{display:flex;gap:8px;margin:8px 0 4px}",
         "h1{font-size:24px;margin-bottom:4px} h2{font-size:16px;margin:0}",
         "</style>",
         "</head>",
@@ -90,6 +94,23 @@ def write_plot_gallery(project_dir, tasks, files_by_task, module_display_map=Non
         parts.append("<script>")
         parts.append(plotly_js)
         parts.append("</script>")
+        parts.extend([
+            "<script>",
+            "const exportCharts = [];",
+            "function safeExportName(name){return String(name||'plot').replace(/[^a-zA-Z0-9._-]+/g,'_').replace(/^_+|_+$/g,'')||'plot';}",
+            "async function exportPlot(divId,name,format){",
+            " const el=document.getElementById(divId); if(!el)return;",
+            " const url=await Plotly.toImage(el,{format:format,width:1600,height:1000,scale:format==='png'?2:1});",
+            " const a=document.createElement('a');a.href=url;a.download=safeExportName(name)+'.'+format;document.body.appendChild(a);a.click();a.remove();",
+            "}",
+            "async function exportAllPlots(format){",
+            " const status=document.getElementById('export-status');",
+            " for(let i=0;i<exportCharts.length;i++){if(status)status.textContent=`正在导出 ${i+1}/${exportCharts.length}`;await exportPlot(exportCharts[i].id,exportCharts[i].name,format);await new Promise(r=>setTimeout(r,250));}",
+            " if(status)status.textContent=`已请求导出 ${exportCharts.length} 张 ${format.toUpperCase()}；如浏览器拦截，请允许此站点下载多个文件。`;",
+            "}",
+            "</script>",
+            "<div class=\"toolbar\"><button onclick=\"exportAllPlots('png')\">全部导出 PNG</button><button onclick=\"exportAllPlots('svg')\">全部导出 SVG</button><span id=\"export-status\" class=\"meta\"></span></div>",
+        ])
     else:
         parts.append("<p>Plotly.js 未能内嵌，图表可能无法渲染。请确认 plotly 依赖可用后重新生成图库。</p>")
 
@@ -108,10 +129,12 @@ def write_plot_gallery(project_dir, tasks, files_by_task, module_display_map=Non
             "<section class=\"chart\">",
             f"<h2>{title}</h2>",
             f"<div class=\"meta\">模块：{module_name} | Task：{html_lib.escape(task.id)} | 文件：{relpath}</div>",
+            f"<div class=\"chart-actions\"><button onclick=\"exportPlot('{div_id}', {json.dumps(rf.label or rf.category or 'plot', ensure_ascii=False)}, 'png')\">导出 PNG</button><button onclick=\"exportPlot('{div_id}', {json.dumps(rf.label or rf.category or 'plot', ensure_ascii=False)}, 'svg')\">导出 SVG</button></div>",
             f"<div id=\"{div_id}\" class=\"plot\"></div>",
             "<script>",
             f"const fig_{idx} = {fig_text};",
             f"Plotly.newPlot('{div_id}', fig_{idx}.data || [], fig_{idx}.layout || {{}}, {{responsive:true}});",
+            f"exportCharts.push({{id:'{div_id}',name:{json.dumps(rf.label or rf.category or 'plot', ensure_ascii=False)}}});",
             "</script>",
             "</section>",
         ])

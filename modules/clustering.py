@@ -17,7 +17,7 @@ class ClusteringAnalysis(BaseAnalysis):
     def run(self, input_path):
         import os
         import scanpy as sc
-        from modules.visualization import umap_scatter
+        from modules.visualization import umap_scatter, categorical_color_map
         import json
         import numpy as np
         import pandas as pd
@@ -70,6 +70,20 @@ class ClusteringAnalysis(BaseAnalysis):
                 fpath = os.path.join(plots_dir, f'cluster_umap_{res}.json')
                 with open(fpath, 'w') as f: f.write(fig_json)
                 result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'Clusters (res={res})'})
+                try:
+                    fig_static = sc.pl.umap(
+                        adata, color=key, title=f'Leiden (res={res}, {n_clusters} clusters)',
+                        show=False, return_fig=True, frameon=False,
+                        size=self.get_viz_params()['umap_point_size'], legend_loc='on data',
+                    )
+                    result_files.extend(self.save_matplotlib_figure(
+                        fig_static, plots_dir, f'cluster_umap_{res}.png',
+                        'umap', f'Clusters (res={res})'
+                    ))
+                    import matplotlib.pyplot as plt
+                    plt.close(fig_static)
+                except Exception as exc:
+                    self.progress(-1, f'静态聚类 UMAP 导出失败（不影响交互图）：{exc}')
 
         # 多分辨率 UMAP 比较图
         if 'X_umap' in adata.obsm:
@@ -81,11 +95,13 @@ class ClusteringAnalysis(BaseAnalysis):
                 if key in adata.obs.columns:
                     coords = adata.obsm['X_umap'][:, :2]
                     cats = adata.obs[key].values
+                    color_map = categorical_color_map(adata, key)
                     for cat in sorted(set(cats)):
                         mask = cats == cat
                         fig_multi.add_trace(go.Scattergl(
                             x=coords[mask, 0], y=coords[mask, 1], mode='markers',
-                            marker=dict(size=2, opacity=0.6), name=str(cat), showlegend=(ci==1)
+                            marker=dict(size=2, opacity=0.6, color=color_map.get(str(cat), '#bdbdbd')),
+                            name=str(cat), showlegend=(ci==1)
                         ), row=1, col=ci)
             fig_multi.update_layout(height=400, width=350*n_res, title='多分辨率聚类比较')
             for i in range(1, n_res+1):
@@ -151,17 +167,12 @@ class ClusteringAnalysis(BaseAnalysis):
                     import scanpy as sc2
                     sc2.tl.dendrogram(adata, groupby=first_key)
                     fig_dot = sc2.pl.dotplot(adata, var_names=dotplot_genes, groupby=first_key, return_fig=True)
-                    import io, base64
-                    buf = io.BytesIO()
-                    fig_dot.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+                    result_files.extend(self.save_matplotlib_figure(
+                        fig_dot, plots_dir, 'cluster_marker_dotplot.png', 'dotplot',
+                        'Marker Dotplot'
+                    ))
                     import matplotlib.pyplot as plt
                     plt.close('all')
-                    buf.seek(0)
-                    img_b64 = base64.b64encode(buf.read()).decode()
-                    fpath = os.path.join(plots_dir, 'cluster_dotplot.json')
-                    with open(fpath, 'w') as f:
-                        json.dump({'data': [{'type': 'image', 'source': f'data:image/png;base64,{img_b64}', 'xref': 'paper', 'yref': 'paper', 'x': 0, 'y': 1, 'sizex': 1, 'sizey': 1, 'sizing': 'stretch'}], 'layout': {'width': 800, 'height': 500, 'title': f'Marker Dotplot ({first_key})'}}, f)
-                    result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'dotplot', 'label': f'Marker Dotplot'})
         except Exception as e:
             logger.warning("生成 marker dotplot 失败（注释模块可能不可用）: %s", e)
 
@@ -268,6 +279,7 @@ class ClusteringAnalysis(BaseAnalysis):
         if self.params.get('show_labeled_umap', True) and 'X_umap' in adata.obsm and 'leiden' in adata.obs.columns:
             coords = adata.obsm['X_umap'][:, :2]
             labels = adata.obs['leiden'].astype(str)
+            color_map = categorical_color_map(adata, 'leiden')
             fig_label = go.Figure()
             for cl in sorted(labels.unique(), key=lambda x: (len(x), x)):
                 mask = labels == cl
@@ -275,7 +287,7 @@ class ClusteringAnalysis(BaseAnalysis):
                     x=coords[mask, 0],
                     y=coords[mask, 1],
                     mode='markers',
-                    marker=dict(size=3, opacity=0.65),
+                    marker=dict(size=3, opacity=0.65, color=color_map.get(str(cl), '#bdbdbd')),
                     name=str(cl),
                     text=adata.obs_names[mask.values].tolist(),
                     hovertemplate='%{text}<br>Cluster: ' + str(cl) + '<extra></extra>',
