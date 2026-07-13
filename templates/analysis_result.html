@@ -147,39 +147,11 @@
     </div>
     {% endfor %}
 </div>
-{% elif plotly_files %}
+{% else %}
 <div class="alert alert-info small mb-3">
-    当前任务没有静态 PNG/SVG 结果，网页暂时显示 Plotly 交互图。重新运行该分析模块后，将自动生成 300 dpi PNG 和 SVG 科研图。
+    当前任务没有可展示的静态科研图。请重新运行该分析模块生成 PNG/SVG 输出。
 </div>
 {% endif %}
-
-{% if plotly_files %}
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h5 class="mb-0">交互图表</h5>
-    <div class="d-flex gap-2">
-        <button type="button" class="btn btn-outline-primary btn-sm" onclick="exportTaskPlots('png')">全部导出 PNG</button>
-        <button type="button" class="btn btn-outline-primary btn-sm" onclick="exportTaskPlots('svg')">全部导出 SVG</button>
-    </div>
-</div>
-<div id="plot-export-status" class="small text-muted mb-2"></div>
-<div class="row">
-    {% for f in plotly_files %}
-    <div class="col-md-6 mb-4">
-        <div class="card p-3">
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <h6 class="mb-0">{{ f.label }}</h6>
-                <div class="d-flex gap-1">
-                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="exportTaskPlot('plot-{{ f.id }}', {{ f.label|tojson }}, 'png')">PNG</button>
-                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="exportTaskPlot('plot-{{ f.id }}', {{ f.label|tojson }}, 'svg')">SVG</button>
-                </div>
-            </div>
-            <div id="plot-{{ f.id }}" class="plotly-chart"></div>
-        </div>
-    </div>
-    {% endfor %}
-</div>
-{% endif %}
-
 
 {% if csv_files %}
 <h5 class="mb-3">数据表格</h5>
@@ -361,8 +333,6 @@ loadOutputAdataInfo();
 
 {% block extra_css %}
 <style>
-.plotly-chart { min-height: 400px; }
-.plotly-chart .js-plotly-plot { width: 100% !important; }
 </style>
 {% endblock %}
 
@@ -441,48 +411,5 @@ if (STATUS === 'running' || STATUS === 'pending') {
     }, 2000);
 }
 
-{% for f in plotly_files %}
-fetch('/api/projects/{{ project.id }}/result-file/{{ f.id }}')
-    .then(r => r.json())
-    .then(data => Plotly.newPlot('plot-{{ f.id }}', data.data, data.layout, {
-                responsive: true,
-                scrollZoom: true,
-                displayModeBar: true,
-                modeBarButtonsToRemove: ['lasso2d', 'select2d'],
-                displaylogo: false
-            }));
-{% endfor %}
-
-const taskExportCharts = [
-{% for f in plotly_files %}{id: 'plot-{{ f.id }}', name: {{ f.label|tojson }}},{% endfor %}
-];
-
-function safePlotFilename(name) {
-    return String(name || 'plot').replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'plot';
-}
-
-async function exportTaskPlot(divId, name, format) {
-    const el = document.getElementById(divId);
-    if (!el || !el.data) return;
-    const url = await Plotly.toImage(el, {
-        format: format, width: 1600, height: 1000, scale: format === 'png' ? 2 : 1
-    });
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = safePlotFilename(name) + '.' + format;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-}
-
-async function exportTaskPlots(format) {
-    const status = document.getElementById('plot-export-status');
-    for (let i = 0; i < taskExportCharts.length; i++) {
-        if (status) status.textContent = `正在导出 ${i + 1}/${taskExportCharts.length}`;
-        await exportTaskPlot(taskExportCharts[i].id, taskExportCharts[i].name, format);
-        await new Promise(resolve => setTimeout(resolve, 250));
-    }
-    if (status) status.textContent = `已请求导出 ${taskExportCharts.length} 张 ${format.toUpperCase()}；如浏览器拦截，请允许此站点下载多个文件。`;
-}
 </script>
 {% endblock %}

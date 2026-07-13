@@ -71,7 +71,6 @@
                             <label>UMAP 透明度 <input type="number" name="_viz_umap_opacity" value="0.7" min="0.1" max="1" step="0.1" style="width: 100%;"></label>
                             <label>图例字号 <input type="number" name="_viz_legend_fontsize" value="10" min="6" max="20" style="width: 100%;"></label>
                             <label>导出格式 <div style="display: flex; gap: 10px; padding-top: 4px;">
-                                <label style="font-weight:normal"><input type="checkbox" name="_viz_export_plotly" checked> Plotly</label>
                                 <label style="font-weight:normal"><input type="checkbox" name="_viz_export_svg" checked> SVG（论文矢量图）</label>
                                 <label style="font-weight:normal"><input type="checkbox" name="_viz_export_png" checked> PNG（300 dpi）</label>
                             </div></label>
@@ -469,7 +468,6 @@ document.querySelector('.param-form').addEventListener('submit', function() {
         this.appendChild(vizHidden);
     }
     const exportFormats = [];
-    if (this.querySelector('[name="_viz_export_plotly"]')?.checked) exportFormats.push('plotly_json');
     if (this.querySelector('[name="_viz_export_svg"]')?.checked) exportFormats.push('svg');
     if (this.querySelector('[name="_viz_export_png"]')?.checked) exportFormats.push('png');
 

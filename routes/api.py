@@ -196,18 +196,14 @@ def get_result_file(file_id, pid=None):
     if not _validate_project_file_path(f.file_path, f.project_id):
         return jsonify({'error': '文件路径不在所属项目内'}), 403
     if f.file_type == 'plotly_json':
-        with open(f.file_path, 'r') as fh:
-            data = json.load(fh)
-        data = _decode_plotly_binary(data)
-        data = _sanitize_plotly_values(data)
-        return jsonify(data)
+        return jsonify({'error': 'Plotly interactive results have been retired; rerun the task for PNG/SVG output.'}), 410
     return send_file(f.file_path)
 
 
 @api_bp.route('/projects/<pid>/enrichment-result/<task_id>')
 @api_bp.route('/enrichment-result/<task_id>')
 def enrichment_result(task_id, pid=None):
-    """返回富集分析的 Plotly JSON 结果"""
+    """返回富集分析的静态结果文件元数据。"""
     from models import ResultFile
     task = AnalysisTask.get_by_id(task_id)
     if not task:
@@ -218,14 +214,13 @@ def enrichment_result(task_id, pid=None):
     if task.project_id != pid:
         return jsonify({'error': 'Task 不属于该项目'}), 403
     files = ResultFile.get_by_task(task_id)
-    enrichment_files = [f for f in files if f.category == 'enrichment']
+    enrichment_files = [f for f in files if f.category == 'enrichment' and f.file_type in {'png', 'svg'}]
     result = []
     for f in enrichment_files:
         if f.project_id != task.project_id or not _validate_project_file_path(f.file_path, f.project_id):
             return jsonify({'error': '文件路径不在所属项目内'}), 403
-        with open(f.file_path, 'r') as fh:
-            data = json.load(fh)
-        result.append({'id': f.id, 'label': f.label, 'data': data})
+        result.append({'id': f.id, 'label': f.label, 'file_type': f.file_type,
+                       'url': f'/api/projects/{task.project_id}/result-file/{f.id}'})
     return jsonify(result)
 
 

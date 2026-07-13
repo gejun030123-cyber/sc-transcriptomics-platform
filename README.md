@@ -1,13 +1,13 @@
 # 单细胞与 Bulk RNA-seq AI 分析平台
 
-这是一个基于 Flask、Scanpy、OmicVerse 和 Plotly 的 Web 端转录组分析平台。平台同时覆盖单细胞转录组和 Bulk RNA-seq，支持传统按模块执行的分析流程，也支持用户通过 AI 对话触发分析、检查结果、调整参数，并围绕特定目标创建候选分支进行参数搜索。
+这是一个基于 Flask、Scanpy、Matplotlib 和 OmicVerse 风格规范的 Web 端转录组分析平台。平台同时覆盖单细胞转录组和 Bulk RNA-seq，支持传统按模块执行的分析流程，也支持用户通过 AI 对话触发分析、检查结果、调整参数，并围绕特定目标创建候选分支进行参数搜索。
 
 项目当前定位不是单纯的流程封装，而是一个可交互的分析工作台：
 
 - 用户可以上传数据，在网页中按模块执行 scRNA-seq 或 Bulk RNA-seq 分析。
 - AI 助手可以读取项目状态、理解已完成步骤、调用分析工具并提出参数调整方案。
 - 对“分群不满意”“必须找到最接近某种细胞类型的分群”等需求，平台提供 marker 评分、候选分支、参数 sweep 和人工采纳机制。
-- 所有分析结果会落到项目目录下，包含 h5ad 中间文件、CSV 表格、科研级静态图和 Plotly 交互图表。
+- 所有分析结果会落到项目目录下，包含 h5ad 中间文件、CSV 表格和科研级静态图。
 
 ## 核心能力
 
@@ -18,7 +18,7 @@
 - 参数面板：每个模块有结构化参数 schema，包含中文标签、默认值、类型和帮助说明。
 - 结果管理：任务结果写入数据库，支持图表查看、表格下载和 h5ad 中间文件下载。
 - 科研级图表：Scanpy/Matplotlib 原生图默认保存为 300 dpi PNG 和 SVG 矢量图，结果页优先展示 PNG，并提供 PNG/SVG 下载。
-- Plotly 图表：结果图同时以 Plotly JSON 保存，前端支持缩放、平移、悬停和交互导出。
+- 静态图表：统一使用 Matplotlib/OmicVerse 风格，网页默认展示 300 dpi PNG，并提供 SVG 矢量图下载。
 - 安全路径校验：API 读取和 AI 工具调用会限制在项目目录内，拒绝路径穿越和符号链接输入。
 
 ### 单细胞转录组分析
@@ -132,7 +132,7 @@ resolution 0.8 的单核细胞群太混，帮我设计几个候选参数。
 data/projects/<project_id>/
   uploads/       # 用户上传原始文件
   intermediate/  # 各模块输出 h5ad
-  plots/         # PNG/SVG 科研图、Plotly JSON 交互图表
+  plots/         # PNG/SVG 科研图
   results/       # CSV、报告、下载结果
   branches/      # AI/Agent 候选分支
   presets/       # 项目级参数预设
@@ -156,6 +156,7 @@ pip install gseapy pydeseq2 inmoose
 - `liana`：启用细胞通讯分析。
 - `harmonypy`、`bbknn`、`scanorama`、`scvi-tools`、`torch`：启用 Harmony、BBKNN、Scanorama、SysVI/scVI 批次整合路径；未安装时对应方法不可用。
 - `kneed`：启用 Kneedle 自动 PC 选择。
+- `plotly`：仅用于兼容历史分析模块的内部数据结构；网页、报告和下载结果均不再输出 Plotly 交互图。
 - `openai` 或 `anthropic`：启用对应 AI API 客户端。
 
 启动服务：
@@ -176,7 +177,7 @@ http://localhost:5000
 
 - `PNG`：300 dpi 位图，网页默认展示，适合汇报和快速预览。
 - `SVG`：矢量图，适合论文排版和后续编辑。
-- `Plotly JSON`：交互式结果，支持浏览器缩放、悬停查看细胞/样本信息和再次导出。
+- 所有图表均为 Matplotlib 静态输出：PNG 用于网页预览，SVG 用于论文排版和后续编辑；不再加载 Plotly.js 或提供交互式图表。
 
 新的静态图只会在任务重新运行时生成；历史任务需要重新执行对应模块才能获得 PNG/SVG。若在分析参数面板关闭某种导出格式，平台会按所选格式保存结果。
 
@@ -253,7 +254,7 @@ AI_API_TOKEN=""
 | `/api/tasks/<task_id>/status` | `GET` | 查看分析任务状态 |
 | `/api/projects/<pid>/tasks` | `GET` | 列出项目任务 |
 | `/api/projects/<pid>/adata-info` | `GET` | 获取当前 AnnData 信息 |
-| `/api/result-file/<file_id>` | `GET` | 读取 Plotly JSON 或下载结果文件 |
+| `/api/result-file/<file_id>` | `GET` | 下载 PNG、SVG、CSV 或其他结果文件 |
 | `/api/projects/<pid>/pipeline-runs` | `POST/GET` | 创建或列出批量 pipeline run |
 | `/api/pipeline-runs/<run_id>/status` | `GET` | 查看 pipeline run 状态 |
 | `/api/projects/<pid>/current-context` | `GET` | 查看当前分析基线 |
@@ -279,7 +280,7 @@ python scripts/run_pbmc3k_sc_reference.py
 python scripts/run_bulk_reference.py --help
 ```
 
-该脚本用于把指定 Bulk 表达矩阵跑过核心流程，生成报告、Plotly 图表和结果表。常用于回归测试或离线交付分析结果。
+该脚本用于把指定 Bulk 表达矩阵跑过核心流程，生成静态科研图、报告和结果表。常用于回归测试或离线交付分析结果。
 
 ## 测试
 
@@ -337,7 +338,7 @@ modules/
   schemas.py                # 参数 schema 和 UI 元数据
   base.py                   # 分析基类和结果保存工具
   io_utils.py               # 数据读取和 gene name remap
-  visualization.py          # Plotly 可视化工具
+  visualization.py          # 统一静态图风格和颜色工具
   inspect_utils.py          # AnnData 检查工具
   expression_parser.py      # Bulk 多比较表达式解析
   ai_adapter.py             # Anthropic/OpenAI compatible AI 适配器

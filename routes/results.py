@@ -17,6 +17,39 @@ def _validate_path(file_path, project_id):
     return is_valid and os.path.isfile(file_path)
 
 
+def _materialize_static_files(task, project_id, files):
+    """Convert legacy Plotly payloads so old tasks also use the static contract."""
+    legacy = [f for f in files if f.file_type == 'plotly_json' and _validate_path(f.file_path, project_id)]
+    if not legacy:
+        return files
+    from modules.reporting.static_rendering import render_plotly_json
+
+    known_paths = {f.file_path for f in files}
+    for rf in legacy:
+        try:
+            rendered = render_plotly_json(rf.file_path, label=rf.label or rf.category or '分析图')
+            for item in rendered:
+                item['category'] = rf.category or 'plot'
+                if item['file_path'] in known_paths:
+                    continue
+                files.append(ResultFile.create(
+                    task_id=task.id,
+                    project_id=project_id,
+                    file_type=item['file_type'],
+                    category=item['category'],
+                    label=item['label'],
+                    file_path=item['file_path'],
+                ))
+                known_paths.add(item['file_path'])
+            try:
+                os.remove(rf.file_path)
+            except OSError:
+                pass
+        except Exception:
+            continue
+    return files
+
+
 results_bp = Blueprint('results', __name__)
 
 @results_bp.route('/<pid>/task/<task_id>')
@@ -26,13 +59,14 @@ def task_detail(pid, task_id):
     if not p or not t or t.project_id != pid:
         flash('未找到', 'danger')
         return redirect(url_for('main.index'))
-    files = ResultFile.get_by_task(task_id)
+    files = _materialize_static_files(t, pid, ResultFile.get_by_task(task_id))
     for f in files:
         try:
             f._file_size = os.path.getsize(f.file_path) if f.file_path and os.path.exists(f.file_path) else 0
         except Exception:
             f._file_size = 0
-    plotly_files = [f for f in files if f.file_type == 'plotly_json']
+    # Plotly JSON is a legacy implementation detail and is never exposed.
+    plotly_files = []
     image_files = [f for f in files if f.file_type in ('png', 'svg', 'jpg', 'jpeg')]
     # A Matplotlib figure is emitted as both 300 dpi PNG and SVG.  Show PNG once
     # in the browser (predictable cross-browser rendering), while preserving the
@@ -97,7 +131,7 @@ def results_gallery(pid):
         return redirect(url_for('main.index'))
     tasks = AnalysisTask.get_by_project(pid)
     pipeline_runs = PipelineRun.get_by_project(pid)
-    files_by_task = {t.id: ResultFile.get_by_task(t.id) for t in tasks}
+    files_by_task = {t.id: _materialize_static_files(t, pid, ResultFile.get_by_task(t.id)) for t in tasks}
     report_info = {}
     try:
         from modules.reporting.project_report import ensure_project_report
@@ -123,7 +157,7 @@ def project_report(pid):
         flash('未找到', 'danger')
         return redirect(url_for('main.index'))
     tasks = AnalysisTask.get_by_project(pid)
-    files_by_task = {t.id: ResultFile.get_by_task(t.id) for t in tasks}
+    files_by_task = {t.id: _materialize_static_files(t, pid, ResultFile.get_by_task(t.id)) for t in tasks}
     from modules.reporting.project_report import ensure_project_report
     report_info = ensure_project_report(
         project=p,
@@ -146,7 +180,7 @@ def plot_gallery(pid):
         flash('未找到', 'danger')
         return redirect(url_for('main.index'))
     tasks = AnalysisTask.get_by_project(pid)
-    files_by_task = {t.id: ResultFile.get_by_task(t.id) for t in tasks}
+    files_by_task = {t.id: _materialize_static_files(t, pid, ResultFile.get_by_task(t.id)) for t in tasks}
     from modules.reporting.project_report import ensure_project_report
     report_info = ensure_project_report(
         project=p,
@@ -164,14 +198,14 @@ def plot_gallery(pid):
 
 @results_bp.route('/<pid>/results/plots-archive')
 def plots_archive(pid):
-    """Download the offline gallery and every project Plotly source as one ZIP."""
+    """Download the offline gallery and static publication figures as one ZIP."""
     p = Project.get_by_id(pid)
     if not p:
         flash('未找到', 'danger')
         return redirect(url_for('main.index'))
 
     tasks = AnalysisTask.get_by_project(pid)
-    files_by_task = {t.id: ResultFile.get_by_task(t.id) for t in tasks}
+    files_by_task = {t.id: _materialize_static_files(t, pid, ResultFile.get_by_task(t.id)) for t in tasks}
     from modules.reporting.project_report import ensure_project_report
     report_info = ensure_project_report(
         project=p,
@@ -190,14 +224,11 @@ def plots_archive(pid):
 
         for task in tasks:
             for rf in files_by_task.get(task.id, []):
-                if rf.file_type not in {'plotly_json', 'png', 'svg', 'jpg', 'jpeg'} or not _validate_path(rf.file_path, pid):
+                if rf.file_type not in {'png', 'svg', 'jpg', 'jpeg'} or not _validate_path(rf.file_path, pid):
                     continue
                 safe_label = re.sub(r'[^a-zA-Z0-9._-]+', '_', rf.label or rf.category or 'plot').strip('_') or 'plot'
-                if rf.file_type == 'plotly_json':
-                    arcname = f'plotly_json/{task.module_name}_{task.id}_{safe_label}_{rf.id}.json'
-                else:
-                    extension = os.path.splitext(rf.file_path)[1].lower() or f'.{rf.file_type}'
-                    arcname = f'static_images/{task.module_name}_{task.id}_{safe_label}_{rf.id}{extension}'
+                extension = os.path.splitext(rf.file_path)[1].lower() or f'.{rf.file_type}'
+                arcname = f'static_images/{task.module_name}_{task.id}_{safe_label}_{rf.id}{extension}'
                 archive.write(rf.file_path, arcname)
                 manifest.append({
                     'task_id': task.id,
@@ -227,7 +258,7 @@ def _pipeline_artifacts(pid, run):
         task = AnalysisTask.get_by_id(tid)
         if task and task.project_id == pid:
             tasks.append(task)
-    files_by_task = {t.id: ResultFile.get_by_task(t.id) for t in tasks}
+    files_by_task = {t.id: _materialize_static_files(t, pid, ResultFile.get_by_task(t.id)) for t in tasks}
     from modules.reporting.pipeline_report import write_pipeline_report
     return tasks, files_by_task, write_pipeline_report(
         Config.project_dir(pid),
@@ -294,6 +325,9 @@ def view_file(pid, file_id):
     f = ResultFile.get_by_id(file_id)
     if not f or f.project_id != pid:
         flash('文件未找到', 'danger')
+        return redirect(url_for('projects.detail', pid=pid))
+    if f.file_type == 'plotly_json':
+        flash('Plotly 交互图已停用，请重新运行任务生成 PNG/SVG。', 'warning')
         return redirect(url_for('projects.detail', pid=pid))
     if not _validate_path(f.file_path, pid):
         flash('文件路径不合法', 'danger')

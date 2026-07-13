@@ -16,10 +16,32 @@ def active_count():
 
 
 def register_task_outputs(task, project_id, project_dir, result, pipeline_run_id=None):
-    """Persist result_files and the task manifest for any AnalysisTask runner."""
+    """Persist result files, converting legacy Plotly payloads to static figures."""
     created_result_files = []
     for rf in (result.get('result_files') or []):
         try:
+            if rf.get('file_type') == 'plotly_json' and rf.get('file_path'):
+                from modules.reporting.static_rendering import render_plotly_json
+                static_files = render_plotly_json(
+                    rf['file_path'], label=rf.get('label') or rf.get('category') or '分析图'
+                )
+                for static_file in static_files:
+                    static_file['category'] = rf.get('category', 'plot')
+                    created_result_files.append(ResultFile.create(
+                        task_id=task.id, project_id=project_id,
+                        file_type=static_file['file_type'],
+                        category=static_file['category'],
+                        label=static_file['label'],
+                        file_path=static_file['file_path']
+                    ))
+                # The JSON is an implementation detail after conversion and must
+                # not remain available as an interactive result artifact.
+                try:
+                    import os
+                    os.remove(rf['file_path'])
+                except OSError:
+                    pass
+                continue
             created_result_files.append(ResultFile.create(
                 task_id=task.id, project_id=project_id,
                 file_type=rf.get('file_type', ''),

@@ -87,8 +87,8 @@ def test_project_result_file_api_requires_matching_project(client):
     assert legacy_without_project.status_code == 400
 
     ok = client.get(f"/api/projects/project_b/result-file/{result_file.id}")
-    assert ok.status_code == 200
-    assert ok.get_json() == {"data": [], "layout": {}}
+    assert ok.status_code == 410
+    assert "retired" in ok.get_json()["error"]
 
 
 def test_project_plot_archive_contains_gallery_and_sources(client):
@@ -103,8 +103,8 @@ def test_project_plot_archive_contains_gallery_and_sources(client):
         names = archive.namelist()
         assert 'plot_gallery.html' in names
         assert 'manifest.json' in names
-        plot_sources = [name for name in names if name.startswith('plotly_json/')]
-        assert len(plot_sources) == 1
+        plot_sources = [name for name in names if name.startswith('static_images/')]
+        assert len(plot_sources) == 2
         manifest = json.loads(archive.read('manifest.json'))
         assert manifest[0]['label'] == 'QC plot'
         assert manifest[0]['archive_path'] == plot_sources[0]
@@ -117,8 +117,9 @@ def test_task_result_page_has_individual_and_batch_plot_exports(client):
     resp = client.get(f'/projects/project_a/task/{task.id}')
 
     assert resp.status_code == 200
-    assert '全部导出 PNG'.encode() in resp.data
-    assert 'exportTaskPlot'.encode() in resp.data
+    assert '科研图（默认展示）'.encode() in resp.data
+    assert '下载 PNG'.encode() in resp.data
+    assert b'Plotly.newPlot' not in resp.data
 
 
 def test_analysis_submit_rejects_input_outside_project(client, tmp_path):

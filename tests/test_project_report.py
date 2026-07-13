@@ -1,3 +1,4 @@
+import base64
 import json
 from types import SimpleNamespace
 
@@ -5,19 +6,15 @@ from types import SimpleNamespace
 def test_write_plot_gallery_and_project_report(tmp_path, monkeypatch):
     from modules.reporting import project_report
 
-    monkeypatch.setattr(project_report, "_plotly_js", lambda: "window.Plotly={newPlot:function(){}};")
-
     project_dir = tmp_path / "project"
     plots_dir = project_dir / "plots"
     plots_dir.mkdir(parents=True)
-    plot_path = plots_dir / "qc_overview.json"
-    plot_path.write_text(
-        json.dumps({
-            "data": [{"type": "bar", "x": ["before", "after"], "y": [50, 45]}],
-            "layout": {"title": "QC overview"},
-        }),
-        encoding="utf-8",
-    )
+    plot_path = plots_dir / "qc_overview.png"
+    plot_path.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    ))
+    svg_path = plots_dir / "qc_overview.svg"
+    svg_path.write_text("<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'></svg>", encoding="utf-8")
     csv_path = project_dir / "results" / "qc.csv"
     csv_path.parent.mkdir()
     csv_path.write_text("metric,value\ncells,45\n", encoding="utf-8")
@@ -37,10 +34,19 @@ def test_write_plot_gallery_and_project_report(tmp_path, monkeypatch):
                 id="plot-1",
                 task_id="task-1",
                 project_id="proj-1",
-                file_type="plotly_json",
+                file_type="png",
                 category="qc",
                 label="QC overview",
                 file_path=str(plot_path),
+            ),
+            SimpleNamespace(
+                id="plot-2",
+                task_id="task-1",
+                project_id="proj-1",
+                file_type="svg",
+                category="qc",
+                label="QC overview",
+                file_path=str(svg_path),
             ),
             SimpleNamespace(
                 id="csv-1",
@@ -71,10 +77,9 @@ def test_write_plot_gallery_and_project_report(tmp_path, monkeypatch):
 
     gallery = gallery_path.read_text(encoding="utf-8")
     assert "QC overview" in gallery
-    assert "Plotly.newPlot" in gallery
-    assert "全部导出 PNG" in gallery
-    assert "exportAllPlots" in gallery
-    assert "导出 SVG" in gallery
+    assert "Plotly.newPlot" not in gallery
+    assert "下载 PNG" in gallery
+    assert "下载 SVG" in gallery
 
     report = report_path.read_text(encoding="utf-8")
     assert "# 项目结果报告：Demo Project" in report
