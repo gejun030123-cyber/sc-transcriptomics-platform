@@ -494,3 +494,24 @@ def test_gsea_export_preserves_pathway_names_from_index():
     result = _ensure_gsea_term_column(df)
 
     assert result.loc[0, 'Term'] == 'interferon signaling'
+
+
+def test_enrichment_figure_uses_ontology_colors_and_overlap_counts():
+    import pandas as pd
+    from modules.bulk_enrichment import _enrichment_figure
+
+    df = pd.DataFrame({
+        'Term': ['response to virus', 'mRNA binding', 'Measles'],
+        'P-value': [1e-6, 1e-3, 1e-4],
+        'Overlap': ['6/100', '2/100', '4/100'],
+        'Ontology': ['BP', 'MF', 'KEGG'],
+    })
+    fig = _enrichment_figure(df, 'enrich result', database='GO_BP')
+    try:
+        assert fig is not None
+        assert len(fig.axes) == 1
+        assert len(fig.axes[0].patches) == 3
+        assert any(text.get_text() == '6' for text in fig.axes[0].texts)
+    finally:
+        import matplotlib.pyplot as plt
+        plt.close(fig)

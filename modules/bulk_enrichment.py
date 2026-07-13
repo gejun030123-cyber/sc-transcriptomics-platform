@@ -1,5 +1,4 @@
 import os
-import json
 import numpy as np
 import pandas as pd
 from modules.base import BaseAnalysis
@@ -14,6 +13,130 @@ def _ensure_gsea_term_column(result_df):
     return result
 
 
+ONTOLOGY_COLORS = {
+    'BP': '#FDBE85',
+    'MF': '#B8A9D1',
+    'KEGG': '#7BC77B',
+    'OTHER': '#9CB8D8',
+}
+
+
+def _enrichment_ontology(value, database=''):
+    """Normalize database labels to the compact ontology legend used in plots."""
+    text = str(value or database or '').upper()
+    if 'KEGG' in text:
+        return 'KEGG'
+    if 'MF' in text or 'MOLECULAR FUNCTION' in text:
+        return 'MF'
+    if 'BP' in text or 'BIOLOGICAL PROCESS' in text:
+        return 'BP'
+    return 'OTHER'
+
+
+def _enrichment_count(value):
+    """Extract the leading overlap count from values such as ``9/132``."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return 1
+    text = str(value).strip()
+    try:
+        return max(1, int(float(text.split('/', 1)[0])))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _enrichment_figure(result_df, title, database='GO_BP', score_column=None):
+    """Create a clean horizontal enrichment chart similar to the supplied PDF.
+
+    Bars encode ``-log10(adjusted p-value)``, the left bubbles encode overlap
+    count, and fill colors encode BP/MF/KEGG.  The figure is deliberately native
+    Matplotlib so it exports identically to high-DPI PNG and SVG.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    df = result_df.copy()
+    if df.empty:
+        return None
+    term_col = next((c for c in ('Term', 'Description', 'term', 'description') if c in df.columns), None)
+    if term_col is None:
+        df = df.reset_index().rename(columns={df.index.name or 'index': 'Term'})
+        term_col = 'Term'
+    p_col = next((c for c in ('Adjusted P-value', 'Adjusted p-value', 'p.adjust', 'FDR', 'fdr', 'P-value', 'pvalue') if c in df.columns), None)
+    if score_column and score_column in df.columns:
+        score = pd.to_numeric(df[score_column], errors='coerce').abs()
+        x_label = 'Enrichment score'
+    elif p_col:
+        score = -np.log10(pd.to_numeric(df[p_col], errors='coerce').clip(lower=1e-300))
+        x_label = '-log10(adjusted P-value)'
+    else:
+        score = pd.Series(np.arange(len(df), 0, -1), index=df.index, dtype=float)
+        x_label = 'Enrichment score'
+    df = df.assign(_score=score).dropna(subset=['_score']).sort_values('_score', ascending=False)
+    if df.empty:
+        return None
+
+    ontology_col = next((c for c in ('Ontology', 'ontology', 'Gene_set', 'gene_set', 'database') if c in df.columns), None)
+    ontologies = [
+        _enrichment_ontology(row[ontology_col] if ontology_col else database, database)
+        for _, row in df.iterrows()
+    ]
+    count_col = next((c for c in ('Overlap', 'Count', 'count', 'Gene Count', 'gene_count', 'setSize', 'size') if c in df.columns), None)
+    counts = [_enrichment_count(row[count_col]) if count_col else 1 for _, row in df.iterrows()]
+    terms = [str(value) for value in df[term_col].tolist()]
+    values = df['_score'].astype(float).to_numpy()
+    y = np.arange(len(df))
+    colors = [ONTOLOGY_COLORS.get(item, ONTOLOGY_COLORS['OTHER']) for item in ontologies]
+
+    height = max(4.8, min(13.0, 1.25 + 0.43 * len(df)))
+    fig, ax = plt.subplots(figsize=(9.2, height), dpi=150)
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('white')
+    ax.barh(y, values, color=colors, edgecolor='none', height=0.82, alpha=0.96, zorder=1)
+    ax.set_yticks(y, [''] * len(y))
+    ax.invert_yaxis()
+    ax.set_xlabel(x_label, fontsize=12, color='#142a8b', labelpad=12)
+    ax.set_ylabel('Description', fontsize=12, color='#142a8b', labelpad=18)
+    fig.suptitle(title, x=0.03, y=0.98, ha='left', va='top',
+                 fontsize=17, fontweight='semibold', color='#111827')
+    ax.grid(axis='x', color='#d8dee9', linewidth=0.65, alpha=0.55, zorder=0)
+    ax.tick_params(axis='y', labelsize=10, length=0, pad=7, colors='#111827')
+    ax.tick_params(axis='x', labelsize=10, colors='#374151', width=0.6)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    max_score = max(float(values.max()), 1.0)
+    ax.set_xlim(-max(0.9, max_score * 0.12), max_score * 1.08)
+    bubble_sizes = [65 + 30 * np.sqrt(max(1, count)) for count in counts]
+    ax.scatter(np.full(len(y), -max_score * 0.045), y, s=bubble_sizes,
+               c=colors, edgecolors='#111827', linewidths=0.8, zorder=3)
+    for yi, count in zip(y, counts):
+        ax.text(-max_score * 0.045, yi, str(count), ha='center', va='center',
+                fontsize=8.5, color='#111827', zorder=4)
+    for yi, term in zip(y, terms):
+        ax.text(max_score * 0.012, yi, term, ha='left', va='center',
+                fontsize=10, color='#111827', zorder=2)
+
+    present_ontologies = [item for item in ('BP', 'MF', 'KEGG', 'OTHER') if item in ontologies]
+    ontology_handles = [Patch(facecolor=ONTOLOGY_COLORS[item], edgecolor='none', label=item)
+                        for item in present_ontologies]
+    ontology_legend = fig.legend(handles=ontology_handles, title='ONTOLOGY',
+                                 loc='upper left', bbox_to_anchor=(0.82, 0.88),
+                                 bbox_transform=fig.transFigure,
+                                 frameon=False, fontsize=10, title_fontsize=11)
+    legend_counts = sorted(set(counts))[:4]
+    if legend_counts:
+        count_handles = [Line2D([0], [0], marker='o', linestyle='none',
+                                markerfacecolor='#111827', markeredgecolor='#111827',
+                                markersize=5 + 2.2 * np.sqrt(max(1, value)),
+                                label=str(value)) for value in legend_counts]
+        fig.legend(handles=count_handles, title='Count', loc='upper left',
+                   bbox_to_anchor=(0.82, 0.54), bbox_transform=fig.transFigure,
+                   frameon=False, fontsize=10, title_fontsize=11)
+    fig.subplots_adjust(left=0.07, right=0.75, top=0.88, bottom=0.13)
+    return fig
+
+
 class BulkEnrichmentAnalysis(BaseAnalysis):
     MODULE_NAME = "bulk_enrichment"
     DISPLAY_NAME = "通路富集分析"
@@ -25,7 +148,6 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
 
     def run(self, input_path):
         import omicverse as ov
-        import plotly.graph_objects as go
 
         method = self.params.get('method', 'ORA')
         database = self.params.get('database', 'GO_BP')
@@ -140,38 +262,19 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
                     suffix = '_up' if direction == 'Up' else '_down'
                     top_enr_dir = enr_dir.head(top_n)
                     if len(top_enr_dir) > 0:
-                        x_col = 'Fractions' if 'Fractions' in top_enr_dir.columns else ('Odds Ratio' if 'Odds Ratio' in top_enr_dir.columns else None)
-                        term_col = 'Term' if 'Term' in top_enr_dir.columns else None
-
-                        fig_bubble = go.Figure()
-                        x_vals = top_enr_dir[x_col].values if x_col else list(range(len(top_enr_dir)))
-                        y_vals = top_enr_dir[term_col].tolist() if term_col else top_enr_dir.index.tolist()
-
-                        if 'Overlap' in top_enr_dir.columns:
-                            sizes = top_enr_dir['Overlap'].apply(lambda x: int(str(x).split('/')[0]) * 3 + 5).values
-                        else:
-                            sizes = [10] * len(top_enr_dir)
-
-                        if 'P-value' in top_enr_dir.columns:
-                            colors = -np.log10(top_enr_dir['P-value'].clip(lower=1e-300).values)
-                        else:
-                            colors = [1] * len(top_enr_dir)
-
-                        fig_bubble.add_trace(go.Scatter(
-                            x=x_vals, y=y_vals, mode='markers',
-                            marker=dict(size=sizes, color=colors, colorscale='YlOrRd', showscale=True,
-                                       colorbar=dict(title='-log10(p)')),
-                            hovertemplate='%{y}<br>-log10(p): %{marker.color:.1f}<extra></extra>'
-                        ))
-                        fig_bubble.update_layout(
-                            title=f'{database} ORA 富集分析 ({organism}) - {direction} genes',
-                            xaxis_title='Gene Fraction' if x_col else 'Index',
-                            yaxis=dict(autorange='reversed'),
-                            plot_bgcolor='white', width=800, height=max(400, top_n * 25 + 100)
+                        fig_enrichment = _enrichment_figure(
+                            top_enr_dir,
+                            title=f'{direction}_enrich_result',
+                            database=database,
                         )
-                        fpath = os.path.join(plots_dir, f'enrichment_ora_bubble{suffix}.json')
-                        with open(fpath, 'w') as f: f.write(fig_bubble.to_json(engine="json"))
-                        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'enrichment', 'label': f'ORA 气泡图 ({direction})'})
+                        if fig_enrichment is not None:
+                            result_files.extend(self.save_matplotlib_figure(
+                                fig_enrichment, plots_dir,
+                                f'enrichment_ora{suffix}.png', 'enrichment',
+                                f'ORA 富集图 ({direction})',
+                            ))
+                            import matplotlib.pyplot as plt
+                            plt.close(fig_enrichment)
 
                 if all_split_results:
                     combined = pd.concat(all_split_results, ignore_index=True)
@@ -198,58 +301,18 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
                 self.progress(70, "生成气泡图...")
                 top_enr = enr.head(top_n)
                 if len(top_enr) > 0:
-                    # Determine x-axis column
-                    x_col = 'Fractions' if 'Fractions' in top_enr.columns else ('Odds Ratio' if 'Odds Ratio' in top_enr.columns else None)
-                    term_col = 'Term' if 'Term' in top_enr.columns else None
-
-                    fig_bubble = go.Figure()
-                    x_vals = top_enr[x_col].values if x_col else list(range(len(top_enr)))
-                    y_vals = top_enr[term_col].tolist() if term_col else top_enr.index.tolist()
-
-                    # Size by overlap count
-                    if 'Overlap' in top_enr.columns:
-                        sizes = top_enr['Overlap'].apply(lambda x: int(str(x).split('/')[0]) * 3 + 5).values
-                    else:
-                        sizes = [10] * len(top_enr)
-
-                    # Color by p-value
-                    if 'P-value' in top_enr.columns:
-                        colors = -np.log10(top_enr['P-value'].clip(lower=1e-300).values)
-                    else:
-                        colors = [1] * len(top_enr)
-
-                    fig_bubble.add_trace(go.Scatter(
-                        x=x_vals, y=y_vals, mode='markers',
-                        marker=dict(size=sizes, color=colors, colorscale='YlOrRd', showscale=True,
-                                   colorbar=dict(title='-log10(p)')),
-                        hovertemplate='%{y}<br>-log10(p): %{marker.color:.1f}<extra></extra>'
-                    ))
-                    fig_bubble.update_layout(
-                        title=f'{database} ORA 富集分析 ({organism})',
-                        xaxis_title='Gene Fraction' if x_col else 'Index',
-                        yaxis=dict(autorange='reversed'),
-                        plot_bgcolor='white', width=800, height=max(400, top_n * 25 + 100)
+                    fig_enrichment = _enrichment_figure(
+                        top_enr,
+                        title=f'{database} enrich result',
+                        database=database,
                     )
-                    fpath = os.path.join(plots_dir, 'enrichment_ora_bubble.json')
-                    with open(fpath, 'w') as f: f.write(fig_bubble.to_json(engine="json"))
-                    result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'enrichment', 'label': 'ORA 气泡图'})
-
-                    # Bar chart
-                    if 'P-value' in top_enr.columns:
-                        fig_bar = go.Figure()
-                        fig_bar.add_trace(go.Bar(
-                            x=-np.log10(top_enr['P-value'].clip(lower=1e-300).values),
-                            y=y_vals, orientation='h', marker_color='#e53935'
+                    if fig_enrichment is not None:
+                        result_files.extend(self.save_matplotlib_figure(
+                            fig_enrichment, plots_dir, 'enrichment_ora.png',
+                            'enrichment', 'ORA 富集图',
                         ))
-                        fig_bar.update_layout(
-                            title=f'Top {top_n} 富集通路',
-                            xaxis_title='-log10(P-value)',
-                            yaxis=dict(autorange='reversed'),
-                            plot_bgcolor='white', width=700, height=max(400, top_n * 25 + 100)
-                        )
-                        fpath = os.path.join(plots_dir, 'enrichment_ora_bar.json')
-                        with open(fpath, 'w') as f: f.write(fig_bar.to_json(engine="json"))
-                        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'enrichment', 'label': 'ORA 条形图'})
+                        import matplotlib.pyplot as plt
+                        plt.close(fig_enrichment)
 
                 n_sig = len(enr[enr['P-value'] < pvalue_cutoff]) if 'P-value' in enr.columns else len(enr)
 
@@ -277,22 +340,19 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
             self.progress(75, "生成 GSEA 图表...")
             if len(enr_sig) > 0:
                 top_gsea = enr_sig.head(top_n)
-                fig_bar = go.Figure()
-                fig_bar.add_trace(go.Bar(
-                    x=top_gsea['nes'].values,
-                    y=top_gsea['Term'].astype(str).tolist(),
-                    orientation='h',
-                    marker_color=['#e53935' if v > 0 else '#1a237e' for v in top_gsea['nes'].values]
-                ))
-                fig_bar.update_layout(
-                    title=f'Top {top_n} GSEA 通路 (NES)',
-                    xaxis_title='Normalized Enrichment Score',
-                    yaxis=dict(autorange='reversed'),
-                    plot_bgcolor='white', width=700, height=max(400, top_n * 25 + 100)
+                fig_enrichment = _enrichment_figure(
+                    top_gsea,
+                    title='GSEA enrich result',
+                    database=database,
+                    score_column='nes' if 'nes' in top_gsea.columns else None,
                 )
-                fpath = os.path.join(plots_dir, 'enrichment_gsea_nes.json')
-                with open(fpath, 'w') as f: f.write(fig_bar.to_json(engine="json"))
-                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'enrichment', 'label': 'GSEA NES 条形图'})
+                if fig_enrichment is not None:
+                    result_files.extend(self.save_matplotlib_figure(
+                        fig_enrichment, plots_dir, 'enrichment_gsea.png',
+                        'enrichment', 'GSEA 富集图',
+                    ))
+                    import matplotlib.pyplot as plt
+                    plt.close(fig_enrichment)
 
             n_sig = len(enr_sig)
         else:

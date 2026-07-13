@@ -183,7 +183,13 @@ class BaseAnalysis(ABC):
                     for text in legend.get_texts():
                         text.set_fontsize(max(8, font_size - 2))
                         text.set_fontfamily(font_family)
-            fig.tight_layout(pad=1.1)
+            # Figure-level legends (used by enrichment charts) need an explicit
+            # right-side reservation; otherwise tight_layout expands the axes
+            # underneath the legend and clips/overlaps the ontology key.
+            if getattr(fig, 'legends', None):
+                fig.tight_layout(rect=(0.0, 0.0, 0.76, 0.93), pad=1.1)
+            else:
+                fig.tight_layout(pad=1.1)
         except Exception:
             # A third-party figure may expose a non-standard Axes object; export
             # it unchanged rather than making a successful analysis fail.
