@@ -459,7 +459,39 @@ def convert_10x_to_h5ad(mtx_dir, output_path, species=None, genome=None):
         raise FileNotFoundError(f"10x 矩阵目录不存在: {mtx_dir}")
     import scanpy as sc
 
-    adata = sc.read_10x_mtx(mtx_dir, var_names='gene_symbols', cache=True)
+    # Recent Scanpy versions expect compressed 10x filenames by default.  The
+    # web uploader also accepts plain .mtx/.tsv files, so create a temporary
+    # gzip view when a ZIP contains the uncompressed form.
+    read_dir = mtx_dir
+    temp_dir = None
+    plain_to_gzip = {
+        'matrix.mtx': 'matrix.mtx.gz',
+        'barcodes.tsv': 'barcodes.tsv.gz',
+        'features.tsv': 'features.tsv.gz',
+        'genes.tsv': 'genes.tsv.gz',
+    }
+    if any(os.path.exists(os.path.join(mtx_dir, plain))
+           and not os.path.exists(os.path.join(mtx_dir, compressed))
+           for plain, compressed in plain_to_gzip.items()):
+        import gzip
+        import shutil
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp(prefix='10x_gzip_')
+        for plain, compressed in plain_to_gzip.items():
+            source = os.path.join(mtx_dir, plain)
+            if not os.path.isfile(source):
+                continue
+            target = os.path.join(temp_dir, compressed)
+            with open(source, 'rb') as src, gzip.open(target, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+        read_dir = temp_dir
+    try:
+        adata = sc.read_10x_mtx(read_dir, var_names='gene_symbols', cache=True)
+    finally:
+        if temp_dir:
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
     adata.var_names_make_unique()
 
     # 保留 Ensembl ID（read_10x_mtx 在 var_names='gene_symbols' 时
