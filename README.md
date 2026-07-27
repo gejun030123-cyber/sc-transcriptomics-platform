@@ -19,14 +19,18 @@
 - 结果管理：任务结果写入数据库，支持图表查看、表格下载和 h5ad 中间文件下载。
 - 科研级图表：Scanpy/Matplotlib 原生图默认保存为 300 dpi PNG 和 SVG 矢量图，结果页优先展示 PNG，并提供 PNG/SVG 下载。
 - 静态图表：统一使用 Matplotlib/OmicVerse 风格，网页默认展示 300 dpi PNG，并提供 SVG 矢量图下载。
+- 图形工作台：从分析结果或用户上传图片创建非破坏性的样式版本，支持预览、PNG/SVG 导出和版本追踪。
+- 可复现交付：任务 manifest、项目报告、离线图表图库和 pipeline 报告会记录参数、summary、产物和复核证据。
 - 安全路径校验：API 读取和 AI 工具调用会限制在项目目录内，拒绝路径穿越和符号链接输入。
 
 ### 单细胞转录组分析
 
-平台提供 12 个单细胞模块，典型顺序为：
+平台提供 14 个单细胞模块。核心顺序为：
 
 ```text
-qc -> normalize -> hvg -> dimred -> batch_correct -> clustering -> qc_reassess -> annotation -> deg -> trajectory -> proportion -> cell_communication
+qc -> normalize -> hvg -> dimred -> batch_correct -> clustering
+  -> qc_reassess / annotation / subcluster / sc_timecourse / deg
+  -> trajectory / proportion / cell_communication
 ```
 
 | 模块 | 主要功能 | 典型输出 |
@@ -37,8 +41,10 @@ qc -> normalize -> hvg -> dimred -> batch_correct -> clustering -> qc_reassess -
 | `dimred` | PCA、UMAP，可选 t-SNE/MDE，支持自动 PC 选择 | PCA variance、PCA scatter、UMAP QC 着色图 |
 | `batch_correct` | Harmony、ComBat、BBKNN、Scanorama、SysVI、scVI 等批次整合入口；支持 CPU/GPU 深度模型路径 | 校正后 embedding/graph、整合前后 UMAP、batch ASW、cluster batch entropy、最大批次占比、邻居混合、图连通性、指标表 |
 | `clustering` | 多分辨率 Leiden/Louvain 聚类，支持主分辨率、自动分辨率评分 | 各分辨率 UMAP、多分辨率 UMAP、cluster 标签 UMAP、cluster 细胞数图、cluster 批次组成图、分辨率 Sankey |
+| `subcluster` | 对指定 cluster 进行子簇重聚类、差异表达和通路富集 | 子簇 UMAP、marker 表、热图、富集结果 |
 | `qc_reassess` | 聚类后按簇评估 doublet、MT、ribo、细胞数，支持自动移除低质量簇 | 低质量簇表、按簇 QC 汇总图、doublet/MT UMAP、QC 指标 UMAP 面板、低质量簇高亮图 |
-| `annotation` | marker 自动打分、手动映射、CellTypist；内置 TME、Immune、Blood、PBMC marker；置信度/score margin | 细胞类型 UMAP、细胞类型组成图、marker score heatmap、marker dotplot、marker 表达验证图、annotation score UMAP |
+| `annotation` | 分层 cell lineage/type/subtype、独立 cell state；marker 自动打分、负向 marker 互斥、多证据复核；类器官自动计算前体/成熟/增殖模块和成熟度指数，并读取时间元数据；可选本地人类 CellTypist 参考交叉验证（不覆盖 Marker 标签）；注释版本/备注可追溯；doublet/环境 RNA 仅作复核证据 | 细胞类型 UMAP、细胞类型组成图、marker score heatmap、marker dotplot、marker 表达验证图、annotation score UMAP、成熟度 UMAP、CellTypist 参考 UMAP、逐簇复核表 |
+| `sc_timecourse` | 按真实时间点进行样本级细胞组成和伪 bulk 基因动态分析，区分描述性趋势与统计推断 | 时间点 UMAP、组成曲线/热图、动态基因表和趋势图 |
 | `deg` | Wilcoxon、t-test、logreg 等 cluster/celltype 差异表达 | DEG CSV、完整 DEG CSV、火山图、显著 DEG 数量图、top marker UMAP 面板、dotplot、marker heatmap、基因表达 UMAP |
 | `trajectory` | Diffusion Map、DPT、PAGA 拟时序 | pseudotime UMAP、pseudotime 分布图、PAGA 图、基因随拟时序变化图 |
 | `proportion` | 细胞比例统计和组间比较，支持卡方、Fisher、置换检验 | 堆叠柱图、比例 heatmap、饼图、比例统计表 |
@@ -141,7 +147,7 @@ data/projects/<project_id>/
 
 ## 安装与启动
 
-项目当前没有锁定的 `requirements.txt` 或 `pyproject.toml`。建议在独立 conda/venv 环境中安装依赖。
+项目提供 `requirements.txt` 作为非锁定依赖清单，但没有 `pyproject.toml` 或锁定版本文件。建议在独立 conda/venv 环境中安装依赖，并根据需要补充可选包。
 
 ```bash
 git clone https://github.com/gejun030123-cyber/sc-transcriptomics-platform.git
@@ -153,7 +159,7 @@ pip install gseapy pydeseq2 inmoose
 
 可选依赖：
 
-- `celltypist`：启用 CellTypist 注释。
+- `celltypist`：启用本地人类 CellTypist 参考交叉验证；类器官注释不把外部模型作为默认真值，冲突结果保留人工复核。
 - `liana`：启用细胞通讯分析。
 - `harmonypy`、`bbknn`、`scanorama`、`scvi-tools`、`torch`：启用 Harmony、BBKNN、Scanorama、SysVI/scVI 批次整合路径；未安装时对应方法不可用。
 - `kneed`：启用 Kneedle 自动 PC 选择。
@@ -181,6 +187,15 @@ http://localhost:5000
 - 所有图表均为 Matplotlib 静态输出：PNG 用于网页预览，SVG 用于论文排版和后续编辑；不再加载 Plotly.js 或提供交互式图表。
 
 新的静态图只会在任务重新运行时生成；历史任务需要重新执行对应模块才能获得 PNG/SVG。若在分析参数面板关闭某种导出格式，平台会按所选格式保存结果。
+
+### 图形工作台
+
+项目详情页中的“图形工作台”（`/projects/<pid>/figure-studio`）支持：
+
+- 从已生成的火山图、热图、相关性图、富集图等结果中选择可编辑来源。
+- 调整标题、字体、颜色、尺寸和版式并实时预览。
+- 上传外部 PNG/JPG/SVG 图片进行样式包装；原始分析结果不会被覆盖。
+- 将每次调整保存为独立版本，并下载 PNG 或 SVG。
 
 ## AI API 配置
 
@@ -256,6 +271,7 @@ AI_API_TOKEN=""
 | `/api/projects/<pid>/tasks` | `GET` | 列出项目任务 |
 | `/api/projects/<pid>/adata-info` | `GET` | 获取当前 AnnData 信息 |
 | `/api/result-file/<file_id>` | `GET` | 下载 PNG、SVG、CSV 或其他结果文件 |
+| `/projects/<pid>/figure-studio` | `GET` | 打开非破坏性图形工作台 |
 | `/projects/<pid>/upload/import-10x-batches` | `POST` | 接收两个 `batch_zip` 和两个 `batch_name`，合并为带 `batch` 列的 h5ad |
 | `/api/projects/<pid>/pipeline-runs` | `POST/GET` | 创建或列出批量 pipeline run |
 | `/api/pipeline-runs/<run_id>/status` | `GET` | 查看 pipeline run 状态 |
@@ -333,6 +349,7 @@ routes/
   api.py                    # 常规 REST API
   chat.py                   # AI 对话 API
   branches.py               # Agent session、candidate branch、score、accept API
+  figure_studio.py          # 图形工作台页面、预览、上传和版本下载
   auth.py                   # Bearer token 鉴权装饰器
 
 modules/
@@ -347,8 +364,13 @@ modules/
   ai_tools.py               # AI 工具执行后端
   agent_orchestrator.py     # 目标驱动 Agent 编排
   agent_jobs.py             # 参数 sweep 异步 job
+  design_preflight.py       # 分析前实验设计和比较组检查
+  figure_style.py           # 统一 Nature 风格和 Matplotlib 参数
+  native_figures.py         # 原生静态科研图构建器
+  figure_studio.py          # 图形来源解析、预览和版本保存
   cell_markers.py           # 内置 marker 定义
   evaluators/               # 候选分支评分器
+  reporting/                # manifest、项目报告、pipeline 和复核证据
   qc.py ... deg.py          # 单细胞分析模块
   bulk_qc.py ...            # Bulk 分析模块
   convert_10x.py            # 10x 转换模块
@@ -366,6 +388,7 @@ data/                       # 本地项目数据，默认不纳入 git
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
 | `DATA_DIR` | `<repo>/data` | 项目数据、结果、presets 存储目录 |
+| `RUNTIME_TMP_DIR` | `<repo>/data/runtime_tmp` | 临时分析文件、10x 兼容转换、Python/Numba/Matplotlib 缓存；应设在非根分区的数据盘 |
 | `DB_PATH` | `<repo>/instance/bioinfo.db` | SQLite 数据库路径 |
 | `CELLMARKER_PATH` | repo 上级目录下 `CellMarker_Augmented_2021.txt` | 可选 CellMarker 数据 |
 | `MAX_WORKERS` | `2` | 后台分析任务并发数 |
@@ -381,7 +404,7 @@ data/                       # 本地项目数据，默认不纳入 git
 - AI 能调用平台已暴露的工具，不能绕过模块代码本身的能力边界。
 - 参数 sweep 会创建候选分支并消耗计算资源，最大候选数量有限制，写操作需要用户确认。
 - marker 评分用于辅助判断“最接近某细胞类型的 cluster”，不是人工注释或实验验证的替代。
-- CellTypist、LIANA、scVI、SysVI、DESeq2/edgeR/limma 等路径依赖对应包和环境；缺失时相关模块可能降级、跳过或报错。
+- LIANA、scVI、SysVI、DESeq2/edgeR/limma 等路径依赖对应包和环境；缺失时相关模块可能降级、跳过或报错。
 - 大型分析输出建议保留在 `data/` 或外部结果目录，不建议直接提交到 git。
 
 ## License
