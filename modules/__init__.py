@@ -9,6 +9,7 @@ from .qc_reassess import QCReassessAnalysis
 from .annotation import AnnotationAnalysis
 from .deg import DEGAnalysis
 from .trajectory import TrajectoryAnalysis
+from .sc_timecourse import SCTimecourseAnalysis
 from .proportion import ProportionAnalysis
 from .cell_communication import CellCommunicationAnalysis
 from .bulk_qc import BulkQCAnalysis
@@ -35,6 +36,7 @@ MODULE_REGISTRY = {
     'annotation': AnnotationAnalysis,
     'deg': DEGAnalysis,
     'trajectory': TrajectoryAnalysis,
+    'sc_timecourse': SCTimecourseAnalysis,
     'proportion': ProportionAnalysis,
     'cell_communication': CellCommunicationAnalysis,
     # Bulk RNA-seq 分析模块
@@ -52,7 +54,7 @@ MODULE_REGISTRY = {
 
 PIPELINE_ORDER = [
     'qc', 'normalize', 'hvg', 'dimred', 'batch_correct', 'clustering', 'subcluster',
-    'qc_reassess', 'annotation', 'deg', 'trajectory', 'proportion', 'cell_communication',
+    'qc_reassess', 'annotation', 'sc_timecourse', 'deg', 'trajectory', 'proportion', 'cell_communication',
     'bulk_qc', 'bulk_normalize', 'bulk_pca', 'bulk_deg', 'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
     'bulk_deg_integration',
 ]
@@ -68,6 +70,7 @@ PIPELINE_DEPS = {
     'subcluster': ['clustering'],
     'qc_reassess': ['clustering'],
     'annotation': ['clustering'],
+    'sc_timecourse': ['clustering'],
     'deg': ['clustering'],
     'trajectory': ['clustering'],
     'proportion': ['clustering'],

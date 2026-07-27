@@ -798,9 +798,22 @@ function addToolCall(name, args) {
     document.getElementById('chat-messages').appendChild(div);
 }
 
+function addPipelineRunLink(url) {
+    const div = document.createElement('div');
+    div.className = 'chat-tool-call';
+    const link = document.createElement('a');
+    link.href = url;
+    link.className = 'btn btn-sm btn-outline-primary';
+    link.textContent = '查看流程进度与最终结果';
+    div.appendChild(link);
+    document.getElementById('chat-messages').appendChild(div);
+    div.scrollIntoView({ behavior: 'smooth' });
+}
+
 function describeTool(toolName) {
     const labels = {
         run_analysis: '会提交新的分析任务，需要你确认后执行。',
+        run_pipeline: '会一次性提交完整流水线；后台会自动衔接每个步骤，可能耗时较长。',
         propose_parameter_sweep: '会生成候选参数方案，不会直接运行分析。',
         run_parameter_sweep: '会启动后台参数搜索任务，可能耗时较长。',
         start_goal_agent: '会创建目标驱动 Agent 会话并准备候选方案。',
@@ -853,6 +866,7 @@ async function approveTool(index) {
             addMessage('assistant', '执行失败: ' + data.error);
         } else {
             addMessage('assistant', '任务已提交: ' + (data.message || JSON.stringify(data)));
+            if (data.pipeline_url) addPipelineRunLink(data.pipeline_url);
             loadAgentState();
         }
         if (card) card.remove();

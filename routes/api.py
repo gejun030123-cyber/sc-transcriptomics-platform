@@ -153,6 +153,7 @@ def system_dependencies():
     from modules.platform.system_health import dependency_status
     return jsonify(dependency_status())
 
+
 @api_bp.route('/projects/<pid>/adata-info')
 def adata_info(pid):
     p = Project.get_by_id(pid)
@@ -200,6 +201,79 @@ def get_result_file(file_id, pid=None):
     return send_file(f.file_path)
 
 
+@api_bp.route('/projects/<pid>/result-file/<file_id>/table-preview')
+def result_table_preview(pid, file_id):
+    """Return a bounded, filterable preview of a project-owned CSV artifact."""
+    result_file = ResultFile.get_by_id(file_id)
+    if not result_file:
+        return jsonify({'error': 'Not found'}), 404
+    if result_file.project_id != pid:
+        return jsonify({'error': 'Result file 不属于该项目'}), 403
+    if result_file.file_type != 'csv':
+        return jsonify({'error': '仅支持 CSV 结果表预览'}), 400
+    if not _validate_project_file_path(result_file.file_path, pid):
+        return jsonify({'error': '文件路径不在所属项目内'}), 403
+
+    def bounded_int(raw, default, minimum, maximum):
+        try:
+            return max(minimum, min(maximum, int(raw)))
+        except (TypeError, ValueError):
+            return default
+
+    max_scan = 5000
+    limit = bounded_int(request.args.get('limit'), 200, 1, 1000)
+    search = str(request.args.get('search', '') or '').strip()
+    filter_column = str(request.args.get('column', '') or '').strip()
+    min_value = request.args.get('min')
+    max_value = request.args.get('max')
+    try:
+        import numpy as np
+        import pandas as pd
+
+        frame = pd.read_csv(result_file.file_path, nrows=max_scan)
+        scanned_rows = int(len(frame))
+        if search:
+            mask = frame.astype(str).apply(
+                lambda column: column.str.contains(search, case=False, na=False, regex=False)
+            ).any(axis=1)
+            frame = frame.loc[mask]
+        if filter_column:
+            if filter_column not in frame.columns:
+                return jsonify({'error': f'列不存在: {filter_column}'}), 400
+            numeric = pd.to_numeric(frame[filter_column], errors='coerce')
+            if min_value not in (None, ''):
+                try:
+                    frame = frame.loc[numeric >= float(min_value)]
+                    numeric = numeric.loc[frame.index]
+                except ValueError:
+                    return jsonify({'error': '最小值必须是数字'}), 400
+            if max_value not in (None, ''):
+                try:
+                    frame = frame.loc[numeric <= float(max_value)]
+                except ValueError:
+                    return jsonify({'error': '最大值必须是数字'}), 400
+        matched_rows = int(len(frame))
+        preview = frame.head(limit).replace({np.nan: None})
+        # JSON serializers do not consistently handle numpy scalar types.
+        records = json.loads(preview.to_json(orient='records', force_ascii=False))
+        return jsonify({
+            'file_id': result_file.id,
+            'label': result_file.label,
+            'columns': [str(column) for column in frame.columns],
+            'rows': records,
+            'matched_rows': matched_rows,
+            'returned_rows': int(len(records)),
+            'scanned_rows': scanned_rows,
+            'scan_limit': max_scan,
+            'truncated': scanned_rows >= max_scan,
+        })
+    except UnicodeDecodeError:
+        return jsonify({'error': 'CSV 编码无法读取，请直接下载文件查看'}), 400
+    except Exception as exc:
+        logger.exception('Result table preview failed')
+        return jsonify({'error': f'表格预览失败: {exc}'}), 500
+
+
 @api_bp.route('/projects/<pid>/enrichment-result/<task_id>')
 @api_bp.route('/enrichment-result/<task_id>')
 def enrichment_result(task_id, pid=None):
@@ -242,6 +316,41 @@ def column_values():
         return jsonify({'values': values})
     except Exception:
         return jsonify({'values': []})
+
+
+@api_bp.route('/projects/<pid>/design-preflight', methods=['POST'])
+def design_preflight(pid):
+    """Return a non-mutating experimental-design and contrast preview.
+
+    This endpoint intentionally accepts only a file belonging to ``pid``.  It
+    gives the form and embedded AI the same evidence without persisting a
+    guessed metadata mapping.
+    """
+    project = Project.get_by_id(pid)
+    if not project:
+        return jsonify({'error': 'Not found'}), 404
+    payload = request.get_json(silent=True) or request.form or {}
+    file_path = str(payload.get('file_path', '') or '')
+    module_name = str(payload.get('module_name', '') or '')
+    params = payload.get('params', {}) or {}
+    if not isinstance(params, dict):
+        return jsonify({'error': 'params 必须是对象'}), 400
+    if not file_path:
+        return jsonify({'error': '缺少输入文件'}), 400
+    if not _validate_project_file_path(file_path, pid):
+        return jsonify({'error': '输入文件不属于当前项目或不可读取'}), 403
+    try:
+        from modules import MODULE_REGISTRY
+        from modules.design_preflight import build_design_preflight
+        from modules.io_utils import read_expression_matrix
+
+        if module_name not in MODULE_REGISTRY:
+            return jsonify({'error': f'未知分析模块: {module_name}'}), 400
+        adata = read_expression_matrix(file_path)
+        return jsonify(build_design_preflight(adata, module_name, params, file_path))
+    except Exception as exc:
+        logger.exception('Design preflight failed')
+        return jsonify({'error': f'分析前检查失败: {exc}'}), 500
 
 
 @api_bp.route('/projects/<pid>/deg-comparisons')
@@ -412,32 +521,90 @@ def data_info():
 def obs_columns():
     """返回输入文件的 obs 列名和自动检测的分组信息"""
     file_path = request.args.get('file_path', '')
+    module_name = request.args.get('module_name', '')
     if not file_path:
-        return jsonify({'columns': [], 'sample_groups': {}})
+        return jsonify({'columns': [], 'grouping_candidates': [], 'sample_groups': {},
+                        'time_candidates': [], 'sample_candidates': [],
+                        'suggestions': {}})
     if not _validate_file_path(file_path):
         return jsonify({'error': '文件路径不在允许范围内'}), 403
     try:
-        from modules.io_utils import read_expression_matrix, infer_sample_group_candidates
+        from modules.io_utils import (
+            read_expression_matrix, infer_sample_group_candidates,
+            rank_obs_grouping_candidates, QC_OBS_COLUMNS,
+        )
         import pandas as pd
         adata = read_expression_matrix(file_path)
-        qc_columns = {'total_counts', 'n_genes_by_counts', 'pct_counts_mt', 'size_factor',
-                       'total_counts_mt', 'total_counts_ribo', 'pct_counts_ribo', '_auto_group'}
+        qc_columns = QC_OBS_COLUMNS
         cols = [c for c in adata.obs.columns if c not in qc_columns]
+        grouping_candidates = rank_obs_grouping_candidates(
+            adata, module_name, purpose='groupby',
+        )
+        group_column_candidates = rank_obs_grouping_candidates(
+            adata, module_name, purpose='group_column',
+        )
+        batch_candidates = rank_obs_grouping_candidates(
+            adata, module_name, purpose='batch_key',
+        )
+        cluster_candidates = rank_obs_grouping_candidates(
+            adata, module_name, purpose='cluster_key',
+        )
+        sample_key_candidates = rank_obs_grouping_candidates(
+            adata, module_name, purpose='sample_key',
+        )
+        condition_candidates = rank_obs_grouping_candidates(
+            adata, module_name, purpose='condition_key',
+        )
 
-        # 检测可能的时间列：数值型且唯一值 < 20
+        # Each parameter has a different meaning.  In particular, a technical
+        # batch column must not be reused as the biological DEG groupby column.
+        suggestions = {
+            'groupby': grouping_candidates[0] if grouping_candidates else '',
+            'group_column': group_column_candidates[0] if group_column_candidates else '',
+            'color_by': grouping_candidates[0] if grouping_candidates else '',
+            'batch_key': batch_candidates[0] if batch_candidates else '',
+            'cluster_key': cluster_candidates[0] if cluster_candidates else '',
+            'sample_key': sample_key_candidates[0] if sample_key_candidates else '',
+            'condition_key': condition_candidates[0] if condition_candidates else '',
+        }
+
+        # 检测可能的时间列：除低基数数值外，也识别 D0/D3/D7、0h/12h
+        # 等常见标签。前端仍要求用户确认顺序，不把普通分类列当成时间。
+        from modules.sc_timecourse import _time_value
         time_candidates = []
-        for c in adata.obs.columns:
-            if c in qc_columns:
+        time_name_tokens = ('time', 'day', 'hour', 'week', 'stage', 'minute')
+        technical_batch_names = {'batch', 'technical_batch', 'sequencing_batch', 'library_batch'}
+        for c in cols:
+            if c in qc_columns or str(c).lower() in technical_batch_names:
                 continue
             col_data = adata.obs[c]
-            if pd.api.types.is_numeric_dtype(col_data) and col_data.nunique() < 20:
+            unique_values = col_data.dropna().astype(str).unique().tolist()
+            low_cardinality = 3 <= len(unique_values) <= 30
+            is_numeric = pd.api.types.is_numeric_dtype(col_data)
+            label_looks_temporal = bool(unique_values) and all(
+                _time_value(value) is not None for value in unique_values
+            )
+            name_looks_temporal = any(token in str(c).lower() for token in time_name_tokens)
+            if low_cardinality and (is_numeric or label_looks_temporal or name_looks_temporal):
                 time_candidates.append(c)
 
-        # 如果 obs 有注释列，直接返回
-        if cols:
-            return jsonify({'columns': cols, 'sample_groups': {}, 'time_candidates': time_candidates})
+        # 单细胞时序模块需要生物学样本 ID；它不能用普通细胞类型列替代。
+        # ``batch`` and donor IDs are not automatically treated as independent
+        # biological samples for temporal inference.  They remain selectable
+        # manually only after the user verifies the experimental design.
+        sample_priority = ('sample_id', 'sample', 'library_id', 'orig.ident')
+        lower_to_original = {str(c).lower(): c for c in cols}
+        sample_candidates = [lower_to_original[name] for name in sample_priority
+                             if name in lower_to_original]
+        if sample_candidates:
+            # sample_id can be unique per row in bulk metadata and is still a
+            # valid sample_key, even though it is intentionally rejected as a
+            # generic grouping column.
+            suggestions['sample_key'] = sample_candidates[0]
 
-        # 如果 obs 没有注释列，从样本名推断多因素候选分组。
+        # 无论是否存在技术 obs 列，都尝试从样本名推断分组。此前只在
+        # ``cols`` 为空时执行，导致带 barcode/batch/sample 元数据的 h5ad
+        # 永远得不到 _auto_group_ 候选。
         sample_groups = {}
         if adata.n_obs > 0:
             sample_names = adata.obs.index.tolist()
@@ -446,9 +613,20 @@ def obs_columns():
                 sample_groups['auto_group'] = candidates[0]
                 sample_groups['auto_group_candidates'] = candidates
 
-        return jsonify({'columns': cols, 'sample_groups': sample_groups, 'time_candidates': time_candidates})
+        return jsonify({
+            'columns': cols,
+            'grouping_candidates': grouping_candidates,
+            'sample_groups': sample_groups,
+            'time_candidates': time_candidates,
+            'sample_candidates': sample_candidates,
+            'suggestions': suggestions,
+        })
     except Exception:
-        return jsonify({'columns': [], 'sample_groups': {}, 'time_candidates': []})
+        return jsonify({
+            'columns': [], 'grouping_candidates': [],
+            'sample_groups': {}, 'time_candidates': [], 'sample_candidates': [],
+            'suggestions': {},
+        })
 
 
 @api_bp.route('/data-info-full')
@@ -647,7 +825,7 @@ def create_pipeline_run(pid):
         for key, val in params.items():
             if key not in ('qc', 'normalize', 'hvg', 'dimred', 'batch_correct',
                           'clustering', 'subcluster', 'qc_reassess', 'annotation', 'deg',
-                          'trajectory', 'proportion', 'cell_communication',
+                          'trajectory', 'sc_timecourse', 'proportion', 'cell_communication',
                           'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca',
                           'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
                           'bulk_deg_integration', 'convert_10x'):

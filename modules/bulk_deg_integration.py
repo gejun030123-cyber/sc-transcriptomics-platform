@@ -67,7 +67,7 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
         return None
 
     def run(self, input_path):
-        import plotly.graph_objects as go
+        from modules.native_figures import bar_figure, heatmap_figure
 
         self.progress(5, "加载差异分析结果...")
         results_dir = os.path.join(self.project_dir, 'results')
@@ -113,8 +113,15 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
             if 'gene' not in df.columns or 'log2FC' not in df.columns:
                 continue
             file_key = f.replace('bulk_deg_', '').replace('.csv', '')
-            # 优先使用真实比较名，否则回退到文件名
-            real_name = label_map.get(f, file_key)
+            # 优先使用已登记的比较名；直接运行模块时没有任务数据库记录，
+            # 此时从结果表的 comparison 列恢复真实标签，避免图中只显示
+            # results_0 / results_1 之类的无意义文件名。
+            embedded_label = ''
+            if 'comparison' in df.columns:
+                labels = df['comparison'].dropna().astype(str).unique().tolist()
+                if len(labels) == 1:
+                    embedded_label = labels[0]
+            real_name = label_map.get(f) or embedded_label or file_key
             comparisons[real_name] = df
             name_key_map[file_key] = real_name
 
@@ -221,16 +228,42 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
 
         if intersection_data:
             top_intersections = intersection_data[:upset_top_n]
-            fig_upset = go.Figure(go.Bar(
-                x=[d['sets'] for d in top_intersections],
-                y=[d['count'] for d in top_intersections],
-                marker_color='#1a237e'))
-            fig_upset.update_layout(title='差异基因交集模式 (Upset)',
-                                    xaxis_title='比较组合', yaxis_title='基因数',
-                                    height=400, width=max(600, len(top_intersections)*40+200))
-            fpath = os.path.join(plots_dir, 'deg_integration_upset.json')
-            with open(fpath, 'w') as f: f.write(fig_upset.to_json(engine="json"))
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': 'Upset 交集图'})
+            # Intersection labels become unreadable in a vertical bar chart
+            # once a design has several pairwise contrasts.  A horizontal
+            # layout gives each comparison combination its own readable row.
+            import matplotlib.pyplot as plt
+            from modules.figure_style import NATURE_AXIS, NATURE_GRID, NATURE_PALETTE, NATURE_TEXT
+
+            upset_labels = [str(item['sets']).replace(' ∩ ', '\n∩ ')
+                            for item in top_intersections]
+            upset_counts = [int(item['count']) for item in top_intersections]
+            fig_height = max(4.6, 0.43 * len(upset_labels) + 1.5)
+            fig_upset, ax_upset = plt.subplots(figsize=(10.0, fig_height), dpi=150)
+            y_positions = np.arange(len(upset_labels))
+            bars = ax_upset.barh(y_positions, upset_counts, color=NATURE_PALETTE[0], alpha=0.88)
+            ax_upset.set_yticks(y_positions, upset_labels, fontsize=7)
+            ax_upset.invert_yaxis()
+            ax_upset.set_xlabel('基因数', fontsize=9, color=NATURE_TEXT)
+            ax_upset.set_title('差异基因交集模式 (Upset)', loc='left', fontsize=10,
+                               fontweight='semibold', color=NATURE_TEXT)
+            ax_upset.grid(axis='x', color=NATURE_GRID, linewidth=0.5, alpha=0.7)
+            ax_upset.set_axisbelow(True)
+            ax_upset.tick_params(axis='x', labelsize=8, colors=NATURE_AXIS, width=0.7, length=3)
+            ax_upset.tick_params(axis='y', colors=NATURE_TEXT, length=0)
+            for spine_name, spine in ax_upset.spines.items():
+                spine.set_visible(spine_name in ('left', 'bottom'))
+                spine.set_color(NATURE_AXIS)
+                spine.set_linewidth(0.7)
+            x_offset = max(max(upset_counts, default=1) * 0.012, 0.5)
+            for bar, count in zip(bars, upset_counts):
+                ax_upset.text(bar.get_width() + x_offset, bar.get_y() + bar.get_height() / 2,
+                              f'{count:,}', va='center', ha='left', fontsize=7.5, color=NATURE_TEXT)
+            ax_upset.set_xlim(0, max(upset_counts, default=1) * 1.14)
+            fig_upset.tight_layout(pad=1.1)
+            result_files.extend(self.save_matplotlib_figure(
+                fig_upset, plots_dir, 'deg_integration_upset.png',
+                'bar', 'Upset 交集图', formats=('png', 'svg'), dpi=300,
+            ))
 
         # 比较差异基因数统计表
         count_rows = []
@@ -254,18 +287,16 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
                         jval = intersection / union if union > 0 else 0.0
                         jaccard_matrix.loc[c1, c2] = jval
                         jaccard_matrix.loc[c2, c1] = jval
-            fig_jaccard = go.Figure(data=go.Heatmap(
-                z=jaccard_matrix.values.tolist(), x=comp_names, y=comp_names,
-                colorscale='Blues', zmin=0, zmax=1,
-                text=np.round(jaccard_matrix.values, 3).tolist(), texttemplate='%{text}',
-                colorbar=dict(title='Jaccard')))
-            fig_jaccard.update_layout(
+            fig_jaccard = heatmap_figure(
+                jaccard_matrix.values, x_labels=comp_names, y_labels=comp_names,
                 title='差异基因 Jaccard 相似度',
-                width=max(400, len(comp_names)*80+200),
-                height=max(400, len(comp_names)*80+200))
-            fpath = os.path.join(plots_dir, 'deg_integration_jaccard.json')
-            with open(fpath, 'w') as f: f.write(fig_jaccard.to_json(engine="json"))
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': 'Jaccard 相似度'})
+                x_label='Comparison', y_label='Comparison',
+                colorbar_label='Jaccard', vmin=0, vmax=1,
+            )
+            result_files.extend(self.save_matplotlib_figure(
+                fig_jaccard, plots_dir, 'deg_integration_jaccard.png',
+                'heatmap', 'Jaccard 相似度', formats=('png', 'svg'), dpi=300,
+            ))
 
         # 2b. Venn 图（2 或 3 个比较时生成）
         self.progress(62, "生成 Venn 图...")
@@ -325,10 +356,12 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
 
                 ax.set_title(f'Venn: {" vs ".join(comp_names)}', fontsize=13)
                 plt.tight_layout()
-                fpath = os.path.join(plots_dir, 'deg_integration_venn.png')
-                fig_venn.savefig(fpath, dpi=150, bbox_inches='tight', facecolor='white')
+                venn_files = self.save_matplotlib_figure(
+                    fig_venn, plots_dir, 'deg_integration_venn.png',
+                    'venn', 'Venn 图', formats=('png', 'svg'), dpi=300,
+                )
                 plt.close(fig_venn)
-                result_files.append({'file_path': fpath, 'file_type': 'png', 'category': 'venn', 'label': 'Venn 图'})
+                result_files.extend(venn_files)
             else:
                 self.progress(-1, "警告: matplotlib_venn 未安装，跳过 Venn 图生成")
 
@@ -338,17 +371,16 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
             top_genes = consistency_df.head(consistency_n)['gene'].tolist()
             reg_subset = regulation_matrix.reindex(top_genes).dropna()
             if len(reg_subset) > 0:
-                fig_dir = go.Figure(data=go.Heatmap(
-                    z=reg_subset.values.tolist(), x=comp_names, y=reg_subset.index.tolist(),
-                    colorscale=[[0, '#1565c0'], [0.5, '#f5f5f5'], [1, '#e53935']],
-                    zmid=0, showscale=True, colorbar=dict(title='Direction', tickvals=[-1, 0, 1],
-                                                           ticktext=['Down', 'NS', 'Up'])))
-                fig_dir.update_layout(title='差异方向一致性矩阵',
-                                      height=max(300, len(reg_subset)*12+100),
-                                      width=max(400, len(comp_names)*80+200))
-                fpath = os.path.join(plots_dir, 'deg_integration_direction_heatmap.json')
-                with open(fpath, 'w') as f: f.write(fig_dir.to_json(engine="json"))
-                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': '方向一致性矩阵'})
+                fig_dir = heatmap_figure(
+                    reg_subset.values, x_labels=comp_names,
+                    y_labels=reg_subset.index.tolist(), title='差异方向一致性矩阵',
+                    x_label='Comparison', y_label='Gene',
+                    colorbar_label='Direction', vmin=-1, vmax=1,
+                )
+                result_files.extend(self.save_matplotlib_figure(
+                    fig_dir, plots_dir, 'deg_integration_direction_heatmap.png',
+                    'heatmap', '方向一致性矩阵', formats=('png', 'svg'), dpi=300,
+                ))
 
         # 4. logFC 矩阵热图
         self.progress(80, "生成 logFC 矩阵热图...")
@@ -357,15 +389,16 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
             logfc_subset = logfc_matrix.reindex(top_genes_fc).dropna()
             if len(logfc_subset) > 0:
                 logfc_subset = logfc_subset.clip(-logfc_clip, logfc_clip)
-                fig_heat = go.Figure(data=go.Heatmap(
-                    z=logfc_subset.values.tolist(), x=comp_names, y=logfc_subset.index.tolist(),
-                    colorscale='RdBu_r', zmid=0, colorbar=dict(title='log2FC')))
-                fig_heat.update_layout(title='Top 差异基因 logFC 矩阵',
-                                       height=max(400, len(logfc_subset)*12+100),
-                                       width=max(500, len(comp_names)*80+200))
-                fpath = os.path.join(plots_dir, 'deg_integration_logfc_heatmap.json')
-                with open(fpath, 'w') as f: f.write(fig_heat.to_json(engine="json"))
-                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': 'logFC 矩阵热图'})
+                fig_heat = heatmap_figure(
+                    logfc_subset.values, x_labels=comp_names,
+                    y_labels=logfc_subset.index.tolist(), title='Top 差异基因 logFC 矩阵',
+                    x_label='Comparison', y_label='Gene',
+                    colorbar_label='log2FC', vmin=-logfc_clip, vmax=logfc_clip,
+                )
+                result_files.extend(self.save_matplotlib_figure(
+                    fig_heat, plots_dir, 'deg_integration_logfc_heatmap.png',
+                    'heatmap', 'logFC 矩阵热图', formats=('png', 'svg'), dpi=300,
+                ))
 
         # 5. 比较间 logFC 相关性热图
         self.progress(87, "生成比较间相关性热图...")
@@ -373,33 +406,32 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
             sig_in_any = ((padj_matrix < pval_threshold) & (abs(logfc_matrix) >= log2fc_thresh)).any(axis=1)
             sig_logfc = logfc_matrix.loc[sig_in_any]
             corr_mat = sig_logfc.corr(method='pearson') if len(sig_logfc) > 0 else logfc_matrix.corr(method='pearson')
-            fig_corr = go.Figure(data=go.Heatmap(
-                z=corr_mat.values.tolist(), x=comp_names, y=comp_names,
-                colorscale='RdBu_r', zmid=0,
-                text=np.round(corr_mat.values, 2).tolist(), texttemplate='%{text}',
-                colorbar=dict(title='Pearson r')))
-            fig_corr.update_layout(title='比较间 logFC 相关性',
-                                   width=max(400, len(comp_names)*80+200),
-                                   height=max(400, len(comp_names)*80+200))
-            fpath = os.path.join(plots_dir, 'deg_integration_corr.json')
-            with open(fpath, 'w') as f: f.write(fig_corr.to_json(engine="json"))
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': '比较间相关性'})
+            fig_corr = heatmap_figure(
+                corr_mat.values, x_labels=comp_names, y_labels=comp_names,
+                title='比较间 logFC 相关性', x_label='Comparison',
+                y_label='Comparison', colorbar_label='Pearson r', vmin=-1, vmax=1,
+            )
+            result_files.extend(self.save_matplotlib_figure(
+                fig_corr, plots_dir, 'deg_integration_corr.png',
+                'heatmap', '比较间相关性', formats=('png', 'svg'), dpi=300,
+            ))
 
         # 6. Top 一致性基因热图
         self.progress(90, "生成 Top 一致性基因热图...")
         if len(consistency_df) > 0:
             top_n = min(consistency_n, 30)
             top_consistent = consistency_df.head(top_n)
-            fig_top = go.Figure(data=go.Bar(
-                x=top_consistent['gene'].tolist(),
-                y=top_consistent['consistency_score'].tolist(),
-                marker_color=['#e53935' if s > 0 else '#1565c0' for s in top_consistent['consistency_score']]))
-            fig_top.update_layout(title=f'Top {top_n} 一致性差异基因',
-                                  xaxis_title='Gene', yaxis_title='Consistency Score',
-                                  height=400, width=max(500, top_n*25+200))
-            fpath = os.path.join(plots_dir, 'deg_integration_top_consistent.json')
-            with open(fpath, 'w') as f: f.write(fig_top.to_json(engine="json"))
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': 'Top 一致性基因'})
+            fig_top = bar_figure(
+                top_consistent['gene'].tolist(), top_consistent['consistency_score'].values,
+                title=f'Top {top_n} 一致性差异基因', x_label='Gene',
+                y_label='Consistency Score',
+                colors=['#B64342' if s > 0 else '#0F4D92'
+                        for s in top_consistent['consistency_score']],
+            )
+            result_files.extend(self.save_matplotlib_figure(
+                fig_top, plots_dir, 'deg_integration_top_consistent.png',
+                'bar', 'Top 一致性基因', formats=('png', 'svg'), dpi=300,
+            ))
 
         # ===== 表达式筛选器 =====
         filter_expression = self.params.get('filter_expression', '').strip()
@@ -514,8 +546,8 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
 
         # 2. Filter UpSet plot (which atoms the genes satisfy)
         self.progress(93, "生成筛选 UpSet 图...")
-        import plotly.graph_objects as go
         from itertools import combinations as iter_combos
+        from modules.native_figures import bar_figure, heatmap_figure
 
         atom_sets = {}
         for c in comp_names:
@@ -543,19 +575,15 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
         filter_upset_data.sort(key=lambda x: x['count'], reverse=True)
         if filter_upset_data:
             top20 = filter_upset_data[:20]
-            fig_fu = go.Figure(go.Bar(
-                x=[d['sets'] for d in top20],
-                y=[d['count'] for d in top20],
-                marker_color='#1a237e'))
-            fig_fu.update_layout(title='筛选基因交集模式',
-                                 xaxis_title='比较组合', yaxis_title='基因数',
-                                 height=400, width=max(600, len(top20)*40+200))
-            fpath = os.path.join(plots_dir, 'deg_filter_upset.json')
-            with open(fpath, 'w') as f: f.write(fig_fu.to_json(engine="json"))
-            result_files.append({
-                'file_path': fpath, 'file_type': 'plotly_json',
-                'category': 'bar', 'label': '筛选基因 Upset 图'
-            })
+            fig_fu = bar_figure(
+                [d['sets'] for d in top20], [d['count'] for d in top20],
+                title='筛选基因交集模式', x_label='比较组合', y_label='基因数',
+                annotations=[f"{d['count']:,}" for d in top20],
+            )
+            result_files.extend(self.save_matplotlib_figure(
+                fig_fu, plots_dir, 'deg_filter_upset.png', 'bar',
+                '筛选基因 Upset 图', formats=('png', 'svg'), dpi=300,
+            ))
 
         # 3. Filter logFC heatmap
         self.progress(94, "生成筛选基因 logFC 热图...")
@@ -564,18 +592,15 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
         show_genes = filtered_genes[:show_n]
         logfc_clip = float(self.params.get('logfc_clip_range', 5.0))
         logfc_sub = logfc_matrix.reindex(show_genes).clip(-logfc_clip, logfc_clip)
-        fig_fheat = go.Figure(data=go.Heatmap(
-            z=logfc_sub.values.tolist(), x=comp_names, y=show_genes,
-            colorscale='RdBu_r', zmid=0, colorbar=dict(title='log2FC')))
-        fig_fheat.update_layout(title='筛选基因 logFC 矩阵',
-                                height=max(400, len(show_genes)*14+100),
-                                width=max(500, len(comp_names)*80+200))
-        fpath = os.path.join(plots_dir, 'deg_filter_logfc_heatmap.json')
-        with open(fpath, 'w') as f: f.write(fig_fheat.to_json(engine="json"))
-        result_files.append({
-            'file_path': fpath, 'file_type': 'plotly_json',
-            'category': 'heatmap', 'label': '筛选基因 logFC 热图'
-        })
+        fig_fheat = heatmap_figure(
+            logfc_sub.values, x_labels=comp_names, y_labels=show_genes,
+            title='筛选基因 logFC 矩阵', x_label='Comparison', y_label='Gene',
+            colorbar_label='log2FC', vmin=-logfc_clip, vmax=logfc_clip,
+        )
+        result_files.extend(self.save_matplotlib_figure(
+            fig_fheat, plots_dir, 'deg_filter_logfc_heatmap.png',
+            'heatmap', '筛选基因 logFC 热图', formats=('png', 'svg'), dpi=300,
+        ))
 
         # 4. Expression parse tree visualization
         self.progress(95, "生成表达式解析树...")

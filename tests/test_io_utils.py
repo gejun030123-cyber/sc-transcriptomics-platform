@@ -8,6 +8,43 @@ import numpy as np
 import pandas as pd
 import pytest
 import anndata
+from scipy import sparse
+from scipy.io import mmwrite
+
+
+class TestRead10xMtxCompat:
+    """10x Matrix Market import accepts all supported compression combinations."""
+
+    def test_mixed_compression_preserves_all_three_files(self, tmp_path):
+        from modules.io_utils import convert_10x_to_h5ad, read_single_cell_data
+        import gzip
+
+        matrix_dir = tmp_path / 'mixed_10x'
+        matrix_dir.mkdir()
+        mmwrite(matrix_dir / 'matrix.mtx', sparse.coo_matrix([[1, 0], [0, 2], [3, 0]]))
+        (matrix_dir / 'barcodes.tsv').write_text('cell_a\ncell_b\n', encoding='utf-8')
+        # v2 uses genes.tsv (two columns), which recent Scanpy still expects
+        # to receive under the features.tsv.gz filename.
+        (matrix_dir / 'genes.tsv').write_text(
+            'ENSG000001\tGeneA\n'
+            'ENSG000002\tGeneB\n'
+            'ENSG000003\tGeneC\n', encoding='utf-8')
+
+        # This is a common mixed set: matrix compressed, metadata files plain.
+        with open(matrix_dir / 'matrix.mtx', 'rb') as src, gzip.open(
+            matrix_dir / 'matrix.mtx.gz', 'wb'
+        ) as dst:
+            dst.write(src.read())
+        (matrix_dir / 'matrix.mtx').unlink()
+
+        output_path = tmp_path / 'converted.h5ad'
+        converted = convert_10x_to_h5ad(str(matrix_dir), str(output_path))
+        imported = read_single_cell_data(str(matrix_dir), input_format='10x_mtx')
+
+        assert output_path.exists()
+        assert converted.shape == (2, 3)
+        assert imported.shape == (2, 3)
+        assert 'counts' in imported.layers
 
 
 # --- remap_var_names tests ---

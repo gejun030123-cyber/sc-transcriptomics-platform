@@ -1,6 +1,6 @@
 """语义一致性全量测试 —— 扫描所有分析模块源码，验证输出结构、summary 字典、result_files 模式等一致性。
 
-与 test_semantic.py 不同，本文件对全部 21 个分析模块逐一做静态扫描，
+与 test_semantic.py 不同，本文件对全部已注册分析模块逐一做静态扫描，
 不依赖运行时实例化，仅通过正则/字符串匹配分析源码。
 """
 import ast
@@ -12,17 +12,19 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from modules.base import VALID_RESULT_FILE_TYPES
+
 MODULES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'modules')
 
 # 排除工具/基础设施模块，只保留分析模块
 SKIP_FILES = {
     '__init__.py', 'base.py', 'schemas.py', 'io_utils.py',
     'visualization.py', 'inspect_utils.py', 'expression_parser.py',
-    'constants.py', 'ai_adapter.py', 'ai_tools.py',
+    'constants.py', 'figure_style.py', 'native_figures.py', 'ai_adapter.py', 'ai_tools.py',
 }
 
 # 允许的 file_type 值
-VALID_FILE_TYPES = {'csv', 'plotly_json', 'png', 'svg', 'info', 'json', 'txt', 'h5ad'}
+VALID_FILE_TYPES = set(VALID_RESULT_FILE_TYPES)
 
 # 允许的 category 值
 VALID_CATEGORIES = {
@@ -451,8 +453,8 @@ class TestAllModulesOutputAdata:
         # 单细胞模块列表（不包括 bulk_ 和 convert_10x）
         sc_module_names = {
             'qc', 'normalize', 'hvg', 'dimred', 'batch_correct',
-            'clustering', 'qc_reassess', 'annotation', 'deg',
-            'trajectory', 'proportion', 'cell_communication',
+            'clustering', 'subcluster', 'qc_reassess', 'annotation', 'deg',
+            'trajectory', 'sc_timecourse', 'proportion', 'cell_communication',
         }
         issues = []
         for filepath in _get_module_files():

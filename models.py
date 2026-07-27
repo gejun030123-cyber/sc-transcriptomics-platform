@@ -71,6 +71,34 @@ class Project:
     def get_tasks(self):
         return AnalysisTask.get_by_project(self.id)
 
+    @classmethod
+    def refresh_status(cls, project_id):
+        """Synchronize the project badge with its main-line task states."""
+        conn = get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT status FROM analysis_tasks "
+                "WHERE project_id=? AND branch_id IS NULL",
+                (project_id,),
+            ).fetchall()
+            states = {row['status'] for row in rows}
+            if not states:
+                status = 'empty'
+            elif states & {'pending', 'running'}:
+                status = 'processing'
+            elif 'completed' in states:
+                status = 'completed'
+            else:
+                status = 'failed'
+            conn.execute(
+                "UPDATE projects SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (status, project_id),
+            )
+            conn.commit()
+            return status
+        finally:
+            conn.close()
+
     def get_latest_adata_path(self):
         """获取项目当前最新有效 h5ad 路径。
 
@@ -196,15 +224,23 @@ class AnalysisTask:
         finally:
             conn.close()
 
-    def mark_failed(self, error_traceback):
+    def mark_failed(self, error_traceback, result_json=None):
         conn = get_conn()
         try:
-            conn.execute(
-                "UPDATE analysis_tasks SET status='failed', error_traceback=?, "
-                "progress_message='失败', finished_at=CURRENT_TIMESTAMP "
-                "WHERE id=? AND status IN ('pending', 'running')",
-                (error_traceback, self.id)
-            )
+            if result_json is None:
+                conn.execute(
+                    "UPDATE analysis_tasks SET status='failed', error_traceback=?, "
+                    "progress_message='失败', finished_at=CURRENT_TIMESTAMP "
+                    "WHERE id=? AND status IN ('pending', 'running')",
+                    (error_traceback, self.id)
+                )
+            else:
+                conn.execute(
+                    "UPDATE analysis_tasks SET status='failed', error_traceback=?, "
+                    "progress_message='失败', finished_at=CURRENT_TIMESTAMP, result_json=? "
+                    "WHERE id=? AND status IN ('pending', 'running')",
+                    (error_traceback, result_json, self.id)
+                )
             conn.commit()
         finally:
             conn.close()
@@ -330,6 +366,111 @@ class ResultFile:
         if row:
             return cls(**dict(row))
         return None
+
+
+class FigureAsset:
+    """User-uploaded image available in the figure studio."""
+
+    def __init__(self, id=None, project_id='', label='', file_type='', file_path='', created_at=None):
+        self.id = id or gen_id()
+        self.project_id = project_id
+        self.label = label
+        self.file_type = file_type
+        self.file_path = file_path
+        self.created_at = created_at or datetime.now(timezone.utc).isoformat()
+
+    def save(self):
+        conn = get_conn()
+        try:
+            conn.execute(
+                "INSERT INTO figure_assets (id, project_id, label, file_type, file_path, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET label=excluded.label, file_type=excluded.file_type, "
+                "file_path=excluded.file_path, created_at=excluded.created_at",
+                (self.id, self.project_id, self.label, self.file_type, self.file_path, self.created_at),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @classmethod
+    def create(cls, project_id, label, file_type, file_path):
+        asset = cls(project_id=project_id, label=label, file_type=file_type, file_path=file_path)
+        asset.save()
+        return asset
+
+    @classmethod
+    def get_by_id(cls, asset_id):
+        conn = get_conn()
+        try:
+            row = conn.execute("SELECT * FROM figure_assets WHERE id=?", (asset_id,)).fetchone()
+        finally:
+            conn.close()
+        return cls(**dict(row)) if row else None
+
+    @classmethod
+    def get_by_project(cls, project_id):
+        conn = get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM figure_assets WHERE project_id=? ORDER BY created_at DESC", (project_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        return [cls(**dict(row)) for row in rows]
+
+
+class FigureVersion:
+    """An immutable saved figure-studio edit, with PNG and/or editable SVG."""
+
+    def __init__(self, id=None, project_id='', source_kind='', source_id='', edit_mode='',
+                 label='', style_json='{}', png_path='', svg_path='', created_at=None):
+        self.id = id or gen_id()
+        self.project_id = project_id
+        self.source_kind = source_kind
+        self.source_id = source_id
+        self.edit_mode = edit_mode
+        self.label = label
+        self.style_json = style_json
+        self.png_path = png_path
+        self.svg_path = svg_path
+        self.created_at = created_at or datetime.now(timezone.utc).isoformat()
+
+    def save(self):
+        conn = get_conn()
+        try:
+            conn.execute(
+                "INSERT INTO figure_versions "
+                "(id, project_id, source_kind, source_id, edit_mode, label, style_json, png_path, svg_path, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET label=excluded.label, style_json=excluded.style_json, "
+                "png_path=excluded.png_path, svg_path=excluded.svg_path, created_at=excluded.created_at",
+                (self.id, self.project_id, self.source_kind, self.source_id, self.edit_mode,
+                 self.label, self.style_json, self.png_path, self.svg_path, self.created_at),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @classmethod
+    def get_by_id(cls, version_id):
+        conn = get_conn()
+        try:
+            row = conn.execute("SELECT * FROM figure_versions WHERE id=?", (version_id,)).fetchone()
+        finally:
+            conn.close()
+        return cls(**dict(row)) if row else None
+
+    @classmethod
+    def get_by_project(cls, project_id):
+        conn = get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM figure_versions WHERE project_id=? ORDER BY created_at DESC", (project_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        return [cls(**dict(row)) for row in rows]
 
 
 class PipelineRun:

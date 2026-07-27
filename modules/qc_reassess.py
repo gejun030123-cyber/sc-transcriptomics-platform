@@ -3,6 +3,7 @@ import json
 import numpy as np
 import pandas as pd
 from modules.base import BaseAnalysis
+from modules.io_utils import obs_grouping_info
 
 
 class QCReassessAnalysis(BaseAnalysis):
@@ -13,8 +14,9 @@ class QCReassessAnalysis(BaseAnalysis):
 
     def run(self, input_path):
         import scanpy as sc
-        import plotly.graph_objects as go
-        from modules.visualization import umap_scatter
+        import matplotlib.pyplot as plt
+        from modules.native_figures import umap_figure, umap_panel_figure
+        from modules.figure_style import NATURE_PALETTE, NATURE_GRID, NATURE_TEXT
 
         self.progress(5, "加载数据...")
         adata = self.load_adata(input_path)
@@ -25,6 +27,33 @@ class QCReassessAnalysis(BaseAnalysis):
         ribo_threshold = float(self.params.get('ribosomal_threshold', 0))
         min_cells = int(self.params.get('min_cells_per_cluster', 10))
         auto_remove = self.params.get('auto_remove', False)
+
+        # A QC metric (for example ``log1p_n_genes_by_counts``) is numeric and
+        # can have nearly one value per cell.  Treating it as a cluster column
+        # creates hundreds of pseudo-clusters, marks almost every cell as
+        # low-quality, and makes the QC charts unusable.  Prefer a real Leiden
+        # grouping when the requested column is missing or over-cardinal.
+        requested_cluster_key = str(cluster_key)
+        def _valid_cluster_key(key):
+            return bool(obs_grouping_info(
+                adata, key, max_categories=50,
+                max_numeric_categories=20, require_multiple=False,
+            )['valid'])
+
+        if not _valid_cluster_key(cluster_key):
+            fallback_keys = [
+                'leiden', 'leiden_0.8', 'leiden_0.6', 'leiden_1.0',
+            ] + [key for key in adata.obs.columns if str(key).startswith('leiden_')]
+            cluster_key = next((key for key in fallback_keys if _valid_cluster_key(key)), None)
+            if cluster_key is None:
+                raise ValueError(
+                    f"cluster_key '{requested_cluster_key}' 不是有效的分类聚类列；"
+                    "请改用 leiden 或其他低基数 cluster 列。"
+                )
+            self.progress(
+                12,
+                f"'{requested_cluster_key}' 不是有效 cluster 列，已改用 '{cluster_key}'",
+            )
 
         self.progress(20, "计算各簇 QC 指标...")
         result_files = []
@@ -80,41 +109,24 @@ class QCReassessAnalysis(BaseAnalysis):
         n_low = stats_df['low_quality'].sum()
 
         if self.params.get('show_cluster_qc_bar', True) and not stats_df.empty:
-            from plotly.subplots import make_subplots
-            color_by_quality = stats_df['low_quality'].map({True: '#e53935', False: '#3949ab'}).tolist()
-            fig_qc_bar = make_subplots(
-                rows=2, cols=2,
-                subplot_titles=['Cell count', 'Mean detected genes', 'Mean MT%', 'Doublet fraction'],
-            )
-            fig_qc_bar.add_trace(go.Bar(
-                x=stats_df['cluster'], y=stats_df['n_cells'], marker_color=color_by_quality,
-                hovertemplate='Cluster: %{x}<br>Cells: %{y}<extra></extra>',
-            ), row=1, col=1)
-            fig_qc_bar.add_trace(go.Bar(
-                x=stats_df['cluster'], y=stats_df['mean_n_genes'], marker_color=color_by_quality,
-                hovertemplate='Cluster: %{x}<br>Mean genes: %{y}<extra></extra>',
-            ), row=1, col=2)
-            fig_qc_bar.add_trace(go.Bar(
-                x=stats_df['cluster'], y=stats_df['mean_pct_mt'], marker_color=color_by_quality,
-                hovertemplate='Cluster: %{x}<br>Mean MT%: %{y}<extra></extra>',
-            ), row=2, col=1)
-            fig_qc_bar.add_trace(go.Bar(
-                x=stats_df['cluster'], y=stats_df['doublet_fraction'], marker_color=color_by_quality,
-                hovertemplate='Cluster: %{x}<br>Doublet fraction: %{y:.3f}<extra></extra>',
-            ), row=2, col=2)
-            fig_qc_bar.update_layout(
-                title='Cluster QC Summary',
-                plot_bgcolor='white',
-                width=900,
-                height=700,
-                showlegend=False,
-            )
-            for i in range(1, 3):
-                for j in range(1, 3):
-                    fig_qc_bar.update_xaxes(title_text='Cluster', row=i, col=j)
-            result_files.append(self.save_plotly_json(
-                fig_qc_bar, plots_dir, 'qc_reassess_cluster_qc_bar.json',
-                'bar', 'Cluster QC Summary'
+            color_by_quality = [NATURE_PALETTE[3] if value else NATURE_PALETTE[0]
+                                for value in stats_df['low_quality']]
+            fig_qc_bar, axes = plt.subplots(2, 2, figsize=(9.0, 7.0), dpi=150)
+            metrics = [('n_cells', 'Cell count'), ('mean_n_genes', 'Mean detected genes'),
+                       ('mean_pct_mt', 'Mean MT%'), ('doublet_fraction', 'Doublet fraction')]
+            for ax, (column, label) in zip(axes.ravel(), metrics):
+                ax.bar(stats_df['cluster'].astype(str), stats_df[column], color=color_by_quality,
+                       alpha=0.88, edgecolor='white', linewidth=0.3)
+                ax.set_title(label, loc='left', fontsize=9, color=NATURE_TEXT)
+                ax.set_xlabel('Cluster', fontsize=8)
+                ax.tick_params(axis='x', rotation=35, labelsize=7)
+                ax.grid(axis='y', color=NATURE_GRID, linewidth=0.5, alpha=0.7)
+            fig_qc_bar.suptitle('Cluster QC Summary', x=0.05, ha='left', fontsize=11,
+                                fontweight='semibold', color=NATURE_TEXT)
+            result_files.extend(self.save_matplotlib_figure(
+                fig_qc_bar, plots_dir, 'qc_reassess_cluster_qc_bar.png',
+                'bar', 'Cluster QC Summary', formats=('png', 'svg'), dpi=300,
+                preserve_aspect=True,
             ))
 
         # Auto-remove low quality clusters
@@ -128,21 +140,22 @@ class QCReassessAnalysis(BaseAnalysis):
         self.progress(50, "生成 UMAP 图...")
         # UMAP with doublet score
         if 'X_umap' in adata.obsm and 'doublet_score' in adata.obs.columns:
-            fig = umap_scatter(adata, 'doublet_score', title='Doublet Score')
-            fpath = os.path.join(plots_dir, 'qc_reassess_doublet_umap.json')
-            with open(fpath, 'w') as f: f.write(json.dumps(fig))
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': 'Doublet Score UMAP'})
+            fig = umap_figure(adata, 'doublet_score', title='Doublet Score')
+            result_files.extend(self.save_matplotlib_figure(
+                fig, plots_dir, 'qc_reassess_doublet_umap.png', 'umap',
+                'Doublet Score UMAP', formats=('png', 'svg'), dpi=300,
+            ))
 
         # UMAP with MT percentage
         if 'X_umap' in adata.obsm and 'pct_counts_mt' in adata.obs.columns:
-            fig = umap_scatter(adata, 'pct_counts_mt', title='MT Percentage')
-            fpath = os.path.join(plots_dir, 'qc_reassess_mt_umap.json')
-            with open(fpath, 'w') as f: f.write(json.dumps(fig))
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': 'MT% UMAP'})
+            fig = umap_figure(adata, 'pct_counts_mt', title='MT Percentage')
+            result_files.extend(self.save_matplotlib_figure(
+                fig, plots_dir, 'qc_reassess_mt_umap.png', 'umap',
+                'MT% UMAP', formats=('png', 'svg'), dpi=300,
+            ))
 
         # QC 指标 UMAP 面板
         if self.params.get('show_qc_umap_panel', True) and 'X_umap' in adata.obsm:
-            from plotly.subplots import make_subplots
             qc_metrics = [
                 ('pct_counts_mt', 'MT%'),
                 ('n_genes_by_counts', 'Detected genes'),
@@ -151,76 +164,38 @@ class QCReassessAnalysis(BaseAnalysis):
             ]
             qc_metrics = [(col, label) for col, label in qc_metrics if col in adata.obs.columns]
             if qc_metrics:
-                coords = adata.obsm['X_umap'][:, :2]
-                n_panels = min(len(qc_metrics), 4)
-                fig_panel = make_subplots(
-                    rows=2, cols=2,
-                    subplot_titles=[label for _, label in qc_metrics[:n_panels]],
+                fig_panel = umap_panel_figure(
+                    adata, [col for col, _ in qc_metrics[:4]],
+                    titles=[label for _, label in qc_metrics[:4]], point_size=5,
+                    opacity=0.78, ncols=2,
                 )
-                for i, (col, label) in enumerate(qc_metrics[:n_panels]):
-                    row = i // 2 + 1
-                    col_idx = i % 2 + 1
-                    vals = adata.obs[col].astype(float).values
-                    fig_panel.add_trace(go.Scattergl(
-                        x=coords[:, 0],
-                        y=coords[:, 1],
-                        mode='markers',
-                        marker=dict(size=3, color=vals, colorscale='Viridis', opacity=0.75, showscale=False),
-                        text=adata.obs_names.tolist(),
-                        hovertemplate='%{text}<br>' + label + ': %{marker.color:.3f}<extra></extra>',
-                        name=label,
-                    ), row=row, col=col_idx)
-                fig_panel.update_layout(
-                    title='QC Metrics on UMAP',
-                    plot_bgcolor='white',
-                    width=850,
-                    height=720,
-                    showlegend=False,
-                )
-                for i in range(1, 3):
-                    for j in range(1, 3):
-                        fig_panel.update_xaxes(title_text='UMAP1', row=i, col=j)
-                        fig_panel.update_yaxes(title_text='UMAP2', row=i, col=j)
-                result_files.append(self.save_plotly_json(
-                    fig_panel, plots_dir, 'qc_reassess_metrics_umap_panel.json',
-                    'umap', 'QC 指标 UMAP 面板'
+                result_files.extend(self.save_matplotlib_figure(
+                    fig_panel, plots_dir, 'qc_reassess_metrics_umap_panel.png',
+                    'umap', 'QC 指标 UMAP 面板', formats=('png', 'svg'), dpi=300,
+                    preserve_aspect=True,
                 ))
 
         # UMAP with cluster highlighting (low-quality clusters in red)
         if 'X_umap' in adata.obsm:
-            umap_coords = adata.obsm['X_umap']
             low_quality_set = set(stats_df[stats_df['low_quality']]['cluster'].tolist())
             cluster_labels = adata.obs[cluster_key].astype(str)
-            unique_clusters = sorted(cluster_labels.unique())
-
-            fig = go.Figure()
-            for cl in unique_clusters:
-                mask = cluster_labels == cl
-                is_low = cl in low_quality_set
-                fig.add_trace(go.Scattergl(
-                    x=umap_coords[mask, 0], y=umap_coords[mask, 1],
-                    mode='markers',
-                    marker=dict(size=4, opacity=0.3 if is_low else 0.7),
-                    name=f'{cl}' + (' (low quality)' if is_low else ''),
-                ))
-
-            # Overlay low-quality clusters with red highlight
-            if low_quality_set:
-                low_mask = cluster_labels.isin(low_quality_set)
-                fig.add_trace(go.Scattergl(
-                    x=umap_coords[low_mask, 0], y=umap_coords[low_mask, 1],
-                    mode='markers',
-                    marker=dict(size=6, color='rgba(255,0,0,0.4)', line=dict(width=1, color='red')),
-                    name='Low Quality Highlight',
-                    showlegend=True,
-                ))
-
-            fig.update_layout(
+            fig = umap_figure(
+                adata, cluster_key,
                 title=f'Clusters ({cluster_key}) — Low Quality Highlighted',
-                xaxis_title='UMAP1', yaxis_title='UMAP2',
-                plot_bgcolor='white', width=700, height=500,
+                label_categories=True,
             )
-            result_files.append(self.save_plotly_json(fig, plots_dir, 'qc_reassess_clusters_umap.json', 'umap', '聚类 UMAP（低质量簇高亮）'))
+            ax = fig.axes[0]
+            if low_quality_set:
+                low_mask = cluster_labels.isin(low_quality_set).values
+                coords = adata.obsm['X_umap'][:, :2]
+                ax.scatter(coords[low_mask, 0], coords[low_mask, 1], s=22,
+                           facecolors='none', edgecolors=NATURE_PALETTE[3],
+                           linewidths=0.9, label='Low Quality Highlight')
+                ax.legend(frameon=False, fontsize=8)
+            result_files.extend(self.save_matplotlib_figure(
+                fig, plots_dir, 'qc_reassess_clusters_umap.png', 'umap',
+                '聚类 UMAP（低质量簇高亮）', formats=('png', 'svg'), dpi=300,
+            ))
 
         self.progress(90, "保存输出...")
         output_path = self.save_output(adata, 'qc_reassess')
@@ -231,6 +206,8 @@ class QCReassessAnalysis(BaseAnalysis):
             'result_files': result_files,
             'summary': {
                 'n_clusters': len(clusters),
+                'cluster_key': cluster_key,
+                'requested_cluster_key': requested_cluster_key,
                 'n_low_quality': int(n_low),
                 'low_quality_clusters': stats_df[stats_df['low_quality']]['cluster'].tolist(),
                 'doublet_threshold': doublet_threshold,

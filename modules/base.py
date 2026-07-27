@@ -1,17 +1,29 @@
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
+from modules.figure_style import (
+    NATURE_BG,
+    NATURE_FONT_FAMILY,
+    NATURE_PALETTE,
+    nature_continuous_cmap,
+)
+
+# Result files are persisted in the database and exposed by the result routes.
+# Keep the file-type contract in one place so modules, tests and API consumers
+# agree on optional spreadsheet exports as well as image/table artifacts.
+VALID_RESULT_FILE_TYPES = frozenset({
+    'csv', 'xlsx', 'plotly_json', 'png', 'svg', 'jpg', 'jpeg',
+    'info', 'json', 'txt', 'h5ad',
+})
 
 VISUALIZATION_THEMES = {
     'default': {
-        'bg_color': 'white',
-        'color_palette': ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
-                          '#9467bd', '#8c564b', '#e377c2', '#7f7f7f'],
-        'font_family': 'Arial',
+        'bg_color': NATURE_BG,
+        'color_palette': list(NATURE_PALETTE),
+        'font_family': NATURE_FONT_FAMILY,
     },
     'nature': {
-        'bg_color': 'white',
-        'color_palette': ['#E64B35', '#4DBBD5', '#00A087', '#3C5488',
-                          '#F39B7F', '#8491B4', '#91D1C2', '#DC0000'],
+        'bg_color': NATURE_BG,
+        'color_palette': list(NATURE_PALETTE),
         'font_family': 'Helvetica',
     },
     'dark': {
@@ -119,6 +131,8 @@ class BaseAnalysis(ABC):
         if not export_formats:
             return []
         import os
+        from modules.figure_style import style_plotly_figure
+        style_plotly_figure(fig, self.params.get('_visualization', {}))
         exported = []
         for fmt in export_formats:
             if fmt in ('svg', 'png'):
@@ -134,7 +148,7 @@ class BaseAnalysis(ABC):
         return exported
 
     def save_matplotlib_figure(self, fig, plots_dir, filename, category, label,
-                               formats=None, dpi=300):
+                               formats=None, dpi=300, preserve_aspect=False):
         """Persist a publication-quality Matplotlib/Scanpy figure and register it.
 
         Static figures are intentionally generated independently of Plotly/Kaleido:
@@ -142,6 +156,7 @@ class BaseAnalysis(ABC):
         vector geometry even when the optional Kaleido renderer is unavailable.
         """
         import os
+        from modules.figure_style import apply_matplotlib_style, _font_for_text
 
         viz = self.params.get('_visualization', {})
         if formats is None:
@@ -156,11 +171,18 @@ class BaseAnalysis(ABC):
         # This changes the figure itself before both PNG and SVG are written, so
         # the browser preview and the vector download share the same composition.
         try:
-            width = max(6.5, float(viz.get('figure_width', 900)) / 100)
-            height = max(4.8, float(viz.get('figure_height', 600)) / 100)
-            fig.set_size_inches(width, height, forward=True)
+            # Native builders choose their own aspect ratio (for example a
+            # multi-resolution UMAP grid or a long cluster composition panel).
+            # Callers can preserve that aspect explicitly; otherwise the
+            # requested visualization dimensions are applied to the canvas.
+            if ('figure_width' in viz or 'figure_height' in viz) and not preserve_aspect:
+                current_width, current_height = fig.get_size_inches()
+                width = max(6.5, float(viz.get('figure_width', current_width * 100)) / 100)
+                height = max(4.8, float(viz.get('figure_height', current_height * 100)) / 100)
+                fig.set_size_inches(width, height, forward=True)
             font_size = max(9, float(viz.get('font_size', 12)))
-            font_family = viz.get('font_family', 'Arial')
+            font_family = viz.get('font_family', NATURE_FONT_FAMILY)
+            apply_matplotlib_style(fig, viz)
             for axis in getattr(fig, 'axes', []):
                 axis.set_facecolor(viz.get('bg_color', 'white'))
                 axis.tick_params(labelsize=max(8, font_size - 2), width=0.7,
@@ -173,7 +195,7 @@ class BaseAnalysis(ABC):
                 title.set_fontsize(font_size + 1)
                 title.set_fontweight('semibold')
                 title.set_color('#111827')
-                title.set_fontfamily(font_family)
+                title.set_fontfamily(_font_for_text(title.get_text(), font_family))
                 for spine in axis.spines.values():
                     spine.set_linewidth(0.65)
                     spine.set_color('#c7cdd6')
@@ -182,14 +204,25 @@ class BaseAnalysis(ABC):
                     legend.set_frame_on(False)
                     for text in legend.get_texts():
                         text.set_fontsize(max(8, font_size - 2))
-                        text.set_fontfamily(font_family)
+                        text.set_fontfamily(_font_for_text(text.get_text(), font_family))
             # Figure-level legends (used by enrichment charts) need an explicit
             # right-side reservation; otherwise tight_layout expands the axes
             # underneath the legend and clips/overlaps the ontology key.
             if getattr(fig, 'legends', None):
                 fig.tight_layout(rect=(0.0, 0.0, 0.76, 0.93), pad=1.1)
             else:
-                fig.tight_layout(pad=1.1)
+                layout_rect = getattr(fig, '_native_layout_rect', None)
+                if layout_rect is not None:
+                    fig.tight_layout(rect=layout_rect, pad=1.1)
+                else:
+                    fig.tight_layout(pad=1.1)
+
+            # Some dense native figures provide an opt-in post-layout audit.
+            # Run it after all shared typography and layout adjustments so the
+            # report reflects the exact canvas that will be exported.
+            post_layout_audit = getattr(fig, '_post_layout_audit', None)
+            if callable(post_layout_audit):
+                fig._post_layout_audit_result = post_layout_audit(fig)
         except Exception:
             # A third-party figure may expose a non-standard Axes object; export
             # it unchanged rather than making a successful analysis fail.
@@ -212,6 +245,13 @@ class BaseAnalysis(ABC):
                 'category': category,
                 'label': label,
             })
+        # Analysis runs may produce dozens of panels; release the canvas once
+        # both the raster preview and editable vector artifact are persisted.
+        try:
+            import matplotlib.pyplot as plt
+            plt.close(fig)
+        except Exception:
+            pass
         return result_files
 
     def build_publication_umap(self, adata, color_key, title='', basis='X_umap'):
@@ -219,8 +259,8 @@ class BaseAnalysis(ABC):
 
         Scanpy's default figure is excellent for exploration, but its point size
         and legend/colorbar scale poorly when embedded in a web result card. This
-        renderer keeps OmicVerse-aligned categorical colors while adapting marker
-        size and layout to the number of cells.
+        renderer keeps the shared Nature palette while adapting marker size and
+        layout to the number of cells.
         """
         import math
         import numpy as np
@@ -240,12 +280,14 @@ class BaseAnalysis(ABC):
         values = adata.obs[color_key] if color_key in adata.obs.columns else None
         is_numeric = values is not None and pd.api.types.is_numeric_dtype(values)
         if values is None:
-            ax.scatter(coords[:, 0], coords[:, 1], s=marker_size, c='#455a9b',
+            ax.scatter(coords[:, 0], coords[:, 1], s=marker_size,
+                       c=NATURE_PALETTE[0],
                        alpha=opacity, linewidths=0, rasterized=True)
         elif is_numeric:
             scatter = ax.scatter(
                 coords[:, 0], coords[:, 1], s=marker_size,
-                c=np.asarray(values, dtype=float), cmap='viridis', alpha=opacity,
+                c=np.asarray(values, dtype=float), cmap=nature_continuous_cmap(),
+                alpha=opacity,
                 linewidths=0, rasterized=True,
             )
             colorbar = fig.colorbar(scatter, ax=ax, fraction=0.035, pad=0.025,
@@ -254,9 +296,11 @@ class BaseAnalysis(ABC):
             colorbar.set_label(str(color_key), fontsize=font_size - 1,
                                labelpad=6)
         else:
-            from modules.visualization import categorical_color_map
             categorical = values.astype('category')
-            color_map = categorical_color_map(adata, color_key)
+            color_map = {
+                str(category): NATURE_PALETTE[index % len(NATURE_PALETTE)]
+                for index, category in enumerate(categorical.cat.categories)
+            }
             for category in categorical.cat.categories:
                 mask = np.asarray(categorical == category)
                 if not mask.any():
@@ -357,8 +401,10 @@ class BaseAnalysis(ABC):
     def save_plotly_json(self, fig, plots_dir, filename, category, label):
         """将 Plotly figure 保存为 JSON 并返回 result_file dict。"""
         import os, re
+        from modules.figure_style import style_plotly_figure
         safe_filename = re.sub(r'[^a-zA-Z0-9_.\-]', '_', filename)
         fpath = os.path.join(plots_dir, safe_filename)
+        style_plotly_figure(fig, self.params.get('_visualization', {}))
         fig.write_json(fpath)
         return {'file_path': fpath, 'file_type': 'plotly_json', 'category': category, 'label': label}
 

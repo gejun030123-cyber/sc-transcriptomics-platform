@@ -64,6 +64,27 @@ def _make_task_with_result(pid, filename="plot.json"):
     return task, result_file
 
 
+def _make_csv_result(pid, filename="table.csv"):
+    from config import Config
+    from models import AnalysisTask, ResultFile
+
+    results_dir = Config.results_dir(pid)
+    os.makedirs(results_dir, exist_ok=True)
+    path = os.path.join(results_dir, filename)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("gene,log2FC,padj\nTP53,2.1,0.01\nGAPDH,0.2,0.9\nEGFR,-1.4,0.04\n")
+    task = AnalysisTask(project_id=pid, module_name="bulk_deg", status="completed")
+    task.save()
+    return ResultFile.create(
+        task_id=task.id,
+        project_id=pid,
+        file_type="csv",
+        category="table",
+        label="DEG table",
+        file_path=path,
+    )
+
+
 def test_result_page_rejects_cross_project_file(client):
     _make_project("project_a")
     _make_project("project_b")
@@ -89,6 +110,83 @@ def test_project_result_file_api_requires_matching_project(client):
     ok = client.get(f"/api/projects/project_b/result-file/{result_file.id}")
     assert ok.status_code == 410
     assert "retired" in ok.get_json()["error"]
+
+
+def test_csv_result_preview_is_project_scoped_and_filterable(client):
+    _make_project("project_a")
+    _make_project("project_b")
+    result_file = _make_csv_result("project_b")
+
+    wrong = client.get(f"/api/projects/project_a/result-file/{result_file.id}/table-preview")
+    assert wrong.status_code == 403
+
+    response = client.get(
+        f"/api/projects/project_b/result-file/{result_file.id}/table-preview",
+        query_string={"search": "tp", "column": "padj", "max": "0.05"},
+    )
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["matched_rows"] == 1
+    assert data["rows"][0]["gene"] == "TP53"
+
+
+def test_design_preflight_api_returns_safe_contrast_preview(client):
+    import anndata as ad
+    import numpy as np
+    import pandas as pd
+    from config import Config
+
+    _make_project("project_a")
+    uploads = Config.uploads_dir("project_a")
+    os.makedirs(uploads, exist_ok=True)
+    input_path = os.path.join(uploads, "bulk_counts.h5ad")
+    ad.AnnData(
+        X=np.asarray([[1, 3], [2, 4], [7, 9], [8, 10]], dtype=float),
+        obs=pd.DataFrame({"condition": ["Ctrl", "Ctrl", "Treat", "Treat"]}, index=["s1", "s2", "s3", "s4"]),
+        var=pd.DataFrame(index=["G1", "G2"]),
+    ).write_h5ad(input_path)
+
+    response = client.post(
+        "/api/projects/project_a/design-preflight",
+        json={
+            "file_path": input_path,
+            "module_name": "bulk_deg",
+            "params": {"groupby": "condition", "method": "t-test"},
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["status"] == "ready"
+    assert data["contrast"]["selected"] == {"group1": "Ctrl", "group2": "Treat"}
+
+
+def test_bulk_deg_form_blocks_insufficient_replicates_before_task_submission(client):
+    import anndata as ad
+    import numpy as np
+    import pandas as pd
+    from config import Config
+    from models import AnalysisTask
+
+    _make_project("project_a")
+    uploads = Config.uploads_dir("project_a")
+    os.makedirs(uploads, exist_ok=True)
+    input_path = os.path.join(uploads, "singleton_group.h5ad")
+    ad.AnnData(
+        X=np.asarray([[1, 3], [2, 4], [7, 9]], dtype=float),
+        obs=pd.DataFrame({"condition": ["Ctrl", "Ctrl", "Treat"]}, index=["s1", "s2", "s3"]),
+        var=pd.DataFrame(index=["G1", "G2"]),
+    ).write_h5ad(input_path)
+
+    response = client.post(
+        "/projects/project_a/analyze/bulk_deg",
+        data={"input_path": input_path, "groupby": "condition", "method": "t-test"},
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert '分析前检查未通过'.encode() in response.data
+    assert AnalysisTask.get_by_project("project_a") == []
 
 
 def test_project_plot_archive_contains_gallery_and_sources(client):

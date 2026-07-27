@@ -452,6 +452,52 @@ class TestClipRangeParsing:
         assert self._parse_clip_range('-1.5,2.5') == (-1.5, 2.5)
 
 
+class TestHeatmapSampleSelection:
+    """展示范围应只过滤绘图样本，不改变 DEG 的统计来源。"""
+
+    @pytest.fixture
+    def obs(self):
+        return pd.DataFrame(
+            {'group': ['ctrl', 'ctrl', 'treat', 'treat', 'dose', 'dose']},
+            index=['s1', 's2', 's3', 's4', 's5', 's6'],
+        )
+
+    def test_deg_groups_selects_only_the_contrast_samples(self, obs):
+        from modules.bulk_heatmap import _select_heatmap_display_samples
+
+        indices, contract = _select_heatmap_display_samples(
+            obs, sample_display_mode='deg_groups', groupby='group',
+            comparison_label='treat vs ctrl',
+        )
+
+        assert indices == [0, 1, 2, 3]
+        assert contract['selected_groups'] == ['treat', 'ctrl']
+        assert contract['mode'] == 'deg_groups'
+
+    def test_selected_groups_keeps_the_requested_groups_only(self, obs):
+        from modules.bulk_heatmap import _select_heatmap_display_samples
+
+        indices, contract = _select_heatmap_display_samples(
+            obs, sample_display_mode='selected_groups', groupby='group',
+            selected_groups='ctrl,dose',
+        )
+
+        assert indices == [0, 1, 4, 5]
+        assert contract['n_samples'] == 4
+
+    def test_selected_samples_requires_exact_sample_names(self, obs):
+        from modules.bulk_heatmap import _select_heatmap_display_samples
+
+        indices, _ = _select_heatmap_display_samples(
+            obs, sample_display_mode='selected_samples', selected_samples='s2,s5',
+        )
+        assert indices == [1, 4]
+        with pytest.raises(ValueError, match='未找到所选样本'):
+            _select_heatmap_display_samples(
+                obs, sample_display_mode='selected_samples', selected_samples='s2,missing',
+            )
+
+
 def test_deg_integration_deduplicates_gene_symbols():
     """多个 Ensembl ID 映射到同一 symbol 时保留最显著的一行。"""
     import pandas as pd
@@ -496,6 +542,102 @@ def test_gsea_export_preserves_pathway_names_from_index():
     assert result.loc[0, 'Term'] == 'interferon signaling'
 
 
+def test_enrichment_resolves_missing_kegg_library_once(monkeypatch, tmp_path):
+    """KEGG is fetched on demand rather than relying on OmicVerse's GO-only downloader."""
+    import modules.bulk_enrichment as enrichment
+
+    monkeypatch.chdir(tmp_path)
+    calls = []
+
+    def fake_download(library_name, destination):
+        calls.append(library_name)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text('KEGG pathway\t\tGENE1\tGENE2\n')
+
+    monkeypatch.setattr(enrichment, '_download_enrichr_geneset', fake_download)
+    first = enrichment._resolve_geneset_path('KEGG_2021_Human', 'Human')
+    second = enrichment._resolve_geneset_path('KEGG_2021_Human', 'Human')
+
+    assert first == 'genesets/KEGG_2021_Human.txt'
+    assert second == first
+    assert calls == ['KEGG_2021_Human']
+
+
+def test_enrichment_uses_requested_database_when_gene_set_is_internal_label():
+    from modules.bulk_enrichment import _enrichment_ontology
+
+    assert _enrichment_ontology('gs_ind', 'KEGG') == 'KEGG'
+
+
+def test_enrichment_integration_retains_source_metadata(tmp_path):
+    import pandas as pd
+    from modules.bulk_enrichment import _write_enrichment_integration
+
+    results_dir = tmp_path / 'results'
+    results_dir.mkdir()
+    pd.DataFrame({
+        'Database': ['GO_BP'], 'Method': ['ORA'], 'Direction': ['All'],
+        'Term': ['response to virus'], 'Adjusted P-value': [0.02],
+    }).to_csv(results_dir / 'enrichment_ora_go_bp_results.csv', index=False)
+    pd.DataFrame({
+        'Database': ['KEGG'], 'Method': ['ORA'], 'Direction': ['Up'],
+        'Term': ['MAPK signaling pathway'], 'Adjusted P-value': [0.001],
+    }).to_csv(results_dir / 'enrichment_ora_kegg_directional_results.csv', index=False)
+
+    files = _write_enrichment_integration(results_dir)
+    integrated = pd.read_csv(results_dir / 'enrichment_integrated_results.csv')
+
+    assert len(files) >= 1
+    assert integrated['Database'].tolist() == ['KEGG', 'GO_BP']
+    assert {'Comparison', 'Method', 'Direction', 'Term', 'Source result'}.issubset(integrated.columns)
+    assert set(integrated['Comparison']) == {'Unspecified'}
+
+
+def test_enrichment_integration_builds_one_overview_for_same_comparison(tmp_path):
+    import os
+    import pandas as pd
+    from modules.bulk_enrichment import _write_enrichment_integration
+
+    results_dir = tmp_path / 'results'
+    results_dir.mkdir()
+    common = {'Comparison': ['Ctrl vs Treat', 'Ctrl vs Treat'], 'Method': ['ORA', 'ORA'],
+              'Direction': ['All', 'All']}
+    pd.DataFrame({
+        **common, 'Database': ['GO_BP', 'GO_BP'],
+        'Term': ['response to lipid', 'inflammatory response'],
+        'Adjusted P-value': [0.001, 0.008], 'Overlap': ['5/100', '3/100'],
+    }).to_csv(results_dir / 'enrichment_ora_go_bp_ctrl_vs_treat_results.csv', index=False)
+    pd.DataFrame({
+        **common, 'Database': ['KEGG', 'KEGG'],
+        'Term': ['PPAR signaling pathway', 'Fatty acid metabolism'],
+        'Adjusted P-value': [0.002, 0.02], 'Overlap': ['4/90', '2/75'],
+    }).to_csv(results_dir / 'enrichment_ora_kegg_ctrl_vs_treat_results.csv', index=False)
+
+    files = _write_enrichment_integration(results_dir)
+    overview_files = [item for item in files if item['category'] == 'enrichment_overview']
+    integrated = pd.read_csv(results_dir / 'enrichment_integrated_results.csv')
+
+    assert len(integrated) == 4
+    assert set(integrated['Comparison']) == {'Ctrl vs Treat'}
+    assert {item['file_type'] for item in overview_files} == {'png', 'svg'}
+    assert all(os.path.isfile(item['file_path']) for item in overview_files)
+
+
+def test_enrichment_text_audit_detects_overlapping_labels():
+    import matplotlib.pyplot as plt
+    from modules.bulk_enrichment import _audit_figure_text_overlap
+
+    fig, ax = plt.subplots()
+    ax.text(0.5, 0.5, 'first label')
+    ax.text(0.5, 0.5, 'second label')
+    try:
+        audit = _audit_figure_text_overlap(fig)
+        assert audit['n_overlap_pairs'] >= 1
+        assert audit['status'] == 'warning'
+    finally:
+        plt.close(fig)
+
+
 def test_enrichment_figure_uses_ontology_colors_and_overlap_counts():
     import pandas as pd
     from modules.bulk_enrichment import _enrichment_figure
@@ -511,7 +653,7 @@ def test_enrichment_figure_uses_ontology_colors_and_overlap_counts():
         assert fig is not None
         assert len(fig.axes) == 1
         assert len(fig.axes[0].patches) == 3
-        assert any(text.get_text() == '6' for text in fig.axes[0].texts)
+        assert any(text.get_text() == 'n=6' for text in fig.axes[0].texts)
     finally:
         import matplotlib.pyplot as plt
         plt.close(fig)

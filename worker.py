@@ -11,6 +11,24 @@ logger = logging.getLogger(__name__)
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 _active_futures = {}
 
+
+def _result_error(result):
+    """Return a module-declared error without confusing warnings with failure."""
+    if isinstance(result, dict) and result.get('error'):
+        return str(result['error'])
+    summary = result.get('summary') if isinstance(result, dict) else None
+    if isinstance(summary, dict) and summary.get('error'):
+        return str(summary['error'])
+    return ''
+
+
+def _refresh_project_status(project_id):
+    try:
+        from models import Project
+        Project.refresh_status(project_id)
+    except Exception as exc:
+        logger.warning("[Worker] Failed to refresh project %s status: %s", project_id, exc)
+
 def active_count():
     return sum(1 for f in _active_futures.values() if not f.done())
 
@@ -136,11 +154,13 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
         result = module.run(input_path)
 
         register_task_outputs(task, project_id, project_dir, result)
-
-        task.mark_completed(
-            result.get('output_adata'),
-            json.dumps(result.get('summary', {}))
-        )
+        summary = result.get('summary', {})
+        summary_json = json.dumps(summary, ensure_ascii=False, default=str)
+        error_message = _result_error(result)
+        if error_message:
+            task.mark_failed(error_message, summary_json)
+        else:
+            task.mark_completed(result.get('output_adata'), summary_json)
 
     except Exception as e:
         logger.error(f"[Worker] Task {task_id} failed:\n{traceback.format_exc()}")
@@ -151,6 +171,7 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
         except Exception as db_err:
             logger.error(f"[Worker] Failed to mark task {task_id} as failed: {db_err}")
     finally:
+        _refresh_project_status(project_id)
         _active_futures.pop(task_id, None)
 
 
@@ -273,10 +294,22 @@ def _run_pipeline_run(run_id, project_id, modules, params_by_module, project_dir
                 _write_pipeline_artifacts(run_id, project_dir)
                 return
 
+            summary = result.get('summary', {})
+            error_message = _result_error(result)
+            if error_message:
+                summary_json = json.dumps(summary, ensure_ascii=False, default=str)
+                task.mark_failed(f"模块 {module_name}：{error_message}", summary_json)
+                progress_log_entry['status'] = 'failed'
+                progress_log_entry['error'] = error_message
+                progress_log.append(progress_log_entry)
+                pipeline_run.mark_failed(f"模块 {module_name}：{error_message}")
+                _write_pipeline_artifacts(run_id, project_dir)
+                return
+
             register_task_outputs(task, project_id, project_dir, result, pipeline_run_id=run_id)
 
             # 标记任务完成
-            task.mark_completed(output_adata, json.dumps(result.get('summary', {}), ensure_ascii=False))
+            task.mark_completed(output_adata, summary_json)
 
             # 更新进度日志
             progress_log_entry['status'] = 'completed'
@@ -295,4 +328,5 @@ def _run_pipeline_run(run_id, project_id, modules, params_by_module, project_dir
             pipeline_run.mark_failed(traceback.format_exc())
             _write_pipeline_artifacts(run_id, project_dir)
     finally:
+        _refresh_project_status(project_id)
         _active_futures.pop(run_id, None)

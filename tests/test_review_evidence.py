@@ -40,6 +40,96 @@ def test_annotation_review_evidence_uses_unknown_ratio_and_confidence():
     assert any(c["name"] == "平均置信度" and c["status"] == "pass" for c in evidence["checks"])
 
 
+def test_annotation_optional_confidence_is_not_reported_as_warning():
+    from modules.reporting.review_evidence import build_review_evidence
+
+    evidence = build_review_evidence(
+        "annotation",
+        {
+            "n_celltypes": 3,
+            "celltype_counts": {"T cell": 40, "B cell": 30},
+            "marker_selection": {"warnings": ["cluster 2 最终仅保留 1 个 marker"]},
+        },
+        [
+            SimpleNamespace(file_path="/tmp/annotation_marker_expression_dotplot.png", label="Marker expression", category="dotplot"),
+        ],
+    )
+
+    confidence = next(c for c in evidence["checks"] if c["name"] == "注释置信度")
+    confidence_umap = next(c for c in evidence["checks"] if c["name"] == "置信度 UMAP")
+    assert confidence["status"] == "pass"
+    assert confidence_umap["status"] == "pass"
+    assert any(c["name"] == "Marker 选择提示" for c in evidence["checks"])
+
+
+def test_proportion_review_evidence_requires_sample_level_statistics():
+    from modules.reporting.review_evidence import build_review_evidence
+
+    evidence = build_review_evidence(
+        "proportion",
+        {
+            "sample_level_inference_ready": True,
+            "sample_key": "sample_id",
+            "condition_key": "condition",
+            "sample_level_n_tests": 4,
+        },
+        [
+            SimpleNamespace(file_path="/tmp/sample_level_cell_proportions.csv", label="Sample-level Cell Proportions", category="table"),
+            SimpleNamespace(file_path="/tmp/sample_level_proportion_tests.csv", label="Sample-level Proportion Tests", category="table"),
+        ],
+    )
+
+    assert evidence["module_name"] == "proportion"
+    assert any(c["name"] == "统计单位" and c["status"] == "pass" for c in evidence["checks"])
+
+
+def test_batch_correct_review_evidence_uses_pre_post_deltas():
+    from modules.reporting.review_evidence import build_review_evidence
+
+    evidence = build_review_evidence(
+        "batch_correct",
+        {
+            "evaluation_comparison": {
+                "before": {
+                    "abs_asw_batch": 0.62,
+                    "asw_bio": 0.48,
+                    "mean_neighbor_batch_entropy": 0.31,
+                    "mean_neighbor_same_batch_fraction": 0.82,
+                    "bio_label_key": "celltype",
+                },
+                "after": {
+                    "abs_asw_batch": 0.18,
+                    "asw_bio": 0.51,
+                    "mean_neighbor_batch_entropy": 0.66,
+                    "mean_neighbor_same_batch_fraction": 0.35,
+                    "bio_label_key": "celltype",
+                },
+                "delta": {
+                    "abs_asw_batch": -0.44,
+                    "asw_bio": 0.03,
+                    "mean_neighbor_batch_entropy": 0.35,
+                    "mean_neighbor_same_batch_fraction": -0.47,
+                },
+                "sampling": {"used_size": 400, "strategy": "batch_stratified"},
+                "comparison_scope": "embedding_and_graph",
+                "warnings": [],
+            }
+        },
+        [
+            SimpleNamespace(
+                file_path="/tmp/batch_evaluation_pre_post_harmony.csv",
+                label="Batch integration pre/post metrics",
+                category="table",
+            )
+        ],
+    )
+
+    assert evidence["module_name"] == "batch_correct"
+    assert evidence["status"] == "pass"
+    assert any(c["name"] == "Batch ASW" and c["status"] == "pass" for c in evidence["checks"])
+    assert any(c["name"] == "生物结构保留" and c["status"] == "pass" for c in evidence["checks"])
+
+
 def test_non_single_cell_review_module_returns_none():
     from modules.reporting.review_evidence import build_review_evidence
 

@@ -1,0 +1,419 @@
+{% extends "base.html" %}
+{% block title %}图形美化 - {{ project.name }}{% endblock %}
+{% block extra_css %}
+<style>
+    .studio-layout { display:grid; grid-template-columns:minmax(420px, 1fr) 360px; gap:20px; align-items:start; }
+    .preview-wrap { min-height:560px; display:flex; align-items:center; justify-content:center; background:#f8fafc; border:1px solid #e4e7ec; border-radius:10px; padding:18px; }
+    .preview-wrap img { max-width:100%; max-height:72vh; object-fit:contain; }
+    .control-section { border-top:1px solid #eaecf0; margin-top:14px; padding-top:14px; }
+    .control-section:first-child { border-top:0; margin-top:0; padding-top:0; }
+    .control-section h6 { color:#344054; font-size:.88rem; font-weight:700; }
+    .hint { color:#667085; font-size:.78rem; }
+    .mode-note { border-left:3px solid #98a2b3; background:#f8fafc; padding:10px 12px; border-radius:6px; font-size:.82rem; color:#475467; }
+    .mode-note.data { border-left-color:#0f766e; background:#f0fdfa; }
+    .mode-note.warning { border-left-color:#d97706; background:#fffaeb; }
+    .versions a { font-size:.8rem; }
+    .form-label { font-size:.78rem; margin-bottom:3px; color:#475467; }
+    .compact-input { font-size:.84rem; }
+    @media (max-width: 1080px) { .studio-layout { grid-template-columns:1fr; } .preview-wrap { min-height:360px; } }
+</style>
+{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+        <a href="/projects/{{ project.id }}/results" class="text-decoration-none small">&larr; 返回结果页</a>
+        <h4 class="mb-0 mt-1">图形美化工作台</h4>
+    </div>
+    <span class="small text-muted">原始分析图不会被覆盖</span>
+</div>
+
+<div class="alert alert-info small">
+    平台火山图和热图可从原始分析数据重新绘制；保存后会生成独立 PNG/SVG 版本。上传的普通图片仅可添加标题、字体、背景和说明文字，不能重绘其坐标轴或数据层。
+</div>
+
+<div class="studio-layout">
+    <section class="card p-3 p-lg-4">
+        <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-3">
+            <div class="flex-grow-1">
+                <label for="source-select" class="form-label">选择平台图、已保存版本或上传图片</label>
+                <select id="source-select" class="form-select compact-input"></select>
+            </div>
+            <div class="pt-3">
+                <label class="btn btn-outline-secondary btn-sm mb-0">
+                    上传图片 <input type="file" id="image-upload" accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml" hidden>
+                </label>
+            </div>
+        </div>
+        <div id="mode-note" class="mode-note mb-3">请选择一个图形。</div>
+        <div class="preview-wrap" id="preview-wrap">
+            <img id="figure-preview" alt="图形预览" style="display:none">
+            <span id="preview-placeholder" class="text-muted small">选择图形后在此显示预览</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-center mt-3 gap-2">
+            <span id="preview-status" class="small text-muted"></span>
+            <button type="button" class="btn btn-outline-primary btn-sm" id="refresh-preview">重新生成预览</button>
+        </div>
+    </section>
+
+    <aside class="card p-3 p-lg-4">
+        <div class="control-section">
+            <h6>保存为新版本</h6>
+            <label for="version-label" class="form-label">版本名称</label>
+            <input id="version-label" class="form-control compact-input" maxlength="180" placeholder="例如：FDR 0.05 的火山图">
+            <button type="button" class="btn btn-primary w-100 mt-2" id="save-version">保存为新版本</button>
+            <div id="save-status" class="hint mt-2"></div>
+        </div>
+
+        <div class="control-section">
+            <h6>通用外观</h6>
+            <div class="mb-2">
+                <label for="title" class="form-label">标题</label>
+                <input id="title" class="form-control compact-input style-field" maxlength="180" placeholder="留空则沿用原图标题">
+            </div>
+            <div class="row g-2">
+                <div class="col-7">
+                    <label for="font-family" class="form-label">字体</label>
+                    <select id="font-family" class="form-select compact-input style-field">
+                        <option value="Arial">Arial</option><option value="Helvetica">Helvetica</option>
+                        <option value="DejaVu Sans">DejaVu Sans</option><option value="Microsoft YaHei">Microsoft YaHei</option>
+                    </select>
+                </div>
+                <div class="col-5">
+                    <label for="font-size" class="form-label">字号</label>
+                    <input id="font-size" type="number" min="7" max="28" value="11" class="form-control compact-input style-field">
+                </div>
+            </div>
+            <div class="row g-2 mt-1">
+                <div class="col-7">
+                    <label for="background" class="form-label">背景</label>
+                    <input id="background" type="color" value="#ffffff" class="form-control form-control-color style-field">
+                </div>
+                <div class="col-5 pt-4">
+                    <div class="form-check"><input id="grid" class="form-check-input style-field data-only" type="checkbox"><label class="form-check-label small" for="grid">显示网格线</label></div>
+                </div>
+            </div>
+            <div class="mt-2 data-only">
+                <label for="legend-position" class="form-label">图例位置</label>
+                <select id="legend-position" class="form-select compact-input style-field">
+                    <option value="upper right">右上</option><option value="upper left">左上</option><option value="lower right">右下</option><option value="lower left">左下</option><option value="best">自动</option><option value="none">隐藏</option>
+                </select>
+            </div>
+            <div class="mt-2">
+                <label for="legend-text" class="form-label">补充说明文字</label>
+                <input id="legend-text" class="form-control compact-input style-field" maxlength="300" placeholder="普通图片将显示为图下说明">
+            </div>
+        </div>
+
+        <div class="control-section data-only">
+            <h6>坐标轴与范围</h6>
+            <div class="row g-2">
+                <div class="col-6"><label for="x-label" class="form-label">X 轴标题</label><input id="x-label" class="form-control compact-input style-field" maxlength="180"></div>
+                <div class="col-6"><label for="y-label" class="form-label">Y 轴标题</label><input id="y-label" class="form-control compact-input style-field" maxlength="180"></div>
+                <div class="col-6"><label for="x-min" class="form-label">X 最小值</label><input id="x-min" type="number" step="any" class="form-control compact-input style-field"></div>
+                <div class="col-6"><label for="x-max" class="form-label">X 最大值</label><input id="x-max" type="number" step="any" class="form-control compact-input style-field"></div>
+                <div class="col-6"><label for="y-min" class="form-label">Y 最小值</label><input id="y-min" type="number" step="any" class="form-control compact-input style-field"></div>
+                <div class="col-6"><label for="y-max" class="form-label">Y 最大值</label><input id="y-max" type="number" step="any" class="form-control compact-input style-field"></div>
+            </div>
+        </div>
+
+        <div id="volcano-controls" class="control-section data-only special-controls" style="display:none">
+            <h6>火山图阈值与标注</h6>
+            <p class="hint mb-2">只会按新阈值重新分类点色、重绘阈值线和更新标注；不会重新计算差异表达。</p>
+            <div class="row g-2">
+                <div class="col-6"><label for="pvalue-threshold" class="form-label">FDR 阈值</label><input id="pvalue-threshold" type="number" step="any" min="0.000001" max="1" value="0.05" class="form-control compact-input style-field"></div>
+                <div class="col-6"><label for="fc-threshold" class="form-label">Fold change 阈值</label><input id="fc-threshold" type="number" step="any" min="1" value="1.5" class="form-control compact-input style-field"></div>
+                <div class="col-4"><label for="up-color" class="form-label">上调</label><input id="up-color" type="color" value="#b64342" class="form-control form-control-color style-field"></div>
+                <div class="col-4"><label for="down-color" class="form-label">下调</label><input id="down-color" type="color" value="#0f4d92" class="form-control form-control-color style-field"></div>
+                <div class="col-4"><label for="ns-color" class="form-label">不显著</label><input id="ns-color" type="color" value="#c7cdd6" class="form-control form-control-color style-field"></div>
+            </div>
+            <div class="mt-2"><label for="label-genes" class="form-label">标注基因</label><textarea id="label-genes" class="form-control compact-input style-field" rows="2" placeholder="TP53, VEGFA, IL6；使用箭头和框标注"></textarea></div>
+        </div>
+
+        <div id="heatmap-controls" class="control-section data-only special-controls" style="display:none">
+            <h6>热图重绘</h6>
+            <div class="row g-2">
+                <div class="col-7"><label for="heatmap-cmap" class="form-label">配色</label><select id="heatmap-cmap" class="form-select compact-input style-field"><option value="RdBu_r">RdBu_r</option><option value="coolwarm">coolwarm</option><option value="viridis">viridis</option><option value="magma">magma</option><option value="Blues">Blues</option><option value="Greens">Greens</option></select></div>
+                <div class="col-5"><label for="heatmap-top-n" class="form-label">基因数</label><input id="heatmap-top-n" type="number" min="5" max="200" value="50" class="form-control compact-input style-field"></div>
+            </div>
+            <div class="row g-2 mt-1">
+                <div class="col-7"><label for="heatmap-sample-scope" class="form-label">展示样本范围</label><select id="heatmap-sample-scope" class="form-select compact-input style-field"><option value="all">全部样本</option><option value="deg_groups">仅 DEG 两组</option><option value="selected_groups">仅勾选分组</option><option value="selected_samples">仅勾选样本</option></select></div>
+                <div class="col-5"><label for="heatmap-group-column" class="form-label">分组列</label><input id="heatmap-group-column" class="form-control compact-input style-field" maxlength="80" placeholder="例如 group"></div>
+            </div>
+            <div class="mt-2"><label class="form-label">分组选择</label><div id="heatmap-group-picker" class="border rounded p-2 small" style="max-height:120px;overflow-y:auto"><span class="text-muted">选择分组列后显示。</span></div></div>
+            <div class="mt-2"><div class="d-flex justify-content-between align-items-center"><label class="form-label mb-0">样本选择</label><span><button type="button" id="heatmap-select-all-samples" class="btn btn-link btn-sm p-0">全选</button><button type="button" id="heatmap-clear-samples" class="btn btn-link btn-sm p-0 ms-2">清空</button></span></div><div id="heatmap-sample-picker" class="border rounded p-2 small" style="max-height:160px;overflow-y:auto"><span class="text-muted">选择热图后显示样本。</span></div></div>
+            <div class="mt-2"><label for="heatmap-sample-labels" class="form-label">样本标签</label><select id="heatmap-sample-labels" class="form-select compact-input style-field"><option value="auto">自动间隔显示（推荐）</option><option value="all">显示全部</option><option value="none">隐藏</option></select></div>
+            <div class="row g-2 mt-1"><div class="col-6"><div class="form-check"><input id="row-cluster" class="form-check-input style-field" type="checkbox" checked><label class="form-check-label small" for="row-cluster">基因聚类</label></div></div><div class="col-6"><div class="form-check"><input id="col-cluster" class="form-check-input style-field" type="checkbox" checked><label class="form-check-label small" for="col-cluster">样本聚类</label></div></div></div>
+            <div class="mt-2"><label for="annotation-column" class="form-label">样本注释列</label><input id="annotation-column" class="form-control compact-input style-field" maxlength="80" placeholder="例如 group；存在时显示注释条"></div>
+        </div>
+
+        <div id="correlation-controls" class="control-section data-only special-controls" style="display:none">
+            <h6>相关性热图配色</h6>
+            <p class="hint mb-2">仅改变颜色映射和外观；相关系数与样本排序仍由原始相关性结果重新绘制。</p>
+            <label for="corr-colorscale" class="form-label">相关性颜色方案</label>
+            <select id="corr-colorscale" class="form-select compact-input style-field"><option value="Blues">Blues</option><option value="RdBu_r">RdBu_r（含正负相关时推荐）</option><option value="viridis">viridis</option><option value="YlOrRd">YlOrRd</option></select>
+        </div>
+
+        <div id="enrichment-controls" class="control-section data-only special-controls" style="display:none">
+            <h6>通路富集配色</h6>
+            <p class="hint mb-2">颜色表示通路数据库/本体类别，不表示显著性；横条长度仍表示显著性或 GSEA 分数。</p>
+            <div class="row g-2"><div class="col-7"><label for="enrichment-top-n" class="form-label">展示通路数</label><input id="enrichment-top-n" type="number" min="3" max="50" value="20" class="form-control compact-input style-field"></div></div>
+            <div class="row g-2 mt-1">
+                <div class="col-3"><label for="enrichment-bp-color" class="form-label">BP</label><input id="enrichment-bp-color" type="color" value="#fdbe85" class="form-control form-control-color style-field"></div>
+                <div class="col-3"><label for="enrichment-mf-color" class="form-label">MF</label><input id="enrichment-mf-color" type="color" value="#b8a9d1" class="form-control form-control-color style-field"></div>
+                <div class="col-3"><label for="enrichment-kegg-color" class="form-label">KEGG</label><input id="enrichment-kegg-color" type="color" value="#7bc77b" class="form-control form-control-color style-field"></div>
+                <div class="col-3"><label for="enrichment-other-color" class="form-label">其他</label><input id="enrichment-other-color" type="color" value="#9cb8d8" class="form-control form-control-color style-field"></div>
+            </div>
+        </div>
+
+        {% if versions %}
+        <div class="control-section versions" id="saved-versions">
+            <h6>已保存版本</h6>
+            {% for version in versions %}
+            <div class="d-flex justify-content-between gap-2 py-1 border-bottom"><span class="small text-truncate">{{ version.label }}</span><span class="text-nowrap">{% if version.png_url %}<a href="{{ version.png_url }}" download>PNG</a>{% endif %}{% if version.svg_url %} <a href="{{ version.svg_url }}" download>SVG</a>{% endif %}</span></div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </aside>
+</div>
+{% endblock %}
+{% block extra_js %}
+<script>
+(() => {
+    const projectId = {{ project.id|tojson }};
+    let sources = {{ sources|tojson }};
+    const selectedInitial = { kind: {{ selected_kind|tojson }}, id: {{ selected_id|tojson }} };
+    const select = document.getElementById('source-select');
+    const preview = document.getElementById('figure-preview');
+    const placeholder = document.getElementById('preview-placeholder');
+    const note = document.getElementById('mode-note');
+    const previewStatus = document.getElementById('preview-status');
+    let previewTimer = null;
+    let previewRequest = 0;
+
+    const defaults = {
+        title: '', x_label: '', y_label: '', font_family: 'Arial', font_size: 11,
+        background: '#ffffff', grid: false, legend_position: 'upper right', legend_text: '',
+        x_min: '', x_max: '', y_min: '', y_max: '', pvalue_threshold: 0.05, fc_threshold: 1.5,
+        up_color: '#b64342', down_color: '#0f4d92', ns_color: '#c7cdd6', label_genes: '',
+        heatmap_cmap: 'RdBu_r', heatmap_top_n: 50, heatmap_sample_labels: 'auto', heatmap_sample_scope: 'all', heatmap_selected_samples: '', heatmap_group_column: '', heatmap_selected_groups: '', row_cluster: true, col_cluster: true, annotation_column: '',
+        corr_colorscale: 'Blues', enrichment_top_n: 20, enrichment_bp_color: '#fdbe85', enrichment_mf_color: '#b8a9d1', enrichment_kegg_color: '#7bc77b', enrichment_other_color: '#9cb8d8'
+    };
+    const fieldMap = {
+        title: 'title', x_label: 'x-label', y_label: 'y-label', font_family: 'font-family', font_size: 'font-size',
+        background: 'background', grid: 'grid', legend_position: 'legend-position', legend_text: 'legend-text',
+        x_min: 'x-min', x_max: 'x-max', y_min: 'y-min', y_max: 'y-max', pvalue_threshold: 'pvalue-threshold',
+        fc_threshold: 'fc-threshold', up_color: 'up-color', down_color: 'down-color', ns_color: 'ns-color',
+        label_genes: 'label-genes', heatmap_cmap: 'heatmap-cmap', heatmap_top_n: 'heatmap-top-n', heatmap_sample_labels: 'heatmap-sample-labels', heatmap_sample_scope: 'heatmap-sample-scope', heatmap_group_column: 'heatmap-group-column',
+        row_cluster: 'row-cluster', col_cluster: 'col-cluster', annotation_column: 'annotation-column',
+        corr_colorscale: 'corr-colorscale', enrichment_top_n: 'enrichment-top-n', enrichment_bp_color: 'enrichment-bp-color', enrichment_mf_color: 'enrichment-mf-color', enrichment_kegg_color: 'enrichment-kegg-color', enrichment_other_color: 'enrichment-other-color'
+    };
+
+    function currentSource() {
+        const value = select.value;
+        return sources.find(item => `${item.kind}:${item.id}` === value) || null;
+    }
+    function setField(key, value) {
+        const input = document.getElementById(fieldMap[key]);
+        if (!input || value === undefined || value === null) return;
+        if (input.type === 'checkbox') input.checked = Boolean(value);
+        else input.value = value;
+    }
+    function applyStyle(style) {
+        const values = {...defaults, ...(style || {})};
+        Object.entries(values).forEach(([key, value]) => setField(key, value));
+    }
+    function formStyle() {
+        const result = {};
+        Object.entries(fieldMap).forEach(([key, id]) => {
+            const input = document.getElementById(id);
+            result[key] = input.type === 'checkbox' ? input.checked : input.value;
+        });
+        result.heatmap_selected_samples = Array.from(
+            document.querySelectorAll('#heatmap-sample-picker input:checked')
+        ).map(input => input.value).join(',');
+        result.heatmap_selected_groups = Array.from(
+            document.querySelectorAll('#heatmap-group-picker input:checked')
+        ).map(input => input.value).join(',');
+        return result;
+    }
+
+    function checkboxRow(value, checked, onChange) {
+        const label = document.createElement('label');
+        label.className = 'd-block mb-1'; label.style.cursor = 'pointer';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox'; checkbox.value = value; checkbox.checked = checked;
+        checkbox.className = 'form-check-input me-1'; checkbox.addEventListener('change', onChange);
+        label.appendChild(checkbox); label.appendChild(document.createTextNode(value));
+        return label;
+    }
+
+    function populateHeatmapGroupPicker(source, style) {
+        const picker = document.getElementById('heatmap-group-picker');
+        const options = (source && source.heatmap_options) || {};
+        const column = document.getElementById('heatmap-group-column').value;
+        const values = (options.group_columns && options.group_columns[column]) || [];
+        const selected = new Set(String((style || {}).heatmap_selected_groups || '').split(',').filter(Boolean));
+        picker.replaceChildren();
+        if (!column) {
+            const hint = document.createElement('span'); hint.className = 'text-muted'; hint.textContent = '选择分组列后显示。'; picker.appendChild(hint); return;
+        }
+        if (!values.length) {
+            const hint = document.createElement('span'); hint.className = 'text-muted'; hint.textContent = '该列没有可选择的分类分组。'; picker.appendChild(hint); return;
+        }
+        values.forEach(value => picker.appendChild(checkboxRow(value, selected.has(value), schedulePreview)));
+    }
+
+    function populateHeatmapPickers(source, style) {
+        const picker = document.getElementById('heatmap-sample-picker');
+        const options = (source && source.heatmap_options) || {};
+        const selected = new Set(String((style || {}).heatmap_selected_samples || '').split(',').filter(Boolean));
+        picker.replaceChildren();
+        if (!source || source.edit_mode !== 'bulk_heatmap') {
+            const hint = document.createElement('span'); hint.className = 'text-muted'; hint.textContent = '选择可重绘热图后显示样本。'; picker.appendChild(hint);
+            populateHeatmapGroupPicker(null, {}); return;
+        }
+        if (!document.getElementById('heatmap-group-column').value && source.heatmap_groupby) {
+            document.getElementById('heatmap-group-column').value = source.heatmap_groupby;
+        }
+        const samples = options.samples || [];
+        if (!samples.length) {
+            const hint = document.createElement('span'); hint.className = 'text-muted'; hint.textContent = '未读取到可选择的样本。'; picker.appendChild(hint);
+        } else {
+            samples.forEach(value => picker.appendChild(checkboxRow(value, selected.has(value), schedulePreview)));
+            if (options.sample_picker_truncated) {
+                const hint = document.createElement('div'); hint.className = 'text-muted mt-1';
+                hint.textContent = `仅列出前 ${samples.length} 个样本；其余样本可使用全部样本或按分组展示。`; picker.appendChild(hint);
+            }
+        }
+        populateHeatmapGroupPicker(source, style || {});
+    }
+    function showMode(source) {
+        const isVolcano = source && source.edit_mode === 'bulk_volcano';
+        const isHeatmap = source && source.edit_mode === 'bulk_heatmap';
+        const isCorrelation = source && source.edit_mode === 'bulk_correlation';
+        const isEnrichment = source && source.edit_mode === 'bulk_enrichment';
+        const isData = isVolcano || isHeatmap || isCorrelation || isEnrichment;
+        document.querySelectorAll('.data-only').forEach(node => {
+            if (['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(node.tagName)) node.disabled = !isData;
+            node.querySelectorAll('input, select, textarea, button').forEach(control => { control.disabled = !isData; });
+        });
+        document.getElementById('volcano-controls').style.display = isVolcano ? '' : 'none';
+        document.getElementById('heatmap-controls').style.display = isHeatmap ? '' : 'none';
+        document.getElementById('correlation-controls').style.display = isCorrelation ? '' : 'none';
+        document.getElementById('enrichment-controls').style.display = isEnrichment ? '' : 'none';
+        if (!source) {
+            note.className = 'mode-note'; note.textContent = '请选择一个图形。'; return;
+        }
+        if (isVolcano) {
+            note.className = 'mode-note data';
+            note.textContent = '数据重绘模式：修改阈值只重新分类点色、阈值线和基因标注，不重新计算差异表达。';
+        } else if (isHeatmap) {
+            note.className = 'mode-note data';
+            note.textContent = '数据重绘模式：可修改配色、聚类和注释条；原始热图始终保留。';
+        } else if (isCorrelation) {
+            note.className = 'mode-note data';
+            note.textContent = '数据重绘模式：可调整相关性热图配色和外观；相关系数、样本排序与原图数据保持一致。';
+        } else if (isEnrichment) {
+            note.className = 'mode-note data';
+            note.textContent = '数据重绘模式：可调整通路类别颜色和展示数量；不改变富集统计结果。';
+        } else {
+            note.className = 'mode-note warning';
+            note.textContent = '外观编辑模式：不重绘坐标轴、图例或数据层；只添加标题、字体、背景和说明文字。';
+        }
+    }
+    function populateSources() {
+        select.replaceChildren();
+        if (!sources.length) {
+            const option = new Option('暂无平台图；可上传 PNG/JPG/SVG', ''); option.disabled = true; option.selected = true; select.add(option); return;
+        }
+        sources.forEach(source => {
+            const type = source.edit_mode === 'bulk_volcano' ? '可重绘火山图' : source.edit_mode === 'bulk_heatmap' ? '可重绘热图' : source.edit_mode === 'bulk_correlation' ? '可重绘相关性热图' : source.edit_mode === 'bulk_enrichment' ? '可重绘富集图' : '外观编辑';
+            const option = new Option(`${source.label}（${type}）`, `${source.kind}:${source.id}`);
+            if (source.kind === selectedInitial.kind && source.id === selectedInitial.id) option.selected = true;
+            select.add(option);
+        });
+    }
+    async function renderPreview() {
+        const source = currentSource();
+        if (!source) return;
+        const requestId = ++previewRequest;
+        previewStatus.textContent = '正在生成预览…';
+        try {
+            const response = await fetch(`/projects/${projectId}/figure-studio/preview`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({source_kind: source.kind, source_id: source.id, style: formStyle()})
+            });
+            const data = await response.json();
+            if (requestId !== previewRequest) return;
+            if (!response.ok) throw new Error(data.error || '预览生成失败。');
+            preview.src = data.data_uri; preview.style.display = '';
+            placeholder.style.display = 'none';
+            previewStatus.textContent = data.edit_mode === 'data_redraw' ? '已按原始分析数据重新绘制预览。' : '已生成外观编辑预览。';
+        } catch (error) {
+            if (requestId === previewRequest) previewStatus.textContent = error.message;
+        }
+    }
+    function schedulePreview() {
+        window.clearTimeout(previewTimer);
+        previewTimer = window.setTimeout(renderPreview, 450);
+    }
+    function chooseSource() {
+        const source = currentSource();
+        const sourceStyle = source && source.style;
+        applyStyle(sourceStyle);
+        populateHeatmapPickers(source, sourceStyle || {});
+        document.getElementById('version-label').value = source ? source.label.replace(/^已保存：/, '') : '';
+        showMode(source); schedulePreview();
+    }
+    async function uploadImage(event) {
+        const image = event.target.files[0];
+        if (!image) return;
+        previewStatus.textContent = '正在上传图片…';
+        const body = new FormData(); body.append('image', image);
+        try {
+            const response = await fetch(`/projects/${projectId}/figure-studio/upload`, {method: 'POST', body});
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || '上传失败。');
+            sources.push(data.source); selectedInitial.kind = data.source.kind; selectedInitial.id = data.source.id;
+            populateSources(); select.value = `${data.source.kind}:${data.source.id}`; chooseSource();
+        } catch (error) { previewStatus.textContent = error.message; }
+        event.target.value = '';
+    }
+    async function saveVersion() {
+        const source = currentSource();
+        if (!source) return;
+        const status = document.getElementById('save-status'); status.textContent = '正在保存新版本…';
+        try {
+            const response = await fetch(`/projects/${projectId}/figure-studio/save`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({source_kind: source.kind, source_id: source.id, style: formStyle(), label: document.getElementById('version-label').value})
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || '保存失败。');
+            const links = [];
+            if (data.version.png_url) links.push(`<a href="${data.version.png_url}" download>PNG</a>`);
+            if (data.version.svg_url) links.push(`<a href="${data.version.svg_url}" download>SVG</a>`);
+            status.innerHTML = `已保存：${links.join(' / ')}`;
+            sources.push({...source, kind: 'version', id: data.version.id, label: `已保存：${data.version.label}`, edit_mode: data.version.edit_mode, style: formStyle(), preview_url: data.version.png_url || data.version.svg_url});
+            populateSources();
+        } catch (error) { status.textContent = error.message; }
+    }
+    document.querySelectorAll('.style-field').forEach(input => input.addEventListener(input.type === 'checkbox' || input.tagName === 'SELECT' ? 'change' : 'input', schedulePreview));
+    document.getElementById('heatmap-group-column').addEventListener('change', () => {
+        populateHeatmapGroupPicker(currentSource(), formStyle()); schedulePreview();
+    });
+    document.getElementById('heatmap-select-all-samples').addEventListener('click', () => {
+        document.querySelectorAll('#heatmap-sample-picker input').forEach(input => { input.checked = true; }); schedulePreview();
+    });
+    document.getElementById('heatmap-clear-samples').addEventListener('click', () => {
+        document.querySelectorAll('#heatmap-sample-picker input').forEach(input => { input.checked = false; }); schedulePreview();
+    });
+    select.addEventListener('change', chooseSource);
+    document.getElementById('refresh-preview').addEventListener('click', renderPreview);
+    document.getElementById('image-upload').addEventListener('change', uploadImage);
+    document.getElementById('save-version').addEventListener('click', saveVersion);
+    populateSources();
+    if (sources.length) chooseSource();
+})();
+</script>
+{% endblock %}

@@ -81,6 +81,34 @@ def init_db():
     db.execute("CREATE INDEX IF NOT EXISTS idx_result_files_project ON result_files(project_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_runs_project ON pipeline_runs(project_id)")
 
+    # 图形美化工作台：原始图片、编辑版本与分析任务解耦，确保编辑永不覆盖
+    # 原始分析输出。
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS figure_assets (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            label TEXT NOT NULL,
+            file_type TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS figure_versions (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            source_kind TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            edit_mode TEXT NOT NULL,
+            label TEXT NOT NULL,
+            style_json TEXT DEFAULT '{}',
+            png_path TEXT DEFAULT '',
+            svg_path TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_figure_assets_project ON figure_assets(project_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_figure_versions_project ON figure_versions(project_id)")
+
     # === Agent 系统表（阶段 1）===
     db.executescript("""
         CREATE TABLE IF NOT EXISTS agent_sessions (

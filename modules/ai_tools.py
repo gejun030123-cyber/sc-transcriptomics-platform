@@ -44,6 +44,8 @@ def execute_tool(name, args, project_id):
     """执行指定的工具函数"""
     if name == "run_analysis":
         return _run_analysis(args, project_id)
+    elif name == "run_pipeline":
+        return _run_pipeline(args, project_id)
     elif name == "get_project_status":
         return _get_project_status(project_id)
     elif name == "get_task_results":
@@ -71,6 +73,101 @@ def execute_tool(name, args, project_id):
     elif name == "continue_goal_agent":
         return _continue_goal_agent(args, project_id)
     return {"error": f"未知工具: {name}"}
+
+
+def _run_pipeline(args, project_id):
+    """Submit an AI-requested sequential pipeline as one background run."""
+    from models import PipelineRun, Project
+    from worker import submit_pipeline_run
+    from modules import MODULE_REGISTRY, SC_MODULE_NAMES, BULK_MODULE_NAMES, validate_pipeline_order
+    from modules.schemas import PARAM_SCHEMAS, filter_active_params
+
+    project = Project.get_by_id(project_id)
+    if not project:
+        return {"error": "项目不存在"}
+
+    analysis_type = str(args.get("analysis_type", "")).strip()
+    modules = args.get("modules", [])
+    raw_params = args.get("params", {}) or {}
+    if analysis_type not in {"sc", "bulk"}:
+        return {"error": "analysis_type 必须是 sc 或 bulk"}
+    if not isinstance(modules, list) or not modules:
+        return {"error": "模块列表不能为空"}
+    if not isinstance(raw_params, dict):
+        return {"error": "params 必须按模块名组成对象"}
+
+    permitted_modules = SC_MODULE_NAMES if analysis_type == "sc" else BULK_MODULE_NAMES
+    if len(set(modules)) != len(modules):
+        return {"error": "模块列表不能包含重复模块"}
+    for module_name in modules:
+        if module_name not in MODULE_REGISTRY:
+            return {"error": f"未知模块: {module_name}"}
+        if module_name not in permitted_modules:
+            return {"error": f"模块 {module_name} 不属于 {analysis_type} 流程"}
+    is_valid, errors = validate_pipeline_order(modules)
+    if not is_valid:
+        return {"error": "模块顺序不满足依赖约束", "details": errors}
+
+    input_path = str(args.get("input_path", "") or "")
+    input_source = "manual"
+    if not input_path:
+        context = resolve_current_analysis_input(project_id, modules[0])
+        input_path = context.get("path") or ""
+        input_source = context.get("source", "auto")
+    path_error = _validate_project_path(input_path, project_id)
+    if path_error:
+        return {"error": f"input_path: {path_error}"}
+
+    params_by_module = {}
+    for module_name in modules:
+        supplied = raw_params.get(module_name, {})
+        if not isinstance(supplied, dict):
+            return {"error": f"模块 {module_name} 的参数必须是对象"}
+        cleaned, error = _validate_analysis_params(module_name, supplied)
+        if error:
+            return {"error": f"模块 {module_name} 参数校验失败: {error}"}
+        schema = PARAM_SCHEMAS.get(module_name, [])
+        defaults = {}
+        for field in schema:
+            default = field.get('default')
+            if field.get('type') == 'select' and field.get('options'):
+                if default not in field['options']:
+                    default = field['options'][0]
+            defaults[field['key']] = default
+        defaults.update(cleaned)
+        params_by_module[module_name] = filter_active_params(schema, defaults)
+
+    pipeline_name = str(args.get("name", "") or "").strip()
+    if not pipeline_name:
+        pipeline_name = f"AI {analysis_type.upper()} 全流程"
+    project_dir = Config.project_dir(project_id)
+    pipeline_run = PipelineRun(
+        project_id=project_id,
+        name=pipeline_name,
+        analysis_type=analysis_type,
+        input_path=input_path,
+        modules_json=json.dumps(modules, ensure_ascii=False),
+        params_json=json.dumps(params_by_module, ensure_ascii=False),
+    )
+    pipeline_run.save()
+    submit_pipeline_run(
+        run_id=pipeline_run.id,
+        project_id=project_id,
+        modules=modules,
+        params_by_module=params_by_module,
+        project_dir=project_dir,
+        input_path=input_path,
+    )
+    return {
+        "status": "submitted",
+        "pipeline_run_id": pipeline_run.id,
+        "modules": modules,
+        "input_path": input_path,
+        "input_source": input_source,
+        "status_url": f"/api/pipeline-runs/{pipeline_run.id}/status",
+        "pipeline_url": f"/projects/{project_id}/pipeline-runs/{pipeline_run.id}",
+        "message": f"全流程已在后台提交（{len(modules)} 个模块），将按顺序自动执行。",
+    }
 
 
 def _run_analysis(args, project_id):
@@ -130,6 +227,23 @@ def _run_analysis(args, project_id):
     compatibility_error = _validate_method_compatibility(module_name, input_path, params)
     if compatibility_error:
         return {"error": f"方法与数据不兼容: {compatibility_error}"}
+
+    # AI-triggered execution must respect the same hard experimental-design
+    # boundary as the regular form.  Keep this best-effort around malformed
+    # legacy test/placeholder files; module-specific validation remains the
+    # fallback for inputs that cannot be profiled here.
+    if module_name in {'bulk_deg', 'sc_timecourse', 'batch_correct', 'bulk_normalize'}:
+        try:
+            from modules.design_preflight import preflight_blockers
+            from modules.io_utils import read_expression_matrix
+
+            blockers = preflight_blockers(
+                read_expression_matrix(input_path), module_name, params, input_path,
+            )
+        except Exception:
+            blockers = []
+        if blockers:
+            return {"error": "分析前检查未通过: " + "；".join(blockers[:2])}
 
     # 创建任务
     task = AnalysisTask(
@@ -323,7 +437,12 @@ def _matrix_value_profile(matrix, n_obs, n_vars):
 
 def _profile_analysis_input(input_path):
     """Build a bounded data profile for deterministic method/parameter selection."""
-    from modules.io_utils import read_expression_matrix, infer_sample_group_candidates
+    import pandas as pd
+    from modules.io_utils import (
+        read_expression_matrix, infer_sample_group_candidates,
+        rank_obs_grouping_candidates,
+    )
+    from modules.sc_timecourse import _time_value
 
     adata = read_expression_matrix(input_path)
     value_profile = _matrix_value_profile(adata.X, adata.n_obs, adata.n_vars)
@@ -337,20 +456,58 @@ def _profile_analysis_input(input_path):
     if 'raw' in adata.layers:
         source_measurement_type = _matrix_value_profile(
             adata.layers['raw'], adata.n_obs, adata.n_vars)['measurement_type']
+    counts_layer_profile = (
+        _matrix_value_profile(adata.layers['counts'], adata.n_obs, adata.n_vars)
+        if 'counts' in adata.layers else None
+    )
+
+    obs_columns = [str(c) for c in adata.obs.columns[:50]]
+    time_name_tokens = ('time', 'day', 'hour', 'week', 'stage', 'minute')
+    technical_batch_names = {'batch', 'technical_batch', 'sequencing_batch', 'library_batch'}
+    time_candidates = []
+    for column in adata.obs.columns:
+        if str(column).lower() in technical_batch_names:
+            continue
+        values = adata.obs[column].dropna().astype(str).unique().tolist()
+        if not (3 <= len(values) <= 30):
+            continue
+        is_numeric = pd.api.types.is_numeric_dtype(adata.obs[column])
+        looks_temporal = bool(values) and all(_time_value(value) is not None for value in values)
+        name_is_temporal = any(token in str(column).lower() for token in time_name_tokens)
+        if is_numeric or looks_temporal or name_is_temporal:
+            time_candidates.append(str(column))
+    # Do not auto-select donor or technical-batch labels as sample IDs.  A
+    # donor may recur across timepoints and a batch may be technical; both
+    # would otherwise create invalid independent-replicate assumptions.
+    sample_priority = ('sample_id', 'sample', 'library_id', 'orig.ident')
+    lower_to_original = {str(column).lower(): str(column) for column in adata.obs.columns}
+    sample_candidates = [lower_to_original[name] for name in sample_priority
+                         if name in lower_to_original]
 
     grouping_candidates = []
-    preferred_columns = [
-        'analysis_group', 'condition', 'treatment', 'group', 'sample_group',
-        'batch', 'celltype', 'cell_type', 'annotation', 'leiden',
-    ]
-    ordered_obs = preferred_columns + [c for c in adata.obs.columns if c not in preferred_columns]
-    for column in ordered_obs:
-        if column not in adata.obs.columns:
-            continue
+    preferred_group_columns = rank_obs_grouping_candidates(
+        adata, purpose='groupby',
+    )
+    for column in preferred_group_columns:
         series = adata.obs[column].astype(str)
         counts = series.value_counts()
         if 2 <= len(counts) <= 50 and int(counts.min()) >= 2:
             grouping_candidates.append({
+                'source': 'obs',
+                'column': str(column),
+                'label': str(column),
+                'values': sorted(counts.index.tolist()),
+                'group_sizes': {str(k): int(v) for k, v in counts.sort_index().items()},
+            })
+
+    batch_candidates = []
+    for column in rank_obs_grouping_candidates(
+        adata, purpose='batch_key', include_technical=True,
+    ):
+        series = adata.obs[column].astype(str)
+        counts = series.value_counts()
+        if 2 <= len(counts) <= 50 and int(counts.min()) >= 2:
+            batch_candidates.append({
                 'source': 'obs',
                 'column': str(column),
                 'label': str(column),
@@ -372,9 +529,17 @@ def _profile_analysis_input(input_path):
         'source_measurement_type': source_measurement_type,
         **{key: value for key, value in value_profile.items() if key != 'measurement_type'},
         'normalization': normalization,
-        'obs_columns': [str(c) for c in adata.obs.columns[:50]],
+        'obs_columns': obs_columns,
         'sample_names': [str(name) for name in adata.obs_names[:100]],
         'grouping_candidates': grouping_candidates[:8],
+        'batch_candidates': batch_candidates[:8],
+        'time_candidates': time_candidates[:8],
+        'sample_candidates': sample_candidates,
+        'counts_layer_present': bool('counts' in adata.layers),
+        'counts_layer_is_raw': bool(
+            counts_layer_profile
+            and counts_layer_profile['measurement_type'] == 'raw_counts'
+        ),
     }
 
 
@@ -617,6 +782,83 @@ def _recommend_analysis_config(args, project_id):
             should_run = False
             warnings.append('未检测到时间列，不应执行时序分析')
 
+    elif module_name == 'sc_timecourse':
+        time_candidates = profile.get('time_candidates', [])
+        sample_candidates = profile.get('sample_candidates', [])
+        obs_columns = set(profile.get('obs_columns', []))
+        celltype_key = next((key for key in ('celltype', 'cell_type', 'annotation', 'leiden')
+                             if key in obs_columns), '')
+        condition_key = next((key for key in ('condition', 'treatment', 'group', 'treatment_group')
+                              if key in obs_columns), '')
+        if not time_candidates:
+            should_run = False
+            warnings.append('未检测到至少 3 个真实时间点列；不能用伪时间替代采样时间。')
+        else:
+            recommend('timepoint_key', time_candidates[0], '使用检测到的真实采样时间列')
+        if not sample_candidates:
+            should_run = False
+            warnings.append('未检测到 sample_id/生物学重复列；请先补充元数据，避免把细胞当作独立重复。')
+        else:
+            recommend('sample_key', sample_candidates[0], '以独立生物学样本作为组成与伪 bulk 的统计单位')
+            recommend('min_replicates_per_timepoint', 2, '每时间点至少 2 个样本才启用样本级 Kruskal 筛选')
+        if celltype_key:
+            recommend('celltype_key', celltype_key, '优先使用已注释细胞类型；无注释时以 leiden 作为探索性分组')
+        else:
+            warnings.append('未检测到 celltype/annotation/leiden 列，需先完成聚类或注释。')
+            should_run = False
+        if condition_key:
+            recommend('condition_key', condition_key, '按条件分层展示时间趋势，避免把处理效应混入单一曲线')
+        if not profile.get('counts_layer_is_raw'):
+            warnings.append("未检测到非负近似整数的原始 counts 层；可进行样本级组成检验，但基因动态仅为描述性均值，建议从 QC 输出重新开始。")
+        if time_candidates and time_candidates[0] == 'batch':
+            warnings.append('时间点当前位于 batch 列；不要再将此列用于 Harmony/BBKNN/scVI 校正，否则可能移除真实时间信号。')
+
+    elif module_name == 'annotation':
+        # When the user's objective names an organoid context, expose the
+        # corresponding tissue panel instead of silently leaving the broad
+        # Universal panel selected. Maturity is evaluated separately from the
+        # observed expression modules and any time metadata.
+        objective_text = objective.lower()
+        organoid_aliases = (
+            ('intestinal', ('肠道', '肠', 'intestinal', 'gut')),
+            ('cerebral', ('脑', '大脑', 'cerebral', 'brain', 'neural')),
+            ('kidney', ('肾', 'kidney', 'renal')),
+            ('liver', ('肝', 'liver', 'hepatic')),
+            ('lung', ('肺', 'lung', 'pulmonary')),
+            ('pancreatic', ('胰', 'pancrea', 'pancreatic')),
+            ('cardiac', ('心脏', '心肌', 'cardiac', 'heart')),
+        )
+        detected_organoid = next(
+            (organ_type for organ_type, aliases in organoid_aliases
+             if any(alias in objective_text for alias in aliases)),
+            None,
+        )
+        if detected_organoid:
+            recommend('marker_set', 'Organoid', '目标描述包含类器官组织，使用对应的组织/发育 marker panel')
+            recommend('organoid_type', detected_organoid, '从目标描述识别类器官类型，避免误用 Universal panel')
+            recommend('method', 'multi_evidence', '类器官细胞状态和阶段差异较大，保留 Marker、一致性和复核证据')
+            warnings.append('类器官 marker 仅作为第一轮候选注释；成熟度改由表达模块和样本时间元数据独立评估。')
+        if any(token in objective_text for token in ('celltypist', 'model zoo', '参考模型', '参考注释')):
+            recommend('use_celltypist_reference', True, '用户明确要求 CellTypist；作为本地参考证据运行，不覆盖 Marker 最终标签')
+            reference_models = {
+                'intestinal': 'Cells_Intestinal_Tract.pkl',
+                'cerebral': 'Developing_Human_Brain.pkl',
+                'lung': 'Cells_Fetal_Lung.pkl',
+                'liver': 'Healthy_Human_Liver.pkl',
+                'pancreatic': 'Fetal_Human_Pancreas.pkl',
+                'cardiac': 'Healthy_Adult_Heart.pkl',
+                'kidney': 'Developing_Human_Organs.pkl',
+            }
+            if detected_organoid:
+                recommend(
+                    'celltypist_model',
+                    reference_models.get(detected_organoid, 'Pan_Fetal_Human.pkl'),
+                    '选择与目标类器官组织最接近的人类参考模型；肾脏使用广义发育器官模型作为近似参考',
+                )
+            else:
+                recommend('celltypist_model', 'Immune_All_Low.pkl', '未识别组织时仅使用通用免疫模型作为可选交叉证据')
+            recommend('celltypist_mode', 'prob match', '保留 Unassigned/低置信度结果，避免将类器官细胞强行映射到参考标签')
+
     elif module_name == 'normalize':
         recommend('method', 'log1p', '标准 UMI 单细胞数据默认使用 log1p CPM')
         recommend('target_sum', 10000, '使用 Scanpy 常用的每细胞总数')
@@ -638,7 +880,7 @@ def _recommend_analysis_config(args, project_id):
         recommend('auto_select_resolution', True, '运行多分辨率评分并保留人工复核')
 
     elif module_name == 'batch_correct':
-        batch_candidate = next((g for g in groups if g.get('column') in {'batch', 'sample', 'sample_id'}), None)
+        batch_candidate = (profile.get('batch_candidates') or [None])[0]
         if not batch_candidate:
             should_run = False
             warnings.append('未检测到可靠批次列，不应盲目进行批次校正')
@@ -1045,6 +1287,16 @@ def _get_cluster_summary(args, project_id):
                 "error": f"cluster_key '{cluster_key}' 不在 obs 列中",
                 "available_columns": list(adata.obs.columns),
             }
+        from modules.io_utils import obs_grouping_info
+        grouping = obs_grouping_info(
+            adata, cluster_key, max_categories=50,
+            max_numeric_categories=20, require_multiple=False,
+        )
+        if not grouping['valid']:
+            return {
+                "error": f"cluster_key '{cluster_key}' 不是有效的分类聚类列：{grouping['reason']}",
+                "cluster_key": cluster_key,
+            }
 
         clusters = sorted(adata.obs[cluster_key].unique().astype(str))
         total_cells = adata.n_obs
@@ -1154,9 +1406,21 @@ def _score_cell_type_signature(args, project_id):
 
 
 def _list_builtin_markers():
-    """[只读] 列出所有内置细胞类型 marker 定义."""
+    """[只读] 列出内置细胞类型和类器官 marker panel."""
     from modules.cell_markers import list_builtin_cell_types
-    return {"cell_types": list_builtin_cell_types()}
+    from modules.annotation import ORGANOID_MARKER_SETS, ORGANOID_MARKER_SET_LABELS
+
+    organoid_panels = {
+        organoid_type: {
+            'display': ORGANOID_MARKER_SET_LABELS.get(organoid_type, organoid_type),
+            'cell_types': marker_dict,
+        }
+        for organoid_type, marker_dict in ORGANOID_MARKER_SETS.items()
+    }
+    return {
+        "cell_types": list_builtin_cell_types(),
+        "organoid_panels": organoid_panels,
+    }
 
 
 # ============================================================

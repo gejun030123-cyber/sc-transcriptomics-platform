@@ -13,10 +13,10 @@
 
 ### Web 分析工作台
 
-- 项目管理：创建项目、上传数据、查看项目状态和历史任务。
+- 项目管理：创建项目、上传数据、查看项目状态和历史任务；主线任务完成后项目状态会自动同步为 `completed`，存在运行中任务时为 `processing`，全部失败时为 `failed`。
 - 异步任务：分析任务通过后台 worker 执行，前端可查看进度、日志和失败信息。
 - 参数面板：每个模块有结构化参数 schema，包含中文标签、默认值、类型和帮助说明。
-- 结果管理：任务结果写入数据库，支持图表查看、表格下载和 h5ad 中间文件下载。
+- 结果管理：任务结果写入数据库，支持图表查看、CSV/XLSX 表格下载和 h5ad 中间文件下载；模块写出的每个结果文件都会登记到任务结果清单。
 - 科研级图表：Scanpy/Matplotlib 原生图默认保存为 300 dpi PNG 和 SVG 矢量图，结果页优先展示 PNG，并提供 PNG/SVG 下载。
 - 静态图表：统一使用 Matplotlib/OmicVerse 风格，网页默认展示 300 dpi PNG，并提供 SVG 矢量图下载。
 - 图形工作台：从分析结果或用户上传图片创建非破坏性的样式版本，支持预览、PNG/SVG 导出和版本追踪。
@@ -160,7 +160,8 @@ pip install gseapy pydeseq2 inmoose
 可选依赖：
 
 - `celltypist`：启用本地人类 CellTypist 参考交叉验证；类器官注释不把外部模型作为默认真值，冲突结果保留人工复核。
-- `liana`：启用细胞通讯分析。
+- `liana`：启用细胞通讯分析；未安装时该任务会明确返回 `unavailable` 和安装提示，不会伪装成成功。
+- `gseapy`：仅用于子簇通路富集和 Bulk 富集的兼容旧路径；未安装时核心聚类、差异分析和当前 OmicVerse/本地基因集富集路径仍可使用。
 - `harmonypy`、`bbknn`、`scanorama`、`scvi-tools`、`torch`：启用 Harmony、BBKNN、Scanorama、SysVI/scVI 批次整合路径；未安装时对应方法不可用。
 - `kneed`：启用 Kneedle 自动 PC 选择。
 - `plotly`：仅用于兼容历史分析模块的内部数据结构；网页、报告和下载结果均不再输出 Plotly 交互图。
@@ -178,6 +179,8 @@ python app.py
 http://localhost:5000
 ```
 
+运行后可访问 `/api/system/dependencies` 查看依赖状态。每个模块同时返回 `missing`（缺少即不可运行的依赖）和 `optional_missing`（只影响某项扩展能力的依赖），因此页面或部署检查不应仅依据整组依赖是否全部安装来判断模块是否可用。
+
 ### 图像输出与下载
 
 单细胞的 UMAP、聚类 UMAP、注释 UMAP，以及聚类/注释/差异表达 DotPlot 会同时生成两类结果：
@@ -185,6 +188,8 @@ http://localhost:5000
 - `PNG`：300 dpi 位图，网页默认展示，适合汇报和快速预览。
 - `SVG`：矢量图，适合论文排版和后续编辑。
 - 所有图表均为 Matplotlib 静态输出：PNG 用于网页预览，SVG 用于论文排版和后续编辑；不再加载 Plotly.js 或提供交互式图表。
+
+任务结果文件类型统一由 `modules.base.VALID_RESULT_FILE_TYPES` 定义，目前包括 `csv`、`xlsx`、`png`、`svg`、`json`、`txt`、`h5ad` 和内部兼容类型 `plotly_json`。旧的 Plotly JSON 结果在登记时会尽力转换为 PNG/SVG，前端不再将其作为交互式结果展示。
 
 新的静态图只会在任务重新运行时生成；历史任务需要重新执行对应模块才能获得 PNG/SVG。若在分析参数面板关闭某种导出格式，平台会按所选格式保存结果。
 
@@ -404,7 +409,7 @@ data/                       # 本地项目数据，默认不纳入 git
 - AI 能调用平台已暴露的工具，不能绕过模块代码本身的能力边界。
 - 参数 sweep 会创建候选分支并消耗计算资源，最大候选数量有限制，写操作需要用户确认。
 - marker 评分用于辅助判断“最接近某细胞类型的 cluster”，不是人工注释或实验验证的替代。
-- LIANA、scVI、SysVI、DESeq2/edgeR/limma 等路径依赖对应包和环境；缺失时相关模块可能降级、跳过或报错。
+- LIANA、scVI、SysVI、DESeq2/edgeR/limma 等路径依赖对应包和环境；缺失时平台会在依赖接口或任务 summary 中说明具体不可用能力和下一步安装提示。
 - 大型分析输出建议保留在 `data/` 或外部结果目录，不建议直接提交到 git。
 
 ## License

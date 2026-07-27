@@ -15,8 +15,8 @@ class TestModuleMetadata:
     """测试模块元数据定义。"""
 
     def test_sc_module_count(self):
-        """单细胞模块有 12 个。"""
-        assert len(SC_MODULE_LIST) == 13
+        """单细胞模块有 14 个。"""
+        assert len(SC_MODULE_LIST) == 14
 
     def test_bulk_module_count(self):
         """Bulk 模块有 8 个。"""
@@ -52,7 +52,7 @@ class TestModuleMetadata:
 
     def test_param_types_valid(self):
         """参数类型都是合法值。"""
-        valid_types = {'number', 'select', 'checkbox', 'text', 'textarea', 'dynamic_select', 'multiselect'}
+        valid_types = {'number', 'select', 'checkbox', 'text', 'textarea', 'dynamic_select', 'dynamic_multiselect', 'multiselect'}
         for module_name, params in PARAM_SCHEMAS.items():
             for p in params:
                 assert p['type'] in valid_types, f"{module_name}.{p['key']}: 无效类型 {p['type']}"
@@ -103,6 +103,15 @@ class TestParseFormParams:
         form = {}
         result = parse_form_params(schema, form)
         assert result['method'] == 'leiden'
+
+    def test_dynamic_multiselect_joins_checked_values(self):
+        from werkzeug.datastructures import MultiDict
+
+        schema = [{'key': 'sample_display_groups', 'type': 'dynamic_multiselect', 'default': ''}]
+        result = parse_form_params(schema, MultiDict([
+            ('sample_display_groups', 'ctrl'), ('sample_display_groups', 'treat'),
+        ]))
+        assert result == {'sample_display_groups': 'ctrl,treat'}
 
     def test_multiple_params(self):
         """多个参数混合类型。"""
@@ -193,3 +202,58 @@ class TestParseFormParams:
             'method': 'bbknn',
             'bbknn_neighbors_within_batch': 4.0,
         }
+
+    def test_organoid_type_is_active_only_for_organoid_panel(self):
+        """类器官类型只在选择 Organoid 面板时传入后端。"""
+        schema = PARAM_SCHEMAS['annotation']
+        result = filter_active_params(schema, {
+            'marker_set': 'Universal',
+            'organoid_type': 'kidney',
+        })
+        assert 'organoid_type' not in result
+
+        result = filter_active_params(schema, {
+            'marker_set': 'Organoid',
+            'organoid_type': 'kidney',
+        })
+        assert result['organoid_type'] == 'kidney'
+
+    def test_organoid_maturity_and_quality_controls_are_active(self):
+        """成熟度时间元数据、负向 marker 与质量证据参数可由 Schema 传递。"""
+        schema = PARAM_SCHEMAS['annotation']
+        values = filter_active_params(schema, {
+            'method': 'multi_evidence',
+            'marker_set': 'Organoid',
+            'maturity_time_key': 'culture_day',
+            'annotation_version': 'v2',
+            'annotation_comment': '人工确认肾单位边界',
+            'state_score_threshold': 0.4,
+            'negative_marker_weight': 0.7,
+            'doublet_score_threshold': 0.25,
+            'ambient_score_threshold': 0.4,
+        })
+        assert values['maturity_time_key'] == 'culture_day'
+        assert values['annotation_version'] == 'v2'
+        assert values['annotation_comment'] == '人工确认肾单位边界'
+        assert values['state_score_threshold'] == 0.4
+        assert values['negative_marker_weight'] == 0.7
+        assert values['doublet_score_threshold'] == 0.25
+        assert values['ambient_score_threshold'] == 0.4
+
+    def test_celltypist_reference_controls_are_active(self):
+        """CellTypist is an explicit local reference option, not a default method."""
+        schema = PARAM_SCHEMAS['annotation']
+        defaults = {item['key']: item.get('default') for item in schema}
+        assert defaults['use_celltypist_reference'] is False
+        values = filter_active_params(schema, {
+            'method': 'multi_evidence',
+            'use_celltypist_reference': True,
+            'celltypist_model': 'Cells_Intestinal_Tract.pkl',
+            'celltypist_mode': 'prob match',
+            'celltypist_p_threshold': 0.6,
+            'celltypist_majority_voting': False,
+        })
+        assert values['use_celltypist_reference'] is True
+        assert values['celltypist_model'] == 'Cells_Intestinal_Tract.pkl'
+        assert values['celltypist_mode'] == 'prob match'
+        assert values['celltypist_p_threshold'] == 0.6

@@ -1,12 +1,14 @@
-import matplotlib
-matplotlib.use('Agg')
-
 import os
 
 from flask import Flask
 from flask_cors import CORS
 from config import Config
 from database import init_db
+
+# Config configures MPLCONFIGDIR before Matplotlib is imported, avoiding a
+# fallback to an unwritable user cache directory in worker processes.
+import matplotlib
+matplotlib.use('Agg')
 
 def create_app():
     app = Flask(__name__)
@@ -25,6 +27,7 @@ def create_app():
     from routes.projects import projects_bp
     from routes.upload import upload_bp
     from routes.results import results_bp
+    from routes.figure_studio import figure_studio_bp
     from routes.api import api_bp
     from routes.chat import chat_bp
     from routes.branches import branches_bp
@@ -34,6 +37,7 @@ def create_app():
     app.register_blueprint(projects_bp, url_prefix='/projects')
     app.register_blueprint(upload_bp, url_prefix='/projects')
     app.register_blueprint(results_bp, url_prefix='/projects')
+    app.register_blueprint(figure_studio_bp, url_prefix='/projects')
     app.register_blueprint(api_bp, url_prefix='/api')
     app.register_blueprint(chat_bp)
     app.register_blueprint(branches_bp)

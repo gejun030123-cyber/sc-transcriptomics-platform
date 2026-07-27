@@ -13,10 +13,23 @@ import os
 from typing import Any
 
 
-PALETTE = [
-    "#3C5488", "#E64B35", "#00A087", "#4DBBD5", "#F39B7F",
-    "#8491B4", "#91D1C2", "#DC0000", "#7E6148", "#B09C85",
-]
+from modules.figure_style import (
+    NATURE_AXIS,
+    NATURE_BG,
+    NATURE_FONT_FAMILY,
+    NATURE_GRID,
+    NATURE_MUTED,
+    NATURE_PALETTE,
+    nature_continuous_cmap,
+    NATURE_TEXT,
+    apply_matplotlib_style,
+)
+
+PALETTE = list(NATURE_PALETTE)
+
+
+def _nature_cmap():
+    return nature_continuous_cmap()
 
 
 def _decode(value: Any):
@@ -119,20 +132,34 @@ def render_plotly_payload(payload: dict, output_stem: str, label: str = ""):
             font_manager.fontManager.addfont(cjk_font)
     except Exception:
         pass
-    plt.rcParams.update({
+    from matplotlib import rcParams
+
+    rcParams.update({
         "font.family": "sans-serif",
-        "font.sans-serif": ["Noto Sans CJK JP", "Noto Sans CJK SC", "DejaVu Sans"],
+        "font.sans-serif": ["Noto Sans CJK JP", "Noto Sans CJK SC",
+                             "Arial", "Helvetica", "DejaVu Sans"],
         "axes.unicode_minus": False,
+        "svg.fonttype": "none",
+        "pdf.fonttype": 42,
     })
     payload = _decode(payload)
     layout = payload.get("layout", {}) or {}
     traces = payload.get("data", []) or []
-    fig, ax = plt.subplots(figsize=(9, 6.5), dpi=150)
-    fig.patch.set_facecolor("white")
-    ax.set_facecolor("white")
+    width = min(10.5, max(7.0, float(layout.get('width', 900)) / 100))
+    height = min(8.0, max(4.8, float(layout.get('height', 560)) / 100))
+    fig, ax = plt.subplots(figsize=(width, height), dpi=150)
+    fig.patch.set_facecolor(NATURE_BG)
+    ax.set_facecolor(NATURE_BG)
     rendered_any = False
     legend_items = []
     has_colorbar = False
+    violin_positions = []
+    violin_labels = []
+    bar_traces = [trace for trace in traces
+                  if (trace or {}).get('type', 'scatter') == 'bar'
+                  and (trace or {}).get('orientation', 'v') != 'h']
+    bar_index = 0
+    bar_tick_labels = []
 
     for index, raw_trace in enumerate(traces):
         trace = raw_trace or {}
@@ -153,17 +180,19 @@ def render_plotly_payload(payload: dict, output_stem: str, label: str = ""):
             mode = str(trace.get("mode", "lines"))
             numeric_color = _numeric(color)
             if numeric_color is not None and len(numeric_color) == len(x):
-                artist = ax.scatter(x, y, c=numeric_color, cmap="viridis", s=18,
-                                    alpha=0.78, linewidths=0, rasterized=True,
+                artist = ax.scatter(x, y, c=numeric_color, cmap=_nature_cmap(), s=20,
+                                    alpha=0.68, linewidths=0, rasterized=True,
                                     label=name or None)
-                fig.colorbar(artist, ax=ax, fraction=0.035, pad=0.025, aspect=32)
+                colorbar = fig.colorbar(artist, ax=ax, fraction=0.035, pad=0.025, aspect=32)
+                colorbar.outline.set_visible(False)
+                colorbar.ax.tick_params(labelsize=8, width=0.6, colors=NATURE_AXIS)
                 has_colorbar = True
             elif "markers" in mode:
-                artist = ax.scatter(x, y, color=color, s=18, alpha=0.78,
+                artist = ax.scatter(x, y, color=color, s=20, alpha=0.68,
                                     linewidths=0, rasterized=True,
                                     label=name or None)
             else:
-                artist, = ax.plot(x, y, color=color, linewidth=1.8,
+                artist, = ax.plot(x, y, color=color, linewidth=1.6,
                                   alpha=0.9, label=name or None)
             rendered_any = True
             if name:
@@ -172,35 +201,68 @@ def render_plotly_payload(payload: dict, output_stem: str, label: str = ""):
             numeric_y = _numeric(y)
             orientation = (trace.get("orientation") or "v").lower()
             if orientation == "h":
-                ax.barh([str(item) for item in x], numeric_y, color=color, alpha=0.88,
+                ax.barh([str(item) for item in x], numeric_y, color=color, alpha=0.84,
                         label=name or None)
             else:
                 positions = np.arange(len(x))
-                ax.bar(positions, numeric_y, color=color, alpha=0.88, label=name or None)
-                ax.set_xticks(positions, [str(item) for item in x], rotation=35,
-                              ha="right")
-            rendered_any = True
+                n_series = max(1, len(bar_traces))
+                bar_width = min(0.78 / n_series, 0.32)
+                offset = (bar_index - (n_series - 1) / 2) * bar_width
+                ax.bar(positions + offset, numeric_y, width=bar_width,
+                       color=color, alpha=0.86, edgecolor='white', linewidth=0.35,
+                       label=name or None)
+                bar_tick_labels = [str(item) for item in x]
+                bar_index += 1
+                rendered_any = True
         elif trace_type in {"histogram"}:
             values = _numeric(x if x else y)
             if values is not None:
-                ax.hist(values, bins=30, color=color, alpha=0.72, label=name or None)
+                bins = int(trace.get('nbinsx') or trace.get('nbinsy') or 30)
+                ax.hist(values, bins=max(10, min(80, bins)), color=color,
+                        alpha=0.72, edgecolor='white', linewidth=0.3,
+                        label=name or None)
                 rendered_any = True
         elif trace_type in {"box", "violin"}:
             values = _numeric(y)
             if values is not None:
+                values = values[np.isfinite(values)]
+                if not len(values):
+                    continue
                 if trace_type == "violin":
-                    ax.violinplot(values, showmeans=True)
+                    position = len(violin_positions) + 1
+                    parts = ax.violinplot(
+                        values, positions=[position], widths=0.78,
+                        showmeans=False, showmedians=True, showextrema=False,
+                    )
+                    for body in parts.get('bodies', []):
+                        body.set_facecolor(color)
+                        body.set_edgecolor(color)
+                        body.set_alpha(0.62)
+                        body.set_linewidth(0.7)
+                    if 'cmedians' in parts:
+                        parts['cmedians'].set_color(NATURE_TEXT)
+                        parts['cmedians'].set_linewidth(1.1)
+                    violin_positions.append(position)
+                    violin_labels.append(name or f'Metric {position}')
                 else:
-                    ax.boxplot(values, patch_artist=True,
-                               boxprops={"facecolor": color, "alpha": 0.75})
-                if name:
-                    ax.set_xticks([1], [name])
+                    position = len(violin_positions) + 1
+                    box = ax.boxplot(values, positions=[position], widths=0.58,
+                                     patch_artist=True, showfliers=False,
+                                     boxprops={"facecolor": color, "alpha": 0.72,
+                                               'edgecolor': color},
+                                     medianprops={'color': NATURE_TEXT, 'linewidth': 1.1},
+                                     whiskerprops={'color': color},
+                                     capprops={'color': color})
+                    violin_positions.append(position)
+                    violin_labels.append(name or f'Metric {position}')
                 rendered_any = True
         elif trace_type in {"heatmap", "contour"}:
             matrix = np.asarray(trace.get("z", []), dtype=float)
             if matrix.size:
                 image = ax.imshow(matrix, aspect="auto", cmap="RdBu_r")
-                fig.colorbar(image, ax=ax, fraction=0.035, pad=0.025, aspect=32)
+                colorbar = fig.colorbar(image, ax=ax, fraction=0.035, pad=0.025, aspect=32)
+                colorbar.outline.set_visible(False)
+                colorbar.ax.tick_params(labelsize=8, width=0.6, colors=NATURE_AXIS)
                 has_colorbar = True
                 rendered_any = True
         elif trace_type == "pie":
@@ -224,19 +286,27 @@ def render_plotly_payload(payload: dict, output_stem: str, label: str = ""):
         ax.text(0.5, 0.5, "该图暂无可用静态数据", ha="center", va="center",
                 fontsize=13, color="#6b7280")
     title = _title(layout, label or "分析图")
-    ax.set_title(title, fontsize=15, fontweight="semibold", color="#172033", pad=14)
+    if violin_positions:
+        ax.set_xticks(violin_positions, violin_labels)
+        ax.tick_params(axis='x', labelrotation=28, labelsize=8)
+    elif bar_tick_labels:
+        centers = np.arange(len(bar_tick_labels))
+        ax.set_xticks(centers, bar_tick_labels, rotation=30, ha='right')
+    ax.set_title(title, fontsize=14, fontweight="semibold", color=NATURE_TEXT,
+                 loc='left', pad=12)
     if not has_colorbar:
         ax.set_xlabel(_axis_title(layout, "xaxis", ""), fontsize=11, color="#374151")
         ax.set_ylabel(_axis_title(layout, "yaxis", ""), fontsize=11, color="#374151")
-    ax.tick_params(labelsize=9, colors="#4b5563", width=0.6)
-    ax.grid(False)
-    for spine in ax.spines.values():
-        spine.set_visible(False)
+    ax.tick_params(labelsize=9, colors=NATURE_AXIS, width=0.6)
+    ax.grid(axis='y', color=NATURE_GRID, linewidth=0.55, alpha=0.72)
+    ax.set_axisbelow(True)
+    apply_matplotlib_style(fig, {'font_size': 9, 'font_family': NATURE_FONT_FAMILY})
     if legend_items:
-        ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False,
-                  fontsize=9)
-    fig.subplots_adjust(left=0.09, right=0.82 if legend_items or has_colorbar else 0.95,
-                        bottom=0.12, top=0.88)
+        legend = ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5),
+                           frameon=False, fontsize=8)
+        legend.set_title('Group', prop={'size': 8})
+    fig.subplots_adjust(left=0.10, right=0.82 if legend_items or has_colorbar else 0.95,
+                        bottom=0.16, top=0.88)
     png_path = f"{output_stem}.png"
     svg_path = f"{output_stem}.svg"
     fig.savefig(png_path, dpi=300, bbox_inches="tight", pad_inches=0.15,

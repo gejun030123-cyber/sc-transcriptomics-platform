@@ -17,7 +17,9 @@ class BulkNormalizeAnalysis(BaseAnalysis):
 
     def run(self, input_path):
         import scanpy as sc
-        import plotly.graph_objects as go
+        import matplotlib.pyplot as plt
+        from modules.native_figures import bar_figure
+        from modules.figure_style import NATURE_PALETTE, NATURE_TEXT, NATURE_GRID
 
         self.progress(5, "加载数据...")
         from modules.io_utils import read_expression_matrix, infer_expression_measurement
@@ -160,78 +162,149 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         os.makedirs(plots_dir, exist_ok=True)
         result_files = []
 
-        # 文库大小对比图
-        from plotly.subplots import make_subplots
+        # 文库大小对比图（静态展示图）
         if method in ('vst', 'rlog'):
             # VST/rlog 输出不是 counts，展示标准化前后每样本均值对比
             raw_means = np.log2(raw_counts + 1).mean(axis=1)
             norm_means = adata.X.mean(axis=1)
-            fig = make_subplots(rows=1, cols=2, subplot_titles=['标准化前 (mean log2 raw)', '标准化后 (mean transformed)'])
-            fig.add_trace(go.Bar(y=raw_means.tolist(), marker_color='#e53935', name='Raw'), row=1, col=1)
-            fig.add_trace(go.Bar(y=norm_means.tolist(), marker_color='#4caf50', name='Normalized'), row=1, col=2)
-            fig.update_layout(height=350, width=700, showlegend=False, title='每样本均值对比')
+            fig, axes = plt.subplots(1, 2, figsize=(9.0, 4.8), dpi=150)
+            for ax, values, subtitle, color in zip(
+                    axes, [raw_means, norm_means],
+                    ['标准化前 (mean log2 raw)', '标准化后 (mean transformed)'],
+                    [NATURE_PALETTE[3], NATURE_PALETTE[0]]):
+                ax.bar(np.arange(adata.n_obs), values, color=color, alpha=0.88,
+                       edgecolor='white', linewidth=0.3)
+                ax.set_title(subtitle, loc='left', fontsize=9, color=NATURE_TEXT)
+                ax.set_xlabel('Sample', fontsize=8)
+                ax.set_ylabel('Mean', fontsize=8)
+                ax.tick_params(labelsize=7)
+                ax.grid(axis='y', color=NATURE_GRID, linewidth=0.5, alpha=0.7)
+            fig.suptitle('每样本均值对比', x=0.05, ha='left', fontsize=11,
+                         fontweight='semibold', color=NATURE_TEXT)
         else:
             norm_layer = adata.layers.get('normalized', adata.X)
             norm_lib = norm_layer.sum(axis=1) if hasattr(norm_layer, 'sum') else np.ones(adata.n_obs)
-            fig = make_subplots(rows=1, cols=2, subplot_titles=['标准化前 (Raw)', '标准化后 (Normalized)'])
-            fig.add_trace(go.Bar(y=raw_lib.tolist(), marker_color='#e53935', name='Raw'), row=1, col=1)
-            fig.add_trace(go.Bar(y=norm_lib.tolist(), marker_color='#4caf50', name='Normalized'), row=1, col=2)
-            fig.update_layout(height=350, width=700, showlegend=False, title='文库大小对比')
-        fpath = os.path.join(plots_dir, 'bulk_norm_libsize.json')
-        with open(fpath, 'w') as f: f.write(fig.to_json(engine="json"))
-        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': '文库大小对比'})
+            fig, axes = plt.subplots(1, 2, figsize=(9.0, 4.8), dpi=150)
+            for ax, values, subtitle, color in zip(
+                    axes, [raw_lib, norm_lib], ['标准化前 (Raw)', '标准化后 (Normalized)'],
+                    [NATURE_PALETTE[3], NATURE_PALETTE[0]]):
+                ax.bar(np.arange(adata.n_obs), values, color=color, alpha=0.88,
+                       edgecolor='white', linewidth=0.3)
+                ax.set_title(subtitle, loc='left', fontsize=9, color=NATURE_TEXT)
+                ax.set_xlabel('Sample', fontsize=8)
+                ax.set_ylabel('Library size', fontsize=8)
+                ax.tick_params(labelsize=7)
+                ax.grid(axis='y', color=NATURE_GRID, linewidth=0.5, alpha=0.7)
+            fig.suptitle('文库大小对比', x=0.05, ha='left', fontsize=11,
+                         fontweight='semibold', color=NATURE_TEXT)
+        result_files.extend(self.save_matplotlib_figure(
+            fig, plots_dir, 'bulk_norm_libsize.png', 'bar', '文库大小对比',
+            formats=('png', 'svg'), dpi=300,
+        ))
 
         if method in ('deseq2', 'tmm') and ('size_factor' in adata.obs.columns or 'tmm_factor' in adata.obs.columns):
             factor_col = 'tmm_factor' if method == 'tmm' else 'size_factor'
-            fig_sf = go.Figure()
-            fig_sf.add_trace(go.Bar(x=adata.obs.index.tolist(), y=adata.obs[factor_col].values,
-                                   marker_color='#1a237e'))
-            fig_sf.update_layout(title=f'{method.upper()} Normalization Factors', yaxis_title='Factor',
-                                plot_bgcolor='white', width=600, height=300)
-            fpath = os.path.join(plots_dir, 'bulk_norm_sizefactors.json')
-            with open(fpath, 'w') as f: f.write(fig_sf.to_json(engine="json"))
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'bar', 'label': 'Size Factors'})
+            fig_sf = bar_figure(
+                adata.obs.index.tolist(), adata.obs[factor_col].values,
+                title=f'{method.upper()} Normalization Factors',
+                x_label='Sample', y_label='Factor', rotation=45,
+            )
+            result_files.extend(self.save_matplotlib_figure(
+                fig_sf, plots_dir, 'bulk_norm_sizefactors.png', 'bar',
+                'Size Factors', formats=('png', 'svg'), dpi=300,
+            ))
 
-        # 标准化前后表达分布对比
+        # 按样本展示表达分布，才能判断样本分布是否真正被对齐；将全部值
+        # 压成一个箱线图会掩盖这一关键信息。
         sample_labels = adata.obs.index.tolist()
-        fig_box = make_subplots(rows=1, cols=2, subplot_titles=['标准化前 (log2 raw)', '标准化后'])
-        # 使用单个 violin trace 展示所有样本的分布
+        fig_box, axes = plt.subplots(1, 2, figsize=(15.0, 5.2), dpi=150, sharey=True)
         raw_log2 = np.log2(raw_counts + 1)
-        fig_box.add_trace(go.Violin(y=raw_log2.flatten(), name='Raw', box_visible=True,
-                                     meanline_visible=True, marker_color='#e53935', showlegend=False), row=1, col=1)
-        norm_flat = adata.X.flatten()
-        fig_box.add_trace(go.Violin(y=norm_flat, name='Normalized', box_visible=True,
-                                     meanline_visible=True, marker_color='#4caf50', showlegend=False), row=1, col=2)
-        fig_box.update_layout(height=400, width=800, title='标准化前后表达分布对比')
-        fpath = os.path.join(plots_dir, 'bulk_norm_boxplot_compare.json')
-        with open(fpath, 'w') as f: f.write(fig_box.to_json(engine="json"))
-        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qc', 'label': '表达分布对比'})
+        norm_values = adata.X.toarray() if hasattr(adata.X, 'toarray') else np.asarray(adata.X)
+        box_sets = [
+            (raw_log2.T, NATURE_PALETTE[3], '变换前：log2(input + 1)'),
+            (norm_values.T, NATURE_PALETTE[0], '标准化后'),
+        ]
+        for ax, (values, color, subtitle) in zip(axes, box_sets):
+            boxes = ax.boxplot(values, patch_artist=True, showfliers=False,
+                               medianprops={'color': NATURE_TEXT, 'linewidth': 0.7},
+                               whiskerprops={'color': '#667085', 'linewidth': 0.5},
+                               capprops={'color': '#667085', 'linewidth': 0.5})
+            for patch in boxes['boxes']:
+                patch.set_facecolor(color)
+                patch.set_edgecolor(color)
+                patch.set_alpha(0.52)
+            ax.set_title(subtitle, loc='left', fontsize=9, color=NATURE_TEXT)
+            ax.set_ylabel('Expression', fontsize=8)
+            from modules.native_figures import apply_sample_tick_labels
+            sample_tick_plan = apply_sample_tick_labels(
+                ax, sample_labels, axis='x', max_labels=18,
+                positions=np.arange(1, len(sample_labels) + 1), rotation=60,
+                font_size=6.5,
+            )
+            ax.grid(axis='y', color=NATURE_GRID, linewidth=0.5, alpha=0.7)
+        if method == 'log2':
+            box_title = 'Log2 表达变换核查（不强制各样本同分布）'
+            box_note = '两侧分布相近是预期行为：log2 压缩数值范围，但不改变样本间总体分布。'
+            axes[1].set_title('变换后：log2(input + 1)（预期相近）', loc='left',
+                              fontsize=9, color=NATURE_TEXT)
+        else:
+            box_title = '标准化前后样本表达分布对比'
+            box_note = '分位数标准化会使各样本的边际表达分布一致；请结合实验设计判断其是否合理。'
+        if sample_tick_plan['stride'] > 1:
+            box_note += f" 为保证可读性，横轴每 {sample_tick_plan['stride']} 个样本显示一个名称。"
+        fig_box.suptitle(box_title, x=0.05, ha='left', fontsize=11,
+                         fontweight='semibold', color=NATURE_TEXT)
+        fig_box.text(0.05, 0.005, box_note, ha='left', va='bottom', fontsize=7.2,
+                     color='#667085')
+        fig_box.tight_layout(rect=(0, 0.05, 1, 0.91), pad=1.0)
+        result_files.extend(self.save_matplotlib_figure(
+            fig_box, plots_dir, 'bulk_norm_boxplot_compare.png', 'qc',
+            '表达分布对比', formats=('png', 'svg'), dpi=300,
+        ))
 
         # PCA 前后对比
         n_pcs = min(10, adata.n_obs - 1)
         if n_pcs >= 2:
-            fig_pca = make_subplots(rows=1, cols=2, subplot_titles=['原始数据 PCA', '标准化后 PCA'])
+            fig_pca, axes = plt.subplots(1, 2, figsize=(9.0, 4.8), dpi=150)
             # 原始数据 PCA
             adata_raw_pca = sc.AnnData(X=np.log2(raw_counts + 1), obs=adata.obs.copy())
             sc.pp.scale(adata_raw_pca, max_value=10)
             sc.pp.pca(adata_raw_pca, n_comps=n_pcs)
             pc_raw = adata_raw_pca.obsm['X_pca']
-            fig_pca.add_trace(go.Scattergl(x=pc_raw[:, 0].tolist(), y=pc_raw[:, 1].tolist(),
-                mode='markers+text', text=sample_labels, textposition='top center',
-                marker=dict(size=8, color='#e53935'), showlegend=False), row=1, col=1)
+            axes[0].scatter(pc_raw[:, 0], pc_raw[:, 1], s=24, color=NATURE_PALETTE[3],
+                            alpha=0.82, linewidths=0)
             # 标准化后 PCA
             adata_norm_pca = sc.AnnData(X=adata.X.copy(), obs=adata.obs.copy())
             sc.pp.scale(adata_norm_pca, max_value=10)
             sc.pp.pca(adata_norm_pca, n_comps=n_pcs)
             pc_norm = adata_norm_pca.obsm['X_pca']
-            fig_pca.add_trace(go.Scattergl(x=pc_norm[:, 0].tolist(), y=pc_norm[:, 1].tolist(),
-                mode='markers+text', text=sample_labels, textposition='top center',
-                marker=dict(size=8, color='#4caf50'), showlegend=False), row=1, col=2)
-            fig_pca.update_layout(height=400, width=900, title='标准化前后 PCA 对比',
-                                  plot_bgcolor='white')
-            fpath = os.path.join(plots_dir, 'bulk_norm_pca_compare.json')
-            with open(fpath, 'w') as f: f.write(fig_pca.to_json(engine="json"))
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'pca', 'label': 'PCA 前后对比'})
+            axes[1].scatter(pc_norm[:, 0], pc_norm[:, 1], s=24, color=NATURE_PALETTE[0],
+                            alpha=0.82, linewidths=0)
+            if method == 'log2':
+                pca_titles = ['log2(input + 1) PCA', 'log2 输出 PCA（预期相近）']
+                pca_title = 'Log2 变换前后 PCA（不移除组间生物学差异）'
+            else:
+                pca_titles = ['变换前 PCA', '标准化后 PCA']
+                pca_title = '标准化前后 PCA 对比'
+            for ax, subtitle in zip(axes, pca_titles):
+                ax.set_title(subtitle, loc='left', fontsize=9, color=NATURE_TEXT)
+                ax.set_xlabel('PC1', fontsize=8)
+                ax.set_ylabel('PC2', fontsize=8)
+                ax.grid(False)
+                # Dense static panels use point positions rather than a label
+                # on every biological replicate; IDs remain in the exported table.
+                if adata.n_obs <= 8:
+                    for x_value, y_value, label in zip(
+                            (pc_raw[:, 0] if ax is axes[0] else pc_norm[:, 0]),
+                            (pc_raw[:, 1] if ax is axes[0] else pc_norm[:, 1]), sample_labels):
+                        ax.annotate(str(label), (x_value, y_value), xytext=(3, 3),
+                                    textcoords='offset points', fontsize=6, color=NATURE_TEXT)
+            fig_pca.suptitle(pca_title, x=0.05, ha='left', fontsize=11,
+                             fontweight='semibold', color=NATURE_TEXT)
+            result_files.extend(self.save_matplotlib_figure(
+                fig_pca, plots_dir, 'bulk_norm_pca_compare.png', 'pca',
+                'PCA 前后对比', formats=('png', 'svg'), dpi=300,
+            ))
 
         self.progress(85, "保存结果...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')

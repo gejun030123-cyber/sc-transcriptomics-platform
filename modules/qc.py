@@ -1,5 +1,6 @@
 from modules.base import BaseAnalysis
 from modules.constants import S_GENES, G2M_GENES
+from modules.io_utils import resolve_obs_grouping
 
 
 class QCAnalysis(BaseAnalysis):
@@ -11,10 +12,13 @@ class QCAnalysis(BaseAnalysis):
     def run(self, input_path):
         import scanpy as sc
         import omicverse as ov
-        from modules.visualization import umap_scatter, violin_plot
-        import plotly.graph_objects as go
         import numpy as np
-        import os, json
+        import os
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        from modules.figure_style import (
+            NATURE_AXIS, NATURE_GRID, NATURE_MUTED, NATURE_PALETTE, NATURE_TEXT,
+        )
 
         self.progress(5, "Loading data...")
         adata = self.load_adata(input_path)
@@ -88,7 +92,14 @@ class QCAnalysis(BaseAnalysis):
         qc_before = adata.obs.copy()
         n_genes_before = adata.shape[1]
         requested_batch = self.params.get('batch_key', 'batch')
-        batch_key = requested_batch if requested_batch in adata.obs.columns else None
+        batch_key, batch_info = resolve_obs_grouping(
+            adata, requested_batch, max_categories=50,
+            max_numeric_categories=20, require_multiple=True,
+        )
+        if batch_key and not hasattr(adata.obs[batch_key].dtype, 'categories'):
+            adata.obs[batch_key] = adata.obs[batch_key].astype(str).astype('category')
+        if requested_batch and requested_batch in adata.obs.columns and not batch_info.get('requested_valid', False):
+            self.progress(-1, f"批次列已跳过：{batch_info.get('requested_reason', '不是有效分类列')}")
 
         mito_perc = float(self.params.get('mito_perc', 0.2))  # 0-1 scale, 0.2 = 20%
         nUMIs_min = int(self.params.get('nUMIs', 500))
@@ -148,10 +159,36 @@ class QCAnalysis(BaseAnalysis):
 
         n_after = adata.shape[0]
 
-        # ── 7. 生成图表 ─────────────────────────────────────────────────
+        # ── 7. 生成 Nature-style 图表 ────────────────────────────────────
         self.progress(60, "Generating QC plots...")
         plots_dir = self.ensure_plots_dir()
         result_files = []
+
+        def _style_axis(axis, title, xlabel=None, ylabel=None):
+            axis.set_title(title, loc='left', pad=7, fontsize=9,
+                           fontweight='semibold', color=NATURE_TEXT)
+            if xlabel:
+                axis.set_xlabel(xlabel, color=NATURE_TEXT)
+            if ylabel:
+                axis.set_ylabel(ylabel, color=NATURE_TEXT)
+            axis.tick_params(labelsize=8, length=3, width=0.7, colors=NATURE_AXIS)
+            axis.grid(axis='y', color=NATURE_GRID, linewidth=0.55, alpha=0.72)
+            axis.set_axisbelow(True)
+            for spine_name, spine in axis.spines.items():
+                spine.set_visible(spine_name in ('left', 'bottom'))
+                spine.set_color('#98A2B3')
+                spine.set_linewidth(0.7)
+
+        def _finite_values(series):
+            values = pd.to_numeric(series, errors='coerce').to_numpy(dtype=float)
+            return values[np.isfinite(values)]
+
+        def _save(fig, filename, category, label):
+            result_files.extend(self.save_matplotlib_figure(
+                fig, plots_dir, filename, category, label,
+                formats=('png', 'svg'), dpi=300,
+            ))
+            plt.close(fig)
 
         # 过滤前后 QC 指标对比
         if self.params.get('show_qc_filter_summary', True):
@@ -167,124 +204,151 @@ class QCAnalysis(BaseAnalysis):
             ]:
                 if col in qc_before.columns and col in adata.obs.columns:
                     metrics.append((col, label, float(qc_before[col].median()), float(adata.obs[col].median())))
-            fig_filter = go.Figure()
-            fig_filter.add_trace(go.Bar(
-                x=[m[1] for m in metrics],
-                y=[m[2] for m in metrics],
-                name='Before QC',
-                marker_color='#607d8b',
-            ))
-            fig_filter.add_trace(go.Bar(
-                x=[m[1] for m in metrics],
-                y=[m[3] for m in metrics],
-                name='After QC',
-                marker_color='#1a237e',
-            ))
-            fig_filter.update_layout(
-                title='QC Filtering Summary',
-                yaxis_title='Value',
-                barmode='group',
-                plot_bgcolor='white',
-                width=760,
-                height=430,
-            )
-            result_files.append(self.save_plotly_json(
-                fig_filter, plots_dir, 'qc_filter_summary.json', 'qc', 'QC 过滤前后对比'
-            ))
+            panel_specs = [
+                (m[1], m[2], m[3], '{:,.0f}') if m[0] in ('n_cells', 'n_genes')
+                else (m[1], m[2], m[3], '{:,.1f}')
+                for m in metrics
+            ]
+            fig_filter, axes = plt.subplots(2, 2, figsize=(8.6, 6.0), squeeze=False)
+            for axis, (label, before, after, number_format) in zip(axes.ravel(), panel_specs):
+                bars = axis.bar(
+                    [0, 1], [before, after], width=0.56,
+                    color=[NATURE_PALETTE[6], NATURE_PALETTE[0]],
+                    edgecolor='white', linewidth=0.5,
+                )
+                axis.set_xticks([0, 1], ['Before QC', 'After QC'])
+                _style_axis(axis, label, ylabel='Value')
+                ymax = max(abs(float(before)), abs(float(after)), 1.0)
+                axis.set_ylim(0, ymax * 1.2)
+                for bar, value in zip(bars, [before, after]):
+                    axis.text(bar.get_x() + bar.get_width() / 2,
+                              bar.get_height() + ymax * 0.035,
+                              number_format.format(value), ha='center', va='bottom',
+                              fontsize=8, color=NATURE_TEXT)
+            fig_filter.suptitle('QC filtering overview', x=0.06, ha='left',
+                                fontsize=13, fontweight='semibold', color=NATURE_TEXT)
+            fig_filter.text(0.06, 0.01,
+                            'Each metric uses its own scale so filtering effects remain readable.',
+                            fontsize=7.5, color=NATURE_MUTED)
+            _save(fig_filter, 'qc_filter_summary.png', 'qc', 'QC 过滤前后对比')
 
         # Scrublet doublet score 分布
         if self.params.get('show_doublet_histogram', True) and 'doublet_score' in adata.obs.columns:
-            fig_doublet = go.Figure()
-            fig_doublet.add_trace(go.Histogram(
-                x=adata.obs['doublet_score'],
-                nbinsx=50,
-                marker_color='#3949ab',
-                opacity=0.8,
-                name='Retained cells',
-            ))
-            fig_doublet.update_layout(
-                title='Scrublet Doublet Score Distribution',
-                xaxis_title='Doublet score',
-                yaxis_title='Cell count',
-                plot_bgcolor='white',
-                width=650,
-                height=420,
-            )
-            result_files.append(self.save_plotly_json(
-                fig_doublet, plots_dir, 'qc_doublet_score_histogram.json', 'histogram',
-                'Scrublet Doublet Score 分布'
-            ))
+            scores = _finite_values(adata.obs['doublet_score'])
+            if len(scores):
+                fig_doublet, axis = plt.subplots(figsize=(7.6, 4.8))
+                axis.hist(scores, bins=42, color=NATURE_PALETTE[0], alpha=0.78,
+                          edgecolor='white', linewidth=0.35)
+                median = float(np.median(scores))
+                axis.axvline(median, color=NATURE_PALETTE[3], lw=1.1,
+                             ls=(0, (3, 2)), label=f'Median {median:.3f}')
+                _style_axis(axis, 'Scrublet doublet score distribution',
+                            xlabel='Doublet score', ylabel='Cells')
+                axis.legend(loc='upper right', fontsize=8)
+                _save(fig_doublet, 'qc_doublet_score_histogram.png', 'histogram',
+                      'Scrublet Doublet Score 分布')
 
         # QC Violin
         violin_keys = [k for k in ['n_genes_by_counts', 'total_counts', 'pct_counts_mt', 'pct_counts_ribo']
                        if k in adata.obs.columns]
         if violin_keys:
-            fig_json = json.dumps(violin_plot(adata, violin_keys, title='QC Metrics'))
-            fpath = os.path.join(plots_dir, 'qc_violin.json')
-            with open(fpath, 'w') as f: f.write(fig_json)
-            result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'violin', 'label': 'QC Violin Plots'})
+            fig_violin, axes = plt.subplots(1, len(violin_keys),
+                                            figsize=(max(8.5, 2.7 * len(violin_keys)), 4.8),
+                                            squeeze=False)
+            metric_labels = {
+                'n_genes_by_counts': 'Detected genes',
+                'total_counts': 'Total counts',
+                'pct_counts_mt': 'Mitochondrial reads (%)',
+                'pct_counts_ribo': 'Ribosomal reads (%)',
+            }
+            for index, key in enumerate(violin_keys):
+                axis = axes.ravel()[index]
+                values = _finite_values(adata.obs[key])
+                if len(values):
+                    parts = axis.violinplot(values, positions=[1], widths=0.72,
+                                            showmeans=False, showmedians=True,
+                                            showextrema=False)
+                    color = NATURE_PALETTE[index % len(NATURE_PALETTE)]
+                    for body in parts['bodies']:
+                        body.set_facecolor(color)
+                        body.set_edgecolor(color)
+                        body.set_alpha(0.62)
+                    parts['cmedians'].set_color(NATURE_TEXT)
+                    parts['cmedians'].set_linewidth(1.1)
+                    median = float(np.median(values))
+                    axis.text(1.0, median, f'  {median:,.1f}', va='center',
+                              fontsize=7.5, color=NATURE_TEXT)
+                    if key in ('n_genes_by_counts', 'total_counts') and np.nanmin(values) > 0:
+                        axis.set_yscale('log')
+                axis.set_xticks([1], [metric_labels.get(key, key)])
+                axis.tick_params(axis='x', labelrotation=25)
+                _style_axis(axis, metric_labels.get(key, key), ylabel='Value')
+            fig_violin.suptitle('QC metric distributions', x=0.04, ha='left',
+                                fontsize=13, fontweight='semibold', color=NATURE_TEXT)
+            _save(fig_violin, 'qc_violin.png', 'violin', 'QC Violin Plots')
 
         # QC 散点图（Counts vs Genes，颜色 = MT%）
         if 'total_counts' in adata.obs.columns and 'n_genes_by_counts' in adata.obs.columns:
-            fig_scatter = go.Figure()
-            color_vals = adata.obs['pct_counts_mt'].values if 'pct_counts_mt' in adata.obs.columns else None
-            fig_scatter.add_trace(go.Scattergl(
-                x=adata.obs['total_counts'], y=adata.obs['n_genes_by_counts'],
-                mode='markers', marker=dict(size=3, color=color_vals, colorscale='Reds',
-                                            colorbar=dict(title='MT%'), opacity=0.6),
-                text=adata.obs.index.tolist(),
-                hovertemplate='%{text}<br>Counts: %{x:.0f}<br>Genes: %{y:.0f}<br>MT%: %{marker.color:.1f}'
-            ))
-            fig_scatter.update_layout(title='QC: Counts vs Genes', xaxis_title='Total Counts',
-                                     yaxis_title='Detected Genes', plot_bgcolor='white', width=600, height=400)
-            result_files.append(self.save_plotly_json(fig_scatter, plots_dir, 'qc_scatter.json', 'scatter', 'QC Scatter'))
+            x = _finite_values(adata.obs['total_counts'])
+            y = _finite_values(adata.obs['n_genes_by_counts'])
+            count = min(len(x), len(y))
+            color_vals = (_finite_values(adata.obs['pct_counts_mt'])[:count]
+                          if 'pct_counts_mt' in adata.obs.columns else None)
+            fig_scatter, axis = plt.subplots(figsize=(8.8, 5.7))
+            points = axis.scatter(x[:count], y[:count], c=color_vals, cmap='RdYlBu_r'
+                                  if color_vals is not None else None,
+                                  color=NATURE_PALETTE[0] if color_vals is None else None,
+                                  s=11, alpha=0.58, linewidths=0, rasterized=True)
+            axis.set_xscale('log')
+            axis.set_yscale('log')
+            _style_axis(axis, 'Library complexity and mitochondrial burden',
+                        xlabel='Total counts per cell', ylabel='Detected genes per cell')
+            if color_vals is not None:
+                colorbar = fig_scatter.colorbar(points, ax=axis, fraction=0.032, pad=0.02)
+                colorbar.set_label('Mitochondrial reads (%)', fontsize=8)
+                colorbar.outline.set_visible(False)
+            axis.text(0.015, 0.96, f'n = {count:,} cells', transform=axis.transAxes,
+                      ha='left', va='top', color=NATURE_MUTED, fontsize=8)
+            _save(fig_scatter, 'qc_scatter.png', 'scatter', 'QC Scatter')
 
         # Novelty score 散点图
         if 'novelty_score' in adata.obs.columns:
-            fig_nov = go.Figure()
-            color_vals = adata.obs['pct_counts_mt'].values if 'pct_counts_mt' in adata.obs.columns else None
-            fig_nov.add_trace(go.Scattergl(
-                x=adata.obs['total_counts'], y=adata.obs['novelty_score'],
-                mode='markers', marker=dict(size=3, color=color_vals, colorscale='Reds',
-                                            colorbar=dict(title='MT%'), opacity=0.6),
-                text=adata.obs.index.tolist(),
-                hovertemplate='%{text}<br>Counts: %{x:.0f}<br>Novelty: %{y:.3f}<br>MT%: %{marker.color:.1f}'
-            ))
-            fig_nov.update_layout(title='QC: Novelty Score vs Counts', xaxis_title='Total Counts',
-                                  yaxis_title='Novelty Score (n_genes / total_counts)',
-                                  plot_bgcolor='white', width=600, height=400)
-            result_files.append(self.save_plotly_json(fig_nov, plots_dir, 'qc_novelty.json', 'scatter', 'Novelty Score'))
+            x = _finite_values(adata.obs['total_counts'])
+            y = _finite_values(adata.obs['novelty_score'])
+            count = min(len(x), len(y))
+            fig_nov, axis = plt.subplots(figsize=(8.0, 5.1))
+            axis.scatter(x[:count], y[:count], color=NATURE_PALETTE[2], s=11,
+                         alpha=0.56, linewidths=0, rasterized=True)
+            axis.set_xscale('log')
+            _style_axis(axis, 'Novelty score versus library size',
+                        xlabel='Total counts per cell',
+                        ylabel='Novelty score (genes / counts)')
+            _save(fig_nov, 'qc_novelty.png', 'scatter', 'Novelty Score')
 
         # 细胞周期散点图（S_score vs G2M_score，颜色 = phase）
         if cc_available and 'S_score' in adata.obs.columns:
             phase_colors = {'G1': '#1f77b4', 'S': '#ff7f0e', 'G2M': '#2ca02c'}
-            fig_cc = go.Figure()
+            fig_cc, axis = plt.subplots(figsize=(7.6, 5.0))
             for phase, color in phase_colors.items():
                 mask = adata.obs['phase'] == phase
                 if mask.sum() == 0:
                     continue
-                fig_cc.add_trace(go.Scattergl(
-                    x=adata.obs.loc[mask, 'S_score'],
-                    y=adata.obs.loc[mask, 'G2M_score'],
-                    mode='markers', marker=dict(size=3, color=color, opacity=0.6),
-                    name=phase,
-                    text=adata.obs.index[mask].tolist(),
-                    hovertemplate='%{text}<br>S_score: %{x:.3f}<br>G2M_score: %{y:.3f}<br>Phase: ' + phase
-                ))
-            fig_cc.update_layout(title='Cell Cycle Scoring', xaxis_title='S_score',
-                                yaxis_title='G2M_score', plot_bgcolor='white',
-                                width=600, height=400,
-                                legend=dict(title='Phase'))
-            result_files.append(self.save_plotly_json(fig_cc, plots_dir, 'qc_cell_cycle.json', 'scatter', 'Cell Cycle Scoring'))
+                axis.scatter(adata.obs.loc[mask, 'S_score'],
+                             adata.obs.loc[mask, 'G2M_score'], s=12, color=color,
+                             alpha=0.64, linewidths=0, label=phase, rasterized=True)
+            _style_axis(axis, 'Cell-cycle scoring', xlabel='S score', ylabel='G2M score')
+            axis.legend(title='Phase', loc='best', fontsize=8, title_fontsize=8)
+            _save(fig_cc, 'qc_cell_cycle.png', 'scatter', 'Cell Cycle Scoring')
 
         # UMAP（如有）
         if 'X_umap' in adata.obsm:
             for color_key in ['batch', 'leiden', 'phase']:
                 if color_key in adata.obs.columns:
-                    fig_json = json.dumps(umap_scatter(adata, color_key, title=f'UMAP by {color_key}'))
-                    fpath = os.path.join(plots_dir, f'qc_umap_{color_key}.json')
-                    with open(fpath, 'w') as f: f.write(fig_json)
-                    result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'UMAP by {color_key}'})
+                    fig_umap = self.build_publication_umap(
+                        adata, color_key, title=f'UMAP by {color_key}'
+                    )
+                    _save(fig_umap, f'qc_umap_{color_key}.png', 'umap',
+                          f'UMAP by {color_key}')
 
         # ── 8. 保存输出 ─────────────────────────────────────────────────
         self.progress(85, "Saving output...")
@@ -311,5 +375,7 @@ class QCAnalysis(BaseAnalysis):
                 'phase_counts': phase_counts,
                 's_genes_found': len(s_in),
                 'g2m_genes_found': len(g2m_in),
+                'requested_batch_key': str(requested_batch or ''),
+                'batch_key': batch_key,
             }
         }

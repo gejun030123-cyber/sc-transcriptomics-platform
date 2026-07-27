@@ -1,6 +1,7 @@
 from modules.base import BaseAnalysis
 from modules.constants import S_GENES, G2M_GENES
 import logging
+from modules.io_utils import resolve_obs_grouping
 
 logger = logging.getLogger(__name__)
 
@@ -14,13 +15,21 @@ class HVGAnalysis(BaseAnalysis):
     def run(self, input_path):
         import scanpy as sc
         import numpy as np
-        import json
+        from modules.native_figures import scatter_figure
 
         self.progress(5, "Loading data...")
         adata = self.load_adata(input_path)
 
         n_hvg = int(self.params.get('n_top_genes', 2000))
-        batch_key = self.params.get('batch_key', '').strip()
+        requested_batch_key = str(self.params.get('batch_key', '') or '').strip()
+        batch_key, batch_info = resolve_obs_grouping(
+            adata, requested_batch_key, max_categories=50,
+            max_numeric_categories=20, require_multiple=True,
+        )
+        if batch_key and not hasattr(adata.obs[batch_key].dtype, 'categories'):
+            adata.obs[batch_key] = adata.obs[batch_key].astype(str).astype('category')
+        if requested_batch_key and requested_batch_key in adata.obs.columns and not batch_info.get('requested_valid', False):
+            self.progress(-1, f"批次列已跳过：{batch_info.get('requested_reason', '不是有效分类列')}")
         hvg_flavor = self.params.get('hvg_flavor', 'seurat_v3')
         batch_hvg_strategy = self.params.get('batch_hvg_strategy', 'intersection')
         exclude_mt = self.params.get('exclude_mt_genes', False)
@@ -101,62 +110,37 @@ class HVGAnalysis(BaseAnalysis):
         plots_dir = self.ensure_plots_dir()
         result_files = []
 
-        import plotly.graph_objects as go
         var_df = adata.var.copy()
         plot_cols = [c for c in ['variances_norm', 'variances', 'dispersions_norm', 'dispersions'] if c in var_df.columns]
         y_col = plot_cols[0] if plot_cols else None
         if y_col:
             var_df = var_df.sort_values(y_col, ascending=False).head(3000)
-            fig = go.Figure()
-            fig.add_trace(go.Scattergl(
-                x=var_df['means'] if 'means' in var_df.columns else range(len(var_df)),
-                y=var_df[y_col],
-                mode='markers',
-                marker=dict(size=2, color=var_df['highly_variable'].map({True: '#e53935', False: '#9e9e9e'}))
+            x_values = var_df['means'] if 'means' in var_df.columns else np.arange(len(var_df))
+            colors = var_df['highly_variable'].map({True: '#B64342', False: '#98A2B3'}).values
+            fig = scatter_figure(
+                x_values, var_df[y_col].values,
+                title='Highly Variable Genes', x_label='Mean', y_label=y_col,
+                colors=colors, size=8, alpha=0.75,
+            )
+            result_files.extend(self.save_matplotlib_figure(
+                fig, plots_dir, 'hvg_scatter.png', 'scatter',
+                'Highly Variable Genes', formats=('png', 'svg'), dpi=300,
             ))
-            fig.update_layout(title='Highly Variable Genes', xaxis_title='Mean', yaxis_title=y_col,
-                             plot_bgcolor='white', width=600, height=400)
-            result_files.append(self.save_plotly_json(fig, plots_dir, 'hvg_scatter.json', 'scatter', 'Highly Variable Genes'))
 
             if self.params.get('show_hvg_rank_plot', True):
                 ranked = adata.var.copy().sort_values(y_col, ascending=False)
                 ranked['rank'] = np.arange(1, len(ranked) + 1)
                 rank_df = ranked.iloc[:min(5000, len(ranked))].copy()
-                fig_rank = go.Figure()
-                fig_rank.add_trace(go.Scattergl(
-                    x=rank_df['rank'],
-                    y=rank_df[y_col],
-                    mode='markers',
-                    marker=dict(
-                        size=3,
-                        color=rank_df['highly_variable'].map({True: '#e53935', False: '#9e9e9e'}),
-                        opacity=0.75,
-                    ),
-                    text=rank_df.index.astype(str).tolist(),
-                    hovertemplate='Rank: %{x}<br>Gene: %{text}<br>' + y_col + ': %{y:.3f}<extra></extra>',
-                ))
-                for gene_name, row in rank_df.iloc[:15].iterrows():
-                    fig_rank.add_annotation(
-                        x=int(row['rank']),
-                        y=float(row[y_col]),
-                        text=str(gene_name),
-                        showarrow=True,
-                        arrowhead=2,
-                        ax=20,
-                        ay=-20,
-                        font=dict(size=9),
-                    )
-                fig_rank.update_layout(
-                    title='HVG Rank Plot',
-                    xaxis_title='Gene rank',
-                    yaxis_title=y_col,
-                    plot_bgcolor='white',
-                    width=760,
-                    height=460,
+                rank_colors = rank_df['highly_variable'].map({True: '#B64342', False: '#98A2B3'}).values
+                fig_rank = scatter_figure(
+                    rank_df['rank'].values, rank_df[y_col].values,
+                    title='HVG Rank Plot', x_label='Gene rank', y_label=y_col,
+                    colors=rank_colors, size=9, alpha=0.75,
+                    labels=rank_df.index.astype(str).tolist(), annotate_top=15,
                 )
-                result_files.append(self.save_plotly_json(
-                    fig_rank, plots_dir, 'hvg_rank_plot.json',
-                    'scatter', 'HVG Rank Plot'
+                result_files.extend(self.save_matplotlib_figure(
+                    fig_rank, plots_dir, 'hvg_rank_plot.png', 'scatter',
+                    'HVG Rank Plot', formats=('png', 'svg'), dpi=300,
                 ))
 
         self.progress(90, "Saving output...")
@@ -172,6 +156,8 @@ class HVGAnalysis(BaseAnalysis):
                 'n_genes_total': adata.n_vars,
                 'n_hvgs': n_hvg_actual,
                 'hvg_flavor': hvg_flavor,
+                'requested_batch_key': requested_batch_key,
+                'batch_key': batch_key,
                 'force_include_count': len(force_genes),
             }
         }

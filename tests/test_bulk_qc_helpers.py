@@ -115,6 +115,47 @@ def test_obs_columns_api_returns_multifactor_candidates(test_project):
     assert len(payload['sample_groups']['auto_group_candidates']) == 3
 
 
+def test_obs_columns_api_separates_group_batch_and_cluster_suggestions(test_project):
+    import anndata
+    import pandas as pd
+    from app import create_app
+    from config import Config
+
+    n_obs = 24
+    obs = pd.DataFrame({
+        # Deliberately put technical columns first: this reproduces the old
+        # physical-order bug in the web form.
+        'barcode': [f'cell_{i}' for i in range(n_obs)],
+        'batch': pd.Categorical(['B1'] * 12 + ['B2'] * 12),
+        'sample': pd.Categorical([f'S{i // 6 + 1}' for i in range(n_obs)]),
+        'condition': pd.Categorical(['Control'] * 12 + ['Treatment'] * 12),
+        'leiden': pd.Categorical(['0'] * 12 + ['1'] * 12),
+    }, index=[f'cell_{i}' for i in range(n_obs)])
+    adata = anndata.AnnData(
+        np.ones((n_obs, 4)),
+        obs=obs,
+        var=pd.DataFrame(index=['G1', 'G2', 'G3', 'G4']),
+    )
+    path = os.path.join(Config.uploads_dir(test_project), 'grouping.h5ad')
+    adata.write_h5ad(path)
+
+    app = create_app()
+    app.config['TESTING'] = True
+    response = app.test_client().get(
+        '/api/obs-columns',
+        query_string={'file_path': path, 'module_name': 'deg'},
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload['suggestions']['groupby'] == 'condition'
+    assert payload['suggestions']['color_by'] == 'condition'
+    assert payload['suggestions']['batch_key'] == 'batch'
+    assert payload['suggestions']['cluster_key'] == 'leiden'
+    assert payload['suggestions']['sample_key'] == 'sample'
+    assert payload['grouping_candidates'][0] == 'condition'
+
+
 def test_detect_outliers_no_outlier():
     """正常聚类数据 → 无离群点"""
     from modules.bulk_qc import _detect_outliers_mahal

@@ -1,5 +1,6 @@
 def test_dependency_status_has_groups_and_module_availability():
     from modules.platform.system_health import dependency_status
+    from modules import MODULE_REGISTRY
 
     status = dependency_status()
 
@@ -9,6 +10,9 @@ def test_dependency_status_has_groups_and_module_availability():
     assert "qc" in status["modules"]
     assert "available" in status["modules"]["qc"]
     assert "summary" in status
+    assert set(MODULE_REGISTRY).issubset(status["modules"])
+    assert "optional_missing" in status["modules"]["subcluster"]
+    assert "gseapy" not in status["modules"]["bulk_enrichment"]["missing"]
 
 
 def test_system_dependencies_api(tmp_path, monkeypatch):

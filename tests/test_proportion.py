@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import numpy as np
 import pandas as pd
 import pytest
+import anndata as ad
 
 
 class TestRunStatTest:
@@ -87,3 +88,48 @@ class TestRunStatTest:
         stat, pval = _run_stat_test(ct, 'chi_square')
         assert isinstance(stat, (int, float))
         assert isinstance(pval, (int, float))
+
+
+def _sample_level_adata(condition_key='condition'):
+    rows = [
+        ('s1', 'Ctrl', 'T'), ('s1', 'Ctrl', 'T'), ('s1', 'Ctrl', 'B'),
+        ('s2', 'Ctrl', 'T'), ('s2', 'Ctrl', 'B'), ('s2', 'Ctrl', 'B'),
+        ('s3', 'Treat', 'T'), ('s3', 'Treat', 'T'), ('s3', 'Treat', 'T'),
+        ('s4', 'Treat', 'B'), ('s4', 'Treat', 'B'), ('s4', 'Treat', 'B'),
+    ]
+    obs = pd.DataFrame(rows, columns=['sample_id', condition_key, 'celltype'])
+    obs.index = [f'cell_{index}' for index in range(len(obs))]
+    return ad.AnnData(X=np.ones((len(obs), 2)), obs=obs, var=pd.DataFrame(index=['g1', 'g2']))
+
+
+def test_sample_level_composition_uses_samples_and_keeps_zero_proportions():
+    from modules.proportion import _sample_level_composition
+
+    result = _sample_level_composition(
+        _sample_level_adata(), 'celltype', 'sample_id', 'condition',
+        min_samples_per_condition=2, min_cells_per_sample=2,
+    )
+
+    assert result['available'] is True
+    assert result['inference_ready'] is True
+    assert result['condition_counts'] == {'Ctrl': 2, 'Treat': 2}
+    # s3 has no B cells, but it must remain an explicit zero rather than be
+    # silently omitted from the treatment distribution.
+    s3_b = result['proportions'].query("sample == 's3' and celltype == 'B'")
+    assert len(s3_b) == 1
+    assert s3_b.iloc[0]['proportion'] == 0
+    assert set(result['tests']['test']) == {'mann_whitney_u'}
+    assert result['tests']['fdr_bh'].notna().all()
+
+
+def test_sample_level_composition_refuses_technical_batch_as_condition_without_confirmation():
+    from modules.proportion import _sample_level_composition
+
+    result = _sample_level_composition(
+        _sample_level_adata(condition_key='batch'), 'celltype', 'sample_id', 'batch',
+        min_samples_per_condition=2, min_cells_per_sample=2,
+    )
+
+    assert result['available'] is False
+    assert result['inference_ready'] is False
+    assert any('技术 batch' in warning for warning in result['warnings'])

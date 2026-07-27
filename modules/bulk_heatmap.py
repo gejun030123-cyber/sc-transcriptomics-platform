@@ -1,8 +1,110 @@
 import os
 import json
+import re
 import numpy as np
 import pandas as pd
 from modules.base import BaseAnalysis
+
+
+def _selection_values(value):
+    """Parse comma/newline selections while keeping user-entered sample IDs exact."""
+    return list(dict.fromkeys(
+        item.strip() for item in str(value or '').replace('\n', ',').split(',') if item.strip()
+    ))
+
+
+def _comparison_groups(comparison_label):
+    """Extract the two contrast groups from a human-readable ``A vs B`` label."""
+    match = re.search(r'^\s*(.+?)\s+vs\s+(.+?)\s*$', str(comparison_label or ''), flags=re.IGNORECASE)
+    return [match.group(1).strip(), match.group(2).strip()] if match else []
+
+
+def _select_heatmap_display_samples(obs, sample_display_mode='all', groupby='',
+                                    selected_groups='', selected_samples='',
+                                    comparison_label=''):
+    """Return the selected sample positions and an auditable display contract.
+
+    This is deliberately a visualization filter: it never changes the DEG
+    table or tests significance for a newly displayed group.
+    """
+    allowed_modes = {'all', 'deg_groups', 'selected_groups', 'selected_samples'}
+    mode = str(sample_display_mode or 'all').strip()
+    if mode not in allowed_modes:
+        mode = 'all'
+    sample_names = [str(name) for name in obs.index]
+    if mode == 'all':
+        return list(range(len(sample_names))), {
+            'mode': 'all', 'n_samples': len(sample_names), 'selected_groups': [],
+        }
+
+    if mode == 'selected_samples':
+        requested = _selection_values(selected_samples)
+        if not requested:
+            raise ValueError('请选择至少一个要展示的样本。')
+        available = set(sample_names)
+        missing = [name for name in requested if name not in available]
+        if missing:
+            raise ValueError(f"未找到所选样本：{', '.join(missing[:5])}")
+        selected = [index for index, name in enumerate(sample_names) if name in set(requested)]
+        if len(selected) < 2:
+            raise ValueError('热图至少需要展示 2 个样本。')
+        return selected, {
+            'mode': mode, 'n_samples': len(selected), 'selected_samples': requested,
+            'selected_groups': [],
+        }
+
+    if not groupby or groupby not in obs.columns:
+        raise ValueError('按分组展示热图时，请填写有效的样本分组列名。')
+    group_values = obs[groupby].astype(str).tolist()
+    available_groups = set(group_values)
+    if mode == 'deg_groups':
+        requested = _comparison_groups(comparison_label)
+        if not requested:
+            raise ValueError('仅显示 DEG 两组时，请先选择带有“组1 vs 组2”名称的 DEG 比较结果。')
+    else:
+        requested = _selection_values(selected_groups)
+        if not requested:
+            raise ValueError('请选择至少一个要展示的分组。')
+    missing = [name for name in requested if name not in available_groups]
+    if missing:
+        raise ValueError(f"分组列 '{groupby}' 中未找到：{', '.join(missing[:5])}")
+    selected_set = set(requested)
+    selected = [index for index, value in enumerate(group_values) if value in selected_set]
+    if len(selected) < 2:
+        raise ValueError('热图至少需要展示 2 个样本。')
+    return selected, {
+        'mode': mode, 'n_samples': len(selected), 'selected_groups': requested,
+        'groupby': groupby,
+    }
+
+
+def _resolve_deg_result_path(results_dir, requested_comparison=''):
+    """Resolve a user-selected DEG CSV while retaining legacy filename inputs."""
+    candidates = sorted(
+        [name for name in os.listdir(results_dir)
+         if name.startswith('bulk_deg_results') and name.endswith('.csv')
+         and 'merged' not in name and 'all_comparisons' not in name
+         and 'lrt' not in name and 'top_genes' not in name],
+        key=lambda name: os.path.getmtime(os.path.join(results_dir, name)), reverse=True,
+    )
+    if not candidates:
+        raise ValueError('未找到 DEG 结果文件，请先运行 bulk_deg')
+    requested = str(requested_comparison or '').strip()
+    if requested:
+        candidate_path = os.path.realpath(requested)
+        results_real = os.path.realpath(results_dir)
+        if (candidate_path.startswith(results_real + os.sep)
+                and os.path.isfile(candidate_path)
+                and os.path.basename(candidate_path) in candidates):
+            return candidate_path
+        exact = [name for name in candidates if requested == name]
+        if exact:
+            return os.path.join(results_dir, exact[0])
+        matched = [name for name in candidates
+                   if requested in name.replace('bulk_deg_', '').replace('.csv', '')]
+        if matched:
+            return os.path.join(results_dir, matched[0])
+    return os.path.join(results_dir, candidates[0])
 
 
 class BulkHeatmapAnalysis(BaseAnalysis):
@@ -16,7 +118,11 @@ class BulkHeatmapAnalysis(BaseAnalysis):
 
     def run(self, input_path):
         import scanpy as sc
-        import plotly.graph_objects as go
+        from modules.native_figures import (
+            heatmap_figure, annotation_strip_figure,
+            correlation_heatmap_figure, correlation_pairwise_table,
+            summarize_correlation_pairs,
+        )
 
         self.progress(5, "加载数据...")
         from modules.io_utils import read_expression_matrix
@@ -63,6 +169,12 @@ class BulkHeatmapAnalysis(BaseAnalysis):
         top_n = int(self.params.get('top_n', 50))
         custom_genes_str = self.params.get('custom_genes', '').strip()
         var_metric = self.params.get('var_metric', 'var')
+        selected_deg_path = ''
+        selected_deg_label = str(self.params.get('deg_comparison_label', '') or '').strip()
+        # This value is also used by the sample-display contract.  Initialize
+        # it for top_var/manual/expression_filter modes where the DEG branch is
+        # not entered.
+        deg_comparison = str(self.params.get('deg_comparison', '') or '').strip()
 
         if gene_import_source == 'manual' or (custom_genes_str and gene_import_source not in ('deg', 'expression_filter')):
             gene_list = [g.strip() for g in custom_genes_str.replace('\n', ',').split(',') if g.strip()]
@@ -79,18 +191,8 @@ class BulkHeatmapAnalysis(BaseAnalysis):
             deg_direction = self.params.get('deg_direction', 'both')
             deg_sortby = self.params.get('deg_sortby', 'padj')
             results_dir = os.path.join(self.project_dir, 'results')
-            deg_files = sorted([f for f in os.listdir(results_dir)
-                                if f.startswith('bulk_deg_results') and f.endswith('.csv')
-                                and 'merged' not in f and 'all_comparisons' not in f
-                                and 'lrt' not in f and 'top_genes' not in f])
-            deg_comparison = self.params.get('deg_comparison', '').strip()
-            if deg_comparison:
-                matched = [f for f in deg_files if deg_comparison in f.replace('bulk_deg_', '').replace('.csv', '')]
-                if matched:
-                    deg_files = matched[:1]
-            if not deg_files:
-                raise ValueError("未找到 DEG 结果文件，请先运行 bulk_deg")
-            deg_df = pd.read_csv(os.path.join(results_dir, deg_files[0]))
+            selected_deg_path = _resolve_deg_result_path(results_dir, deg_comparison)
+            deg_df = pd.read_csv(selected_deg_path)
             if deg_direction == 'up':
                 deg_df = deg_df[deg_df['regulation'] == 'Up']
             elif deg_direction == 'down':
@@ -105,7 +207,8 @@ class BulkHeatmapAnalysis(BaseAnalysis):
                 deg_df = deg_df.sort_values('log2FC', ascending=False)
             gene_list = deg_df['gene'].head(top_n).tolist()
             top_idx = [i for i, g in enumerate(adata.var_names) if g in set(gene_list)]
-            title = f'Top {len(top_idx)} 差异基因热图 ({deg_direction})'
+            contrast_suffix = f' · {selected_deg_label}' if selected_deg_label else ''
+            title = f'Top {len(top_idx)} 差异基因热图 ({deg_direction}){contrast_suffix}'
 
         elif gene_import_source == 'expression_filter':
             from modules.expression_parser import validate, evaluate
@@ -116,7 +219,9 @@ class BulkHeatmapAnalysis(BaseAnalysis):
             deg_files = sorted([f for f in os.listdir(results_dir)
                                 if f.startswith('bulk_deg_results') and f.endswith('.csv')
                                 and 'merged' not in f and 'all_comparisons' not in f
-                                and 'lrt' not in f and 'top_genes' not in f])
+                                and 'lrt' not in f and 'top_genes' not in f],
+                               key=lambda f: os.path.getmtime(os.path.join(results_dir, f)),
+                               reverse=True)
             if not deg_files:
                 raise ValueError("未找到 DEG 结果文件，请先运行 bulk_deg")
             comparisons = {}
@@ -161,9 +266,22 @@ class BulkHeatmapAnalysis(BaseAnalysis):
             metric_names = {'var': '方差', 'mad': 'MAD', 'cv': '变异系数', 'range': '极差'}
             title = f'Top {top_n} 高变异基因热图 ({metric_names.get(var_metric, var_metric)})'
 
-        heat_data = norm_data[:, top_idx].copy()
+        all_sample_labels = adata.obs.index.tolist()
+        sample_display_mode = self.params.get('sample_display_mode', 'all')
+        sample_display_groups = self.params.get('sample_display_groups', '')
+        sample_display_names = self.params.get('sample_display_names', '')
+        display_indices, display_contract = _select_heatmap_display_samples(
+            adata.obs,
+            sample_display_mode=sample_display_mode,
+            groupby=groupby,
+            selected_groups=sample_display_groups,
+            selected_samples=sample_display_names,
+            comparison_label=selected_deg_label or deg_comparison,
+        )
+        display_obs = adata.obs.iloc[display_indices].copy()
+        heat_data = norm_data[np.ix_(display_indices, top_idx)].copy()
         gene_labels = [adata.var_names[i] for i in top_idx]
-        sample_labels = adata.obs.index.tolist()
+        sample_labels = display_obs.index.tolist()
 
         # 数据变换
         from modules.visualization import transform_heatmap_data, cluster_heatmap
@@ -204,16 +322,17 @@ class BulkHeatmapAnalysis(BaseAnalysis):
         row_metric = self.params.get('row_metric', 'euclidean')
         col_metric = self.params.get('col_metric', 'euclidean')
 
-        if col_cluster == 'yes' and adata.n_obs > 2:
+        if col_cluster == 'yes' and len(sample_labels) > 2:
             sample_order = cluster_heatmap(heat_z, method=col_method, metric=col_metric)
-        elif col_cluster == 'group_order' and groupby and groupby in adata.obs.columns:
-            groups = adata.obs[groupby].astype(str)
+        elif col_cluster == 'group_order' and groupby and groupby in display_obs.columns:
+            groups = display_obs[groupby].astype(str)
             group_order = sorted(groups.unique())
             sample_order = []
             for g in group_order:
                 sample_order.extend([i for i in range(len(groups)) if groups.iloc[i] == g])
         else:
-            sample_order = list(range(adata.n_obs))
+            # The display matrix may contain only selected groups/samples.
+            sample_order = list(range(len(sample_labels)))
 
         if row_cluster == 'yes' and len(top_idx) > 2:
             gene_order = cluster_heatmap(heat_z.T, method=row_method, metric=row_metric)
@@ -230,18 +349,8 @@ class BulkHeatmapAnalysis(BaseAnalysis):
             up_down_separate = up_down_separate.lower() in ('true', '1', 'yes', 'on')
 
         if up_down_separate and gene_import_source == 'deg':
-            results_dir_sep = os.path.join(self.project_dir, 'results')
-            sep_deg_files = sorted([f for f in os.listdir(results_dir_sep)
-                                    if f.startswith('bulk_deg_results') and f.endswith('.csv')
-                                    and 'merged' not in f and 'all_comparisons' not in f
-                                    and 'lrt' not in f and 'top_genes' not in f])
-            deg_comparison_sep = self.params.get('deg_comparison', '').strip()
-            if deg_comparison_sep:
-                sep_matched = [f for f in sep_deg_files if deg_comparison_sep in f.replace('bulk_deg_', '').replace('.csv', '')]
-                if sep_matched:
-                    sep_deg_files = sep_matched[:1]
-            if sep_deg_files:
-                sep_deg_df = pd.read_csv(os.path.join(results_dir_sep, sep_deg_files[0]))
+            if selected_deg_path:
+                sep_deg_df = pd.read_csv(selected_deg_path)
                 gene_reg_map = dict(zip(sep_deg_df['gene'], sep_deg_df['regulation']))
                 up_genes = [g for g in gene_ordered if gene_reg_map.get(g) == 'Up']
                 down_genes = [g for g in gene_ordered if gene_reg_map.get(g) == 'Down']
@@ -265,63 +374,60 @@ class BulkHeatmapAnalysis(BaseAnalysis):
 
         self.progress(75, "生成热图...")
 
-        # 视觉样式参数
-        colorscale = self.params.get('colorscale', 'RdBu_r')
-        reverse_color = self.params.get('reverse_color', False)
-        if reverse_color:
-            colorscale = colorscale + '_r' if not colorscale.endswith('_r') else colorscale[:-2]
-
+        # 视觉样式参数（展示型热图统一走原生 Matplotlib；不再生成同名 Plotly JSON）
         zmin_str = self.params.get('zmin', 'auto').strip()
         zmax_str = self.params.get('zmax', 'auto').strip()
         zmin = float(zmin_str) if zmin_str and zmin_str != 'auto' else None
         zmax = float(zmax_str) if zmax_str and zmax_str != 'auto' else None
 
         show_gene_labels = self.params.get('show_gene_labels', 'all')
-        show_sample_labels = self.params.get('show_sample_labels', 'all')
+        show_sample_labels = self.params.get('show_sample_labels', 'auto')
         gene_font_size = int(self.params.get('gene_font_size', 8))
         sample_font_size = int(self.params.get('sample_font_size', 9))
 
-        heatmap_kwargs = dict(
-            z=heat_ordered.tolist(),
-            x=gene_ordered,
-            y=sample_ordered,
-            colorscale=colorscale,
-            colorbar=dict(title='Z-score' if row_scaling == 'zscore' else 'Value'),
-            hovertemplate='样本: %{y}<br>基因: %{x}<br>值: %{z:.2f}<extra></extra>'
-        )
         if row_scaling in ('zscore', 'center') and zmin is None and zmax is None:
-            heatmap_kwargs['zmid'] = 0
-        if zmin is not None:
-            heatmap_kwargs['zmin'] = zmin
-        if zmax is not None:
-            heatmap_kwargs['zmax'] = zmax
+            zmin, zmax = -3.0, 3.0
+        if zmin is None:
+            finite = heat_ordered[np.isfinite(heat_ordered)]
+            zmin = float(np.nanmin(finite)) if finite.size else -1.0
+        if zmax is None:
+            finite = heat_ordered[np.isfinite(heat_ordered)]
+            zmax = float(np.nanmax(finite)) if finite.size else 1.0
+        if zmin == zmax:
+            zmin, zmax = zmin - 1.0, zmax + 1.0
 
-        fig = go.Figure()
-        fig.add_trace(go.Heatmap(**heatmap_kwargs))
-
-        xaxis_kwargs = dict(tickangle=45, tickfont=dict(size=gene_font_size))
-        yaxis_kwargs = dict(tickfont=dict(size=sample_font_size))
+        fig = heatmap_figure(
+            heat_ordered,
+            x_labels=gene_ordered,
+            y_labels=sample_ordered,
+            title=title,
+            x_label='Gene',
+            y_label='Sample',
+            colorbar_label='Z-score' if row_scaling == 'zscore' else 'Value',
+            vmin=zmin,
+            vmax=zmax,
+        )
+        ax = fig.axes[0]
         if show_gene_labels == 'top20':
             show_n = min(20, len(gene_ordered))
-            xaxis_kwargs['tickvals'] = list(range(show_n))
-            xaxis_kwargs['ticktext'] = gene_ordered[:show_n]
+            ax.set_xticks(np.arange(show_n), [str(x) for x in gene_ordered[:show_n]])
         elif show_gene_labels == 'none':
-            xaxis_kwargs['showticklabels'] = False
+            ax.set_xticks([])
         if show_sample_labels == 'none':
-            yaxis_kwargs['showticklabels'] = False
-
-        fig.update_layout(
-            title=title,
-            xaxis=xaxis_kwargs,
-            yaxis=yaxis_kwargs,
-            height=max(400, len(sample_ordered) * 25 + 150),
-            width=max(600, len(gene_ordered) * 12 + 200),
-            plot_bgcolor='white'
-        )
-
-        from modules.visualization import save_plotly_json
-        save_plotly_json(fig, plots_dir, 'bulk_heatmap.json', result_files,
-                        category='heatmap', label=title)
+            ax.set_yticks([])
+        elif show_sample_labels == 'auto':
+            from modules.native_figures import apply_sample_tick_labels
+            apply_sample_tick_labels(
+                ax, sample_ordered, axis='y', max_labels=18,
+                font_size=sample_font_size,
+            )
+        ax.tick_params(axis='x', labelsize=gene_font_size)
+        if show_sample_labels == 'all':
+            ax.tick_params(axis='y', labelsize=sample_font_size)
+        result_files.extend(self.save_matplotlib_figure(
+            fig, plots_dir, 'bulk_heatmap.png', 'heatmap', title,
+            formats=('png', 'svg'), dpi=300,
+        ))
 
         # 注释条（支持多列）
         from modules.visualization import build_annotation_bar, DEFAULT_PALETTE
@@ -340,7 +446,7 @@ class BulkHeatmapAnalysis(BaseAnalysis):
                     custom_palette[k.strip()] = v.strip()
 
         if annot_cols:
-            annot_data, _ = build_annotation_bar(adata.obs, annot_cols,
+            annot_data, _ = build_annotation_bar(display_obs, annot_cols,
                                                  sample_order=sample_order, palette=DEFAULT_PALETTE)
             # 应用自定义配色
             if custom_palette:
@@ -350,27 +456,15 @@ class BulkHeatmapAnalysis(BaseAnalysis):
                             col_info_c['color_map'][group_c] = color_c
                     col_info_c['colors'] = [col_info_c['color_map'][v] for v in col_info_c['groups']]
             for col_name, col_info in annot_data.items():
-                color_indices = [col_info['unique'].index(g) for g in col_info['groups']]
-                fig_annot = go.Figure()
-                n_groups = len(col_info['unique'])
-                if n_groups <= 1:
-                    cs = [[0, list(col_info['color_map'].values())[0]]]
-                else:
-                    cs = [[i / (n_groups - 1), col_info['color_map'][g]]
-                          for i, g in enumerate(col_info['unique'])]
-                fig_annot.add_trace(go.Heatmap(
-                    z=[[i] for i in color_indices],
-                    y=sample_ordered, x=[col_name],
-                    colorscale=cs, showscale=False,
-                    text=[[col_info['groups'][j]] for j in range(len(col_info['groups']))],
-                    hovertemplate='%{y}: %{text}<extra></extra>'
-                ))
-                fig_annot.update_layout(
-                    height=max(400, len(sample_ordered) * 25 + 150), width=100,
-                    margin=dict(l=0, r=0, t=30, b=40)
+                fig_annot = annotation_strip_figure(
+                    col_info['groups'], title=col_name,
+                    color_map=col_info['color_map'], orientation='vertical',
                 )
-                save_plotly_json(fig_annot, plots_dir, f'bulk_heatmap_annotation_{col_name}.json',
-                                result_files, category='annotation', label=f'{col_name} 注释条')
+                result_files.extend(self.save_matplotlib_figure(
+                    fig_annot, plots_dir,
+                    f'bulk_heatmap_annotation_{col_name}.png',
+                    'annotation', f'{col_name} 注释条', formats=('png', 'svg'), dpi=300,
+                ))
 
         # 基因维度注释条
         gene_annot_cols_str = self.params.get('gene_annotation_columns', '').strip()
@@ -389,22 +483,15 @@ class BulkHeatmapAnalysis(BaseAnalysis):
                         gene_values.append('NA')
                 uniq = sorted(set(gene_values))
                 g_color_map = {gv: DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)] for i, gv in enumerate(uniq)}
-                color_indices = [uniq.index(v) for v in gene_values]
-                fig_ga = go.Figure()
-                n_g = len(uniq)
-                g_cs = [[0, list(g_color_map.values())[0]]] if n_g <= 1 else \
-                       [[i / (n_g - 1), g_color_map[gv]] for i, gv in enumerate(uniq)]
-                fig_ga.add_trace(go.Heatmap(
-                    z=[color_indices], x=gene_values, y=[gcol],
-                    colorscale=g_cs, showscale=False,
-                    text=[gene_values], hovertemplate='%{x}: %{text}<extra></extra>'
-                ))
-                fig_ga.update_layout(
-                    height=60, width=max(600, len(gene_values) * 12 + 200),
-                    margin=dict(l=0, r=0, t=5, b=0)
+                fig_ga = annotation_strip_figure(
+                    gene_values, title=gcol, color_map=g_color_map,
+                    orientation='horizontal',
                 )
-                save_plotly_json(fig_ga, plots_dir, f'bulk_heatmap_gene_annot_{gcol}.json',
-                                result_files, category='annotation', label=f'{gcol} 基因注释条')
+                result_files.extend(self.save_matplotlib_figure(
+                    fig_ga, plots_dir,
+                    f'bulk_heatmap_gene_annot_{gcol}.png',
+                    'annotation', f'{gcol} 基因注释条', formats=('png', 'svg'), dpi=300,
+                ))
 
         self.progress(85, "生成样本相关性热图...")
         corr_method = self.params.get('corr_method', 'pearson')
@@ -419,35 +506,35 @@ class BulkHeatmapAnalysis(BaseAnalysis):
         else:
             corr_matrix = np.corrcoef(norm_data)
 
-        # 颜色范围：Blues 用 [0,1]，diverging 色图不设限
-        corr_zmin = 0 if corr_colorscale == 'Blues' else None
-        corr_zmax = 1 if corr_colorscale == 'Blues' else None
-        corr_zmid = 0 if corr_colorscale != 'Blues' else None
-
-        corr_kwargs = dict(
-            z=corr_matrix.tolist(),
-            x=sample_labels, y=sample_labels,
-            colorscale=corr_colorscale,
-            colorbar=dict(title=f'{corr_method.capitalize()} r'),
-            hovertemplate='%{y} vs %{x}<br>r = %{z:.3f}<extra></extra>'
+        corr_group_labels = (
+            adata.obs[groupby].astype(str).tolist()
+            if groupby and groupby in adata.obs.columns else None
         )
-        if corr_zmin is not None:
-            corr_kwargs['zmin'] = corr_zmin
-        if corr_zmax is not None:
-            corr_kwargs['zmax'] = corr_zmax
-        if corr_zmid is not None:
-            corr_kwargs['zmid'] = corr_zmid
-
-        fig_corr = go.Figure()
-        fig_corr.add_trace(go.Heatmap(**corr_kwargs))
-        fig_corr.update_layout(
+        fig_corr, corr_metadata = correlation_heatmap_figure(
+            corr_matrix, all_sample_labels,
             title=f'样本相关性热图 ({corr_method.capitalize()})',
-            height=max(400, adata.n_obs * 30 + 100),
-            width=max(400, adata.n_obs * 30 + 100),
-            plot_bgcolor='white'
+            method=corr_method.capitalize(), group_labels=corr_group_labels,
+            colorscale=corr_colorscale, cluster=True, mask_diagonal=True,
         )
-        save_plotly_json(fig_corr, plots_dir, 'bulk_corr_heatmap.json', result_files,
-                        category='heatmap', label='样本相关性热图')
+        result_files.extend(self.save_matplotlib_figure(
+            fig_corr, plots_dir, 'bulk_corr_heatmap.png', 'heatmap',
+            '样本相关性热图', formats=('png', 'svg'), dpi=300,
+        ))
+        results_dir = os.path.join(self.project_dir, 'results')
+        os.makedirs(results_dir, exist_ok=True)
+        corr_pairs = correlation_pairwise_table(
+            corr_matrix, sample_labels, corr_group_labels, method=corr_method)
+        corr_pairs_csv = os.path.join(results_dir, 'bulk_correlation_pairs.csv')
+        corr_pairs.to_csv(corr_pairs_csv, index=False)
+        corr_summary = summarize_correlation_pairs(corr_pairs, method=corr_method)
+        corr_summary_csv = os.path.join(results_dir, 'bulk_correlation_summary.csv')
+        corr_summary.to_csv(corr_summary_csv, index=False)
+        result_files.extend([
+            {'file_path': corr_pairs_csv, 'file_type': 'csv', 'category': 'table',
+             'label': f'样本两两 {corr_method.capitalize()} 相关性'},
+            {'file_path': corr_summary_csv, 'file_type': 'csv', 'category': 'table',
+             'label': '样本相关性组内/组间摘要'},
+        ])
 
         self.progress(95, "保存结果...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')
@@ -462,7 +549,13 @@ class BulkHeatmapAnalysis(BaseAnalysis):
             'summary': {
                 'heatmap_type': hm_type,
                 'n_genes_shown': len(top_idx),
-                'n_samples': adata.n_obs,
+                'n_samples': len(sample_labels),
+                'n_samples_total': adata.n_obs,
+                'sample_display': display_contract,
                 'groupby': groupby or '无',
+                'correlation_off_diagonal': corr_metadata['off_diagonal'],
+                'correlation_display_range': [
+                    corr_metadata['display_vmin'], corr_metadata['display_vmax'],
+                ],
             }
         }

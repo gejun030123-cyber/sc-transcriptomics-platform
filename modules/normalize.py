@@ -9,8 +9,8 @@ class NormalizeAnalysis(BaseAnalysis):
     def run(self, input_path):
         import scanpy as sc
         import omicverse as ov
-        import json
         import numpy as np
+        from modules.native_figures import histogram_figure
 
         self.progress(5, "Loading data...")
         adata = self.load_adata(input_path)
@@ -44,19 +44,24 @@ class NormalizeAnalysis(BaseAnalysis):
         plots_dir = self.ensure_plots_dir()
         result_files = []
 
-        # Library size distribution before/after
-        import plotly.graph_objects as go
-        fig = go.Figure()
+        # Library size distribution before/after (static display figure)
+        series = []
+        labels = []
         if 'counts' in adata.layers:
             counts_lib = np.array(adata.layers["counts"].sum(axis=1)).flatten()
-            fig.add_trace(go.Histogram(x=counts_lib, name='Before', opacity=0.6, nbinsx=50))
+            series.append(counts_lib)
+            labels.append('Before')
         norm_lib = np.array(adata.X.sum(axis=1)).flatten() if hasattr(adata.X, 'sum') else None
         if norm_lib is not None:
-            fig.add_trace(go.Histogram(x=norm_lib, name='After', opacity=0.6, nbinsx=50))
-        fig.update_layout(title='Library Size Distribution', xaxis_title='Total Counts',
-                         yaxis_title='Frequency', barmode='overlay',
-                         plot_bgcolor='white', width=600, height=400)
-        result_files.append(self.save_plotly_json(fig, plots_dir, 'normalize_libsize.json', 'histogram', 'Library Size Distribution'))
+            series.append(norm_lib)
+            labels.append('After')
+        fig = histogram_figure(series, labels=labels, bins=50,
+                               title='Library Size Distribution',
+                               x_label='Total Counts')
+        result_files.extend(self.save_matplotlib_figure(
+            fig, plots_dir, 'normalize_libsize.png', 'histogram',
+            'Library Size Distribution', formats=('png', 'svg'), dpi=300,
+        ))
 
         # Expression value distribution after normalization
         if self.params.get('show_expression_distribution', True):
@@ -71,36 +76,26 @@ class NormalizeAnalysis(BaseAnalysis):
                     vals = vals[rng.choice(vals.size, max_values, replace=False)]
                 return vals
 
-            fig_expr = go.Figure()
+            expr_series = []
+            expr_labels = []
             if 'counts' in adata.layers:
                 raw_vals = _sample_values(adata.layers['counts'])
                 if raw_vals.size:
-                    fig_expr.add_trace(go.Histogram(
-                        x=np.log1p(raw_vals),
-                        name='log1p(raw counts)',
-                        opacity=0.55,
-                        nbinsx=80,
-                    ))
+                    expr_series.append(np.log1p(raw_vals))
+                    expr_labels.append('log1p(raw counts)')
             norm_vals = _sample_values(adata.X)
             if norm_vals.size:
-                fig_expr.add_trace(go.Histogram(
-                    x=norm_vals,
-                    name='normalized X',
-                    opacity=0.55,
-                    nbinsx=80,
-                ))
-            fig_expr.update_layout(
+                expr_series.append(norm_vals)
+                expr_labels.append('normalized X')
+            fig_expr = histogram_figure(
+                expr_series, labels=expr_labels, bins=80,
                 title='Expression Value Distribution',
-                xaxis_title='Expression value',
-                yaxis_title='Frequency',
-                barmode='overlay',
-                plot_bgcolor='white',
-                width=700,
-                height=420,
+                x_label='Expression value',
             )
-            result_files.append(self.save_plotly_json(
-                fig_expr, plots_dir, 'normalize_expression_distribution.json',
-                'histogram', 'Expression Value Distribution'
+            result_files.extend(self.save_matplotlib_figure(
+                fig_expr, plots_dir, 'normalize_expression_distribution.png',
+                'histogram', 'Expression Value Distribution',
+                formats=('png', 'svg'), dpi=300,
             ))
 
         self.progress(90, "Saving output...")

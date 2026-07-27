@@ -2,13 +2,36 @@
 """pytest 共享 fixtures — 自动设置项目根目录到 sys.path 和环境变量"""
 import os
 import sys
+import tempfile
+
+# Test temporary files and compilation caches must not consume the root
+# filesystem.  Tests intentionally override the application setting so a
+# developer's production RUNTIME_TMP_DIR is never mixed with test artifacts.
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_test_tmp_root = os.path.abspath(os.environ.get(
+    'PYTEST_RUNTIME_TMP_DIR',
+    os.path.join(_project_root, 'data', 'runtime_tmp', 'pytest'),
+))
+_test_numba_cache = os.path.abspath(os.environ.get(
+    'PYTEST_NUMBA_CACHE_DIR', os.path.join(_test_tmp_root, 'numba_cache'),
+))
+_test_mpl_cache = os.path.abspath(os.environ.get(
+    'PYTEST_MPLCONFIGDIR', os.path.join(_test_tmp_root, 'mplconfig'),
+))
+for _directory in (_test_tmp_root, _test_numba_cache, _test_mpl_cache):
+    os.makedirs(_directory, exist_ok=True)
+
+os.environ['RUNTIME_TMP_DIR'] = _test_tmp_root
+for _variable in ('TMPDIR', 'TMP', 'TEMP'):
+    os.environ[_variable] = _test_tmp_root
+tempfile.tempdir = _test_tmp_root
 
 # 环境变量：确保裸环境测试可复现
 os.environ.setdefault('NUMBA_DISABLE_JIT', '1')
-os.environ.setdefault('NUMBA_CACHE_DIR', '/tmp/numba_cache_test')
+os.environ['NUMBA_CACHE_DIR'] = _test_numba_cache
+os.environ['MPLCONFIGDIR'] = _test_mpl_cache
 
 # 将项目根目录加入 sys.path
-_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 

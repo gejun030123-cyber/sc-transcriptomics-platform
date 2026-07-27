@@ -10,9 +10,10 @@ class DimredAnalysis(BaseAnalysis):
         import os
         import scanpy as sc
         import omicverse as ov
-        from modules.visualization import umap_scatter
-        import json
         import numpy as np
+        import matplotlib.pyplot as plt
+        from modules.native_figures import scatter_figure, bar_figure, line_figure
+        from modules.figure_style import NATURE_PALETTE, nature_continuous_cmap, NATURE_TEXT
 
         self.progress(5, "Loading data...")
         adata = self.load_adata(input_path)
@@ -96,10 +97,6 @@ class DimredAnalysis(BaseAnalysis):
 
         for color_key in ['batch', 'leiden', 'n_genes_by_counts']:
             if color_key in adata.obs.columns:
-                fig_json = json.dumps(umap_scatter(adata, color_key, title=f'UMAP colored by {color_key}'))
-                fpath = os.path.join(plots_dir, f'dimred_umap_{color_key}.json')
-                with open(fpath, 'w') as f: f.write(fig_json)
-                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'UMAP by {color_key}'})
                 try:
                     fig_static = self.build_publication_umap(
                         adata, color_key, title=f'UMAP colored by {color_key}'
@@ -111,91 +108,94 @@ class DimredAnalysis(BaseAnalysis):
                     import matplotlib.pyplot as plt
                     plt.close(fig_static)
                 except Exception as exc:
-                    self.progress(-1, f'静态 UMAP 导出失败（不影响交互图）：{exc}')
+                    self.progress(-1, f'UMAP 静态导出失败：{exc}')
 
         # PCA scatter for early detection of outliers and batch/sample structure
         if self.params.get('show_pca_scatter', True) and 'X_pca' in adata.obsm:
-            import plotly.graph_objects as go
             pca = adata.obsm['X_pca']
             color_key = next((k for k in ['batch', 'phase', 'n_genes_by_counts', 'total_counts'] if k in adata.obs.columns), None)
-            fig_pca = go.Figure()
+            color_values = None
             if color_key:
                 values = adata.obs[color_key]
                 try:
                     numeric_values = values.astype(float).values
-                    fig_pca.add_trace(go.Scattergl(
-                        x=pca[:, 0],
-                        y=pca[:, 1],
-                        mode='markers',
-                        marker=dict(
-                            size=4,
-                            color=numeric_values,
-                            colorscale='Viridis',
-                            opacity=0.75,
-                            colorbar=dict(title=color_key),
-                        ),
-                        text=adata.obs_names.tolist(),
-                        hovertemplate='%{text}<br>' + color_key + ': %{marker.color:.3f}<extra></extra>',
-                    ))
+                    color_values = numeric_values
                 except (TypeError, ValueError):
                     labels = values.astype(str)
-                    for cat in sorted(labels.unique(), key=lambda x: (len(x), x)):
-                        mask = labels == cat
-                        fig_pca.add_trace(go.Scattergl(
-                            x=pca[mask.values, 0],
-                            y=pca[mask.values, 1],
-                            mode='markers',
-                            marker=dict(size=4, opacity=0.7),
-                            name=str(cat),
-                            text=adata.obs_names[mask.values].tolist(),
-                            hovertemplate='%{text}<br>' + color_key + ': ' + str(cat) + '<extra></extra>',
-                        ))
+                    categories = sorted(labels.unique(), key=lambda x: (len(x), x))
+                    color_values = np.asarray([
+                        NATURE_PALETTE[categories.index(value) % len(NATURE_PALETTE)]
+                        for value in labels
+                    ], dtype=object)
             else:
-                fig_pca.add_trace(go.Scattergl(
-                    x=pca[:, 0],
-                    y=pca[:, 1],
-                    mode='markers',
-                    marker=dict(size=4, color='#3949ab', opacity=0.7),
-                    text=adata.obs_names.tolist(),
-                    hovertemplate='%{text}<extra></extra>',
-                ))
-            fig_pca.update_layout(
-                title='PCA Scatter',
-                xaxis_title='PC1',
-                yaxis_title='PC2',
-                plot_bgcolor='white',
-                width=700,
-                height=520,
+                color_values = NATURE_PALETTE[0]
+            fig_pca = scatter_figure(
+                pca[:, 0], pca[:, 1], title='PCA Scatter', x_label='PC1', y_label='PC2',
+                colors=color_values, size=10, alpha=0.75,
             )
-            result_files.append(self.save_plotly_json(
-                fig_pca, plots_dir, 'dimred_pca_scatter.json',
-                'pca', 'PCA Scatter'
+            if color_key and np.issubdtype(np.asarray(color_values).dtype, np.number):
+                artist = fig_pca.axes[0].collections[0]
+                artist.set_cmap(nature_continuous_cmap())
+                fig_pca.colorbar(artist, ax=fig_pca.axes[0], fraction=0.035,
+                                 pad=0.025, label=color_key)
+            elif color_key and isinstance(color_values, np.ndarray) and color_values.dtype == object:
+                for i, cat in enumerate(sorted(adata.obs[color_key].astype(str).unique(),
+                                               key=lambda x: (len(x), x))):
+                    fig_pca.axes[0].scatter([], [], color=NATURE_PALETTE[i % len(NATURE_PALETTE)], label=cat)
+                fig_pca.axes[0].legend(frameon=False, fontsize=8)
+            result_files.extend(self.save_matplotlib_figure(
+                fig_pca, plots_dir, 'dimred_pca_scatter.png', 'pca',
+                'PCA Scatter', formats=('png', 'svg'), dpi=300,
             ))
 
         # t-SNE plot
         if enable_tsne and 'X_tsne' in adata.obsm:
             for color_key in ['batch', 'leiden']:
                 if color_key in adata.obs.columns:
-                    import plotly.graph_objects as go
                     tsne = adata.obsm['X_tsne']
                     color_vals = adata.obs[color_key].astype(str).values if color_key in adata.obs.columns else None
-                    fig = go.Figure()
-                    fig.add_trace(go.Scattergl(x=tsne[:, 0], y=tsne[:, 1], mode='markers',
-                                               marker=dict(size=3, opacity=0.6), text=color_vals))
-                    fig.update_layout(title=f't-SNE by {color_key}', xaxis_title='tSNE1', yaxis_title='tSNE2',
-                                     plot_bgcolor='white', width=600, height=500)
-                    result_files.append(self.save_plotly_json(fig, plots_dir, f'dimred_tsne_{color_key}.json', 'tsne', f't-SNE by {color_key}'))
+                    categories = sorted(set(color_vals))
+                    colors = np.asarray([
+                        NATURE_PALETTE[categories.index(value) % len(NATURE_PALETTE)]
+                        for value in color_vals
+                    ], dtype=object)
+                    fig = scatter_figure(
+                        tsne[:, 0], tsne[:, 1], title=f't-SNE by {color_key}',
+                        x_label='tSNE1', y_label='tSNE2', colors=colors,
+                        size=9, alpha=0.68,
+                    )
+                    for i, category in enumerate(categories):
+                        fig.axes[0].scatter([], [], color=NATURE_PALETTE[i % len(NATURE_PALETTE)], label=category)
+                    fig.axes[0].legend(frameon=False, fontsize=8)
+                    result_files.extend(self.save_matplotlib_figure(
+                        fig, plots_dir, f'dimred_tsne_{color_key}.png', 'tsne',
+                        f't-SNE by {color_key}', formats=('png', 'svg'), dpi=300,
+                    ))
 
         # Variance ratio plot
         if 'pca' in adata.uns:
-            import plotly.graph_objects as go
             vr = adata.uns['pca']['variance_ratio'][:min(50, n_comps)]
-            fig = go.Figure()
-            fig.add_trace(go.Bar(y=vr, name='Individual'))
-            fig.add_trace(go.Scatter(y=np.cumsum(vr), mode='lines', name='Cumulative'))
-            fig.update_layout(title='PCA Variance Ratio', xaxis_title='PC', yaxis_title='Variance Ratio',
-                             plot_bgcolor='white', width=600, height=400)
-            result_files.append(self.save_plotly_json(fig, plots_dir, 'dimred_pca_variance.json', 'pca', 'PCA Variance Ratio'))
+            fig, axes = plt.subplots(figsize=(7.5, 5.0), dpi=150)
+            x_pc = np.arange(len(vr))
+            axes.bar(x_pc, vr, color=NATURE_PALETTE[0], alpha=0.88, label='Individual')
+            ax2 = axes.twinx()
+            ax2.plot(x_pc, np.cumsum(vr), color=NATURE_PALETTE[3], linewidth=1.8,
+                     marker='o', markersize=3.5, label='Cumulative')
+            tick_step = max(1, int(np.ceil(len(vr) / 10)))
+            tick_idx = x_pc[::tick_step]
+            axes.set_xticks(tick_idx, [f'PC{i + 1}' for i in tick_idx], rotation=45)
+            axes.set_xlabel('PC', fontsize=9)
+            axes.set_ylabel('Variance Ratio', fontsize=9)
+            ax2.set_ylabel('Cumulative', fontsize=9)
+            axes.set_title('PCA Variance Ratio', loc='left', fontsize=10,
+                           fontweight='semibold', color=NATURE_TEXT)
+            handles, labels = axes.get_legend_handles_labels()
+            h2, l2 = ax2.get_legend_handles_labels()
+            axes.legend(handles + h2, labels + l2, frameon=False, fontsize=8)
+            result_files.extend(self.save_matplotlib_figure(
+                fig, plots_dir, 'dimred_pca_variance.png', 'pca',
+                'PCA Variance Ratio', formats=('png', 'svg'), dpi=300,
+            ))
 
         self.progress(90, "Saving output...")
         output_path = self.save_output(adata, 'dimred')

@@ -30,7 +30,7 @@ class TestExecuteToolRegistry:
         from modules.ai_tools import execute_tool
 
         confirm_tools = [
-            'run_analysis', 'propose_parameter_sweep', 'run_parameter_sweep',
+            'run_analysis', 'run_pipeline', 'propose_parameter_sweep', 'run_parameter_sweep',
             'start_goal_agent', 'continue_goal_agent',
         ]
 
@@ -106,6 +106,9 @@ class TestAIToolsCoverage:
         result = _list_builtin_markers()
         assert 'cell_types' in result
         assert 'microglia' in result['cell_types']
+        assert 'organoid_panels' in result
+        assert 'kidney' in result['organoid_panels']
+        assert 'NPHS2' in result['organoid_panels']['kidney']['cell_types']['Podocytes']
 
     def test_validate_analysis_params_removes_unknown(self):
         """测试参数校验移除未知键."""
@@ -131,6 +134,36 @@ class TestAIToolsCoverage:
                     return
 
         pytest.skip("没有找到带 number 类型参数的模块")
+
+    def test_run_pipeline_submits_single_sequential_job(self, test_project, monkeypatch):
+        from pathlib import Path
+        from config import Config
+        from models import PipelineRun
+        from modules.ai_tools import execute_tool
+
+        input_path = Path(Config.uploads_dir(test_project)) / 'input.h5ad'
+        input_path.write_bytes(b'placeholder')
+        submitted = {}
+
+        def fake_submit_pipeline_run(**kwargs):
+            submitted.update(kwargs)
+            return True
+
+        monkeypatch.setattr('worker.submit_pipeline_run', fake_submit_pipeline_run)
+        result = execute_tool('run_pipeline', {
+            'analysis_type': 'sc',
+            'modules': ['qc', 'normalize', 'hvg'],
+            'input_path': str(input_path),
+            'params': {'hvg': {'n_top_genes': '3000'}},
+        }, test_project)
+
+        assert result['status'] == 'submitted'
+        assert result['pipeline_url'].endswith('/pipeline-runs/' + result['pipeline_run_id'])
+        assert submitted['modules'] == ['qc', 'normalize', 'hvg']
+        assert submitted['input_path'] == str(input_path)
+        run = PipelineRun.get_by_id(result['pipeline_run_id'])
+        assert run is not None
+        assert json.loads(run.modules_json) == ['qc', 'normalize', 'hvg']
 
 
 class TestBulkUploadDiscovery:
@@ -301,6 +334,29 @@ class TestAnalysisConfigRecommendation:
         assert '方法与数据不兼容' in result['error']
         assert AnalysisTask.get_by_project(test_project) == []
 
+    def test_run_analysis_blocks_singleton_bulk_group_before_task_creation(self, test_project):
+        import anndata as ad
+        import numpy as np
+        import pandas as pd
+        from config import Config
+        from models import AnalysisTask
+        from modules.ai_tools import _run_analysis
+
+        path = os.path.join(Config.uploads_dir(test_project), 'singleton.h5ad')
+        ad.AnnData(
+            X=np.asarray([[1, 2], [2, 3], [5, 6]], dtype=float),
+            obs=pd.DataFrame({'condition': ['Ctrl', 'Ctrl', 'Treat']}, index=['s1', 's2', 's3']),
+            var=pd.DataFrame(index=['G1', 'G2']),
+        ).write_h5ad(path)
+        result = _run_analysis({
+            'module_name': 'bulk_deg',
+            'input_path': path,
+            'params': {'groupby': 'condition', 'method': 't-test'},
+        }, test_project)
+
+        assert '分析前检查未通过' in result['error']
+        assert AnalysisTask.get_by_project(test_project) == []
+
     def test_auto_group_mapping_for_ai_uses_combined_groups(self, test_project):
         from pathlib import Path
         from config import Config
@@ -313,6 +369,73 @@ class TestAnalysisConfigRecommendation:
         assert mapping['Ctr_B_1'] == 'Ctr_B'
         assert mapping['Ctr_En_1'] == 'Ctr_En'
         assert mapping['PEA_B_1'] == 'PEA_B'
+
+    def test_sc_timecourse_recommendation_uses_safe_metadata_candidates(self, test_project):
+        """AI profiling must exercise the NumPy/Pandas path and avoid batch IDs."""
+        anndata = pytest.importorskip('anndata')
+        import numpy as np
+        import pandas as pd
+        from pathlib import Path
+        from config import Config
+        from modules.ai_tools import _recommend_analysis_config
+
+        rows = []
+        for timepoint in ('D0', 'D3', 'D7'):
+            for replicate in (1, 2):
+                for celltype in ('A', 'B'):
+                    rows.append({
+                        'timepoint': timepoint,
+                        'sample_id': f'{timepoint}_R{replicate}',
+                        'celltype': celltype,
+                        'batch': f'technical_{replicate}',
+                    })
+        counts = np.arange(1, len(rows) * 4 + 1, dtype=float).reshape(len(rows), 4)
+        adata = anndata.AnnData(
+            counts,
+            obs=pd.DataFrame(rows),
+            var=pd.DataFrame(index=['G1', 'G2', 'G3', 'G4']),
+        )
+        adata.layers['counts'] = counts.copy()
+        path = Path(Config.uploads_dir(test_project)) / 'temporal.h5ad'
+        adata.write_h5ad(path)
+
+        result = _recommend_analysis_config({
+            'module_name': 'sc_timecourse', 'input_path': str(path),
+        }, test_project)
+
+        assert 'error' not in result
+        assert result['should_run'] is True
+        assert result['recommended_params']['timepoint_key'] == 'timepoint'
+        assert result['recommended_params']['sample_key'] == 'sample_id'
+        assert result['data_profile']['counts_layer_is_raw'] is True
+        assert 'batch' not in result['data_profile']['sample_candidates']
+        assert 'batch' not in result['data_profile']['time_candidates']
+
+    def test_organoid_annotation_recommends_matching_marker_panel(self, test_project):
+        """自然语言中的类器官类型应映射到对应的 annotation 参数。"""
+        anndata = pytest.importorskip('anndata')
+        import numpy as np
+        import pandas as pd
+        from pathlib import Path
+        from config import Config
+        from modules.ai_tools import _recommend_analysis_config
+
+        adata = anndata.AnnData(
+            np.ones((6, 4), dtype=float),
+            obs=pd.DataFrame({'leiden': ['0', '0', '1', '1', '1', '0']}),
+            var=pd.DataFrame(index=['NPHS1', 'NPHS2', 'PODXL', 'WT1']),
+        )
+        path = Path(Config.uploads_dir(test_project)) / 'kidney_organoid.h5ad'
+        adata.write_h5ad(path)
+
+        result = _recommend_analysis_config({
+            'module_name': 'annotation', 'input_path': str(path),
+            'objective': '肾类器官细胞注释',
+        }, test_project)
+
+        assert result['recommended_params']['marker_set'] == 'Organoid'
+        assert result['recommended_params']['organoid_type'] == 'kidney'
+        assert result['recommended_params']['method'] == 'multi_evidence'
 
     def test_recommendation_tool_is_read_only_and_sweep_proposal_requires_confirmation(self):
         from modules.ai_adapter import AUTO_EXEC_TOOLS, CONFIRM_TOOLS, TOOLS_ANTHROPIC

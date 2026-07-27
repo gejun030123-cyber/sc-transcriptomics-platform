@@ -20,13 +20,14 @@ MODULES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 # ────────────────────────────────────────────
 
 class TestOutputRegistration:
-    """扫描模块源码，检查 .to_csv() / .write_json() 是否有对应的 result_files.append。"""
+    """扫描模块源码，检查写出的文件是否被结果清单或调用方注册。"""
 
     def _get_module_files(self):
         """获取所有分析模块文件（排除工具模块）。"""
         skip = {'__init__.py', 'base.py', 'schemas.py', 'io_utils.py',
                 'visualization.py', 'inspect_utils.py', 'expression_parser.py',
-                'constants.py', 'ai_adapter.py', 'ai_tools.py'}
+                'constants.py', 'figure_style.py', 'native_figures.py',
+                'ai_adapter.py', 'ai_tools.py'}
         files = []
         for f in os.listdir(MODULES_DIR):
             if f.endswith('.py') and f not in skip:
@@ -34,7 +35,12 @@ class TestOutputRegistration:
         return files
 
     def _find_orphan_writes(self, filepath):
-        """在源码中查找没有 result_files.append 的 .to_csv() 调用。"""
+        """查找没有被结果清单注册的 .to_csv() 调用。
+
+        模块内部有时使用 ``output_files`` 作为辅助函数的返回值，随后由
+        ``run()`` 合并到 ``result_files``；维护已经写入数据库的旧文件时，
+        则不应被误判为新建了一个孤立输出。
+        """
         with open(filepath, 'r', encoding='utf-8') as f:
             source = f.read()
         lines = source.splitlines(keepends=True)
@@ -62,8 +68,20 @@ class TestOutputRegistration:
                         break
                 func_body = ''.join(lines[func_start:func_end])
 
-                # 检查函数体内是否有 result_files.append/extend
-                if 'result_files.append' not in func_body and 'result_files.extend' not in func_body:
+                registration_tokens = (
+                    'result_files.append', 'result_files.extend',
+                    'output_files.append', 'output_files.extend',
+                )
+                # 这是对已有 ResultFile 记录补写元数据，不是创建未注册的文件。
+                existing_registered_table = (
+                    'ResultFile.get_by_task' in func_body
+                    and 'result_file.file_type' in func_body
+                )
+                if existing_registered_table:
+                    continue
+
+                # 检查函数体内是否有结果清单追加/扩展
+                if not any(token in func_body for token in registration_tokens):
                     # 检查是否通过中间变量注册（如 lrt_files）
                     # 查找 .to_csv 的目标变量
                     csv_target = stripped.split('.to_csv')[0].strip()
@@ -71,7 +89,7 @@ class TestOutputRegistration:
                         # 检查该变量是否被 append/extend 到 result_files
                         var_registered = False
                         for body_line in func_body.splitlines():
-                            if ('result_files.append' in body_line or 'result_files.extend' in body_line) and csv_target in body_line:
+                            if any(token in body_line for token in registration_tokens) and csv_target in body_line:
                                 var_registered = True
                                 break
                         if not var_registered:
@@ -97,7 +115,7 @@ class TestOutputRegistration:
                 all_orphans.append(f"  {fname}:{line_no} — {code}")
 
         if all_orphans:
-            msg = "以下 .to_csv() 调用没有注册到 result_files（用户看不到这些文件）：\n"
+            msg = "以下 .to_csv() 调用没有注册到结果清单（用户看不到这些文件）：\n"
             msg += '\n'.join(all_orphans)
             pytest.fail(msg)
 
@@ -154,34 +172,33 @@ class TestSummaryConsistency:
         var = pd.DataFrame(index=[f'Gene{i}' for i in range(n_genes)])
         adata = sc.AnnData(X=X, obs=obs, var=var)
 
-        tmpdir = tempfile.mkdtemp()
-        plots_dir = os.path.join(tmpdir, 'plots')
-        results_dir = os.path.join(tmpdir, 'results')
-        os.makedirs(plots_dir)
-        os.makedirs(results_dir)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plots_dir = os.path.join(tmpdir, 'plots')
+            results_dir = os.path.join(tmpdir, 'results')
+            os.makedirs(plots_dir)
+            os.makedirs(results_dir)
 
-        deg_df, result_files, n_up, n_down = _run_single_comparison(
-            adata, adata.X.astype(float),
-            list(adata.obs.index[:n_samples_per_group]),
-            list(adata.obs.index[n_samples_per_group:]),
-            'A', 'B', 't-test', 1.5, 0.05, 10, {},
-            plots_dir, results_dir, base_mean_filter=base_mean_filter
-        )
+            deg_df, result_files, n_up, n_down = _run_single_comparison(
+                adata, adata.X.astype(float),
+                list(adata.obs.index[:n_samples_per_group]),
+                list(adata.obs.index[n_samples_per_group:]),
+                'A', 'B', 't-test', 1.5, 0.05, 10, {},
+                plots_dir, results_dir, base_mean_filter=base_mean_filter
+            )
 
-        # 在返回前读取 CSV 内容（避免临时目录被清理）
-        csv_contents = {}
-        for rf in result_files:
-            if rf['file_type'] == 'csv' and os.path.exists(rf['file_path']):
-                csv_contents[rf['file_path']] = pd.read_csv(rf['file_path'])
+            # 在返回前读取 CSV 内容，随后自动清理临时目录。
+            csv_contents = {}
+            for rf in result_files:
+                if rf['file_type'] == 'csv' and os.path.exists(rf['file_path']):
+                    csv_contents[rf['file_path']] = pd.read_csv(rf['file_path'])
 
-        return {
-            'n_genes_total': len(deg_df),
-            'n_up': n_up,
-            'n_down': n_down,
-            'deg_df': deg_df,
-            'result_files': result_files,
-            'csv_contents': csv_contents,
-        }
+            return {
+                'n_genes_total': len(deg_df),
+                'n_up': n_up,
+                'n_down': n_down,
+                'deg_df': deg_df,
+                'csv_contents': csv_contents,
+            }
 
     def test_n_up_n_down_consistent_with_total(self):
         """n_up + n_down 不应超过 n_genes_total。"""
@@ -315,24 +332,11 @@ class TestCrossOutputConsistency:
             assert len(csv_files) >= 1
             csv_rows = len(pd.read_csv(csv_files[0]['file_path']))
 
-            # 读取火山图 trace 总点数
+            # 火山图已统一为原生 Matplotlib 静态输出；验证 PNG/SVG 成对存在。
             vol_files = [rf for rf in result_files if rf.get('category') == 'volcano']
             assert len(vol_files) >= 1
-            with open(vol_files[0]['file_path']) as f:
-                vol_data = json.load(f)
-
-            total_points = 0
-            for trace in vol_data['data']:
-                x_data = trace.get('x', {})
-                if isinstance(x_data, dict) and 'bdata' in x_data:
-                    fmt = {'f4': 'f', 'f8': 'd'}.get(x_data.get('dtype', 'f8'), 'd')
-                    decoded = base64.b64decode(x_data['bdata'])
-                    total_points += len(decoded) // struct.calcsize(fmt)
-                elif isinstance(x_data, list):
-                    total_points += len(x_data)
-
-        assert total_points == csv_rows, \
-            f"火山图点数({total_points}) != CSV 行数({csv_rows})，数据源不一致"
+            assert {rf['file_type'] for rf in vol_files} == {'png', 'svg'}
+            assert all(os.path.exists(rf['file_path']) for rf in vol_files)
 
     def test_no_nan_in_plotly_json_output(self):
         """模块生成的 Plotly JSON 不应包含 NaN 字面量。"""
@@ -929,7 +933,7 @@ class TestModuleSummaryValidation:
         return adata
 
     @staticmethod
-    def _make_bulk(n_ctrl=3, n_treat=3, n_genes=30):
+    def _make_bulk(tmp_path, n_ctrl=3, n_treat=3, n_genes=30):
         """构造 Bulk TSV，返回路径。"""
         np.random.seed(42)
         samples = [f'Ctrl_{i}_count' for i in range(n_ctrl)] + \
@@ -938,14 +942,12 @@ class TestModuleSummaryValidation:
         ctrl_data = np.random.poisson(lam=500, size=(n_genes, n_ctrl)).astype(float)
         treat_data = np.random.poisson(lam=800, size=(n_genes, n_treat)).astype(float)
         X = np.hstack([ctrl_data, treat_data])
-        import tempfile
-        tmpdir = tempfile.mkdtemp()
-        path = os.path.join(tmpdir, 'bulk_counts.tsv')
+        path = tmp_path / 'bulk_counts.tsv'
         pd.DataFrame(X, index=genes, columns=samples).to_csv(path, sep='\t')
-        return path
+        return str(path)
 
     @staticmethod
-    def _make_bulk_timecourse(n_timepoints=3, n_replicates=3, n_genes=50):
+    def _make_bulk_timecourse(tmp_path, n_timepoints=3, n_replicates=3, n_genes=50):
         """构造时序 Bulk h5ad（含 obs['time'] 列），返回路径。"""
         import scanpy as _sc
         import anndata
@@ -966,11 +968,9 @@ class TestModuleSummaryValidation:
         obs = pd.DataFrame({'time': time_vals}, index=samples)
         var = pd.DataFrame(index=genes)
         adata = anndata.AnnData(X=X, obs=obs, var=var)
-        import tempfile
-        tmpdir = tempfile.mkdtemp()
-        path = os.path.join(tmpdir, 'bulk_timecourse.h5ad')
+        path = tmp_path / 'bulk_timecourse.h5ad'
         adata.write_h5ad(path)
-        return path
+        return str(path)
 
     @staticmethod
     def _check_json_serializable(d, path=''):
@@ -1099,7 +1099,7 @@ class TestModuleSummaryValidation:
         """BulkQC summary 应 JSON 可序列化且含 n_samples。"""
         from modules.bulk_qc import BulkQCAnalysis
 
-        tsv_path = self._make_bulk(n_genes=30)
+        tsv_path = self._make_bulk(tmp_path, n_genes=30)
 
         mod = BulkQCAnalysis(
             project_dir=str(tmp_path),
@@ -1117,7 +1117,7 @@ class TestModuleSummaryValidation:
         """BulkNormalize CPM summary 应 JSON 可序列化且含 method。"""
         from modules.bulk_normalize import BulkNormalizeAnalysis
 
-        tsv_path = self._make_bulk()
+        tsv_path = self._make_bulk(tmp_path)
 
         mod = BulkNormalizeAnalysis(
             project_dir=str(tmp_path),
@@ -1135,7 +1135,7 @@ class TestModuleSummaryValidation:
         """BulkPCA summary 应 JSON 可序列化且含 n_components。"""
         from modules.bulk_pca import BulkPCAAnalysis
 
-        tsv_path = self._make_bulk()
+        tsv_path = self._make_bulk(tmp_path)
 
         mod = BulkPCAAnalysis(
             project_dir=str(tmp_path),
@@ -1154,7 +1154,7 @@ class TestModuleSummaryValidation:
         from modules.bulk_heatmap import BulkHeatmapAnalysis
         from modules.bulk_deg import BulkDEGAnalysis
 
-        tsv_path = self._make_bulk(n_genes=50)
+        tsv_path = self._make_bulk(tmp_path, n_genes=50)
 
         # 先运行 DEG
         try:
@@ -1184,7 +1184,7 @@ class TestModuleSummaryValidation:
         """BulkTimecourse summary 应 JSON 可序列化。"""
         from modules.bulk_timecourse import BulkTimecourseAnalysis
 
-        tsv_path = self._make_bulk_timecourse()
+        tsv_path = self._make_bulk_timecourse(tmp_path)
 
         mod = BulkTimecourseAnalysis(
             project_dir=str(tmp_path),

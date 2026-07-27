@@ -1,32 +1,32 @@
 import json
 import numpy as np
 
+from modules.figure_style import (
+    NATURE_PALETTE,
+    NATURE_PLOTLY_CONTINUOUS_SCALE,
+)
+
 
 def categorical_color_map(adata, color_key):
-    """Return a stable categorical palette, preferring omicverse defaults."""
+    """Return a stable categorical map using the shared Nature palette."""
     series = adata.obs[color_key]
     if not hasattr(series, 'cat'):
         series = series.astype('category')
     categories = [str(category) for category in series.cat.categories]
-    colors = None
+    colors = [NATURE_PALETTE[index % len(NATURE_PALETTE)]
+              for index in range(len(categories))]
+    # Keep AnnData's category-aligned color metadata synchronized so native
+    # Scanpy/OmicVerse plots and Plotly figures use the same assignment.
     try:
-        import omicverse as ov
-        # Omicverse creates a category-aligned palette in adata.uns.  This
-        # preserves a cluster's color across every plot generated from adata.
-        ov.utils.get_colors(adata, color_key)
-        colors = adata.uns.get(f'{color_key}_colors')
-        if isinstance(colors, dict):
-            return {category: colors.get(category, '#bdbdbd') for category in categories}
+        adata.uns[f'{color_key}_colors'] = list(colors)
     except Exception:
-        colors = None
-    if colors is None:
-        from plotly.colors import qualitative
-        colors = qualitative.Alphabet + qualitative.Dark24 + qualitative.Set3
-    return {category: colors[index % len(colors)] for index, category in enumerate(categories)}
+        pass
+    return dict(zip(categories, colors))
 
 def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title='',
                  viz_params=None):
     import plotly.graph_objects as go
+    import pandas as pd
 
     vp = viz_params or {}
     point_size = vp.get('umap_point_size', 5)
@@ -42,7 +42,11 @@ def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title='
     color_series = None
     if color_key and color_key in adata.obs.columns:
         color_series = adata.obs[color_key].iloc[idx]
-        if not hasattr(color_series.dtype, 'categories'):
+        # Preserve numeric QC metrics as a continuous colorscale.  Casting
+        # every non-category column to ``category`` creates one legend trace
+        # per cell for columns such as n_genes_by_counts.
+        if (not pd.api.types.is_numeric_dtype(color_series)
+                and not hasattr(color_series.dtype, 'categories')):
             color_series = color_series.astype('category')
     fig = go.Figure()
     if color_series is not None and hasattr(color_series, 'cat'):
@@ -60,7 +64,8 @@ def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title='
         fig.add_trace(go.Scattergl(
             x=coords[:, 0], y=coords[:, 1],
             mode='markers',
-            marker=dict(size=point_size, opacity=opacity, color=np.asarray(color_series), colorscale='Viridis',
+            marker=dict(size=point_size, opacity=opacity, color=np.asarray(color_series),
+                       colorscale=NATURE_PLOTLY_CONTINUOUS_SCALE,
                        colorbar=dict(title=color_key)),
         ))
     else:
@@ -80,6 +85,14 @@ def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title='
 def violin_plot(adata, keys, groupby=None, title=''):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
+    from modules.io_utils import obs_grouping_info
+    if groupby and groupby in adata.obs.columns:
+        grouping = obs_grouping_info(
+            adata, groupby, max_categories=50,
+            max_numeric_categories=20, require_multiple=False,
+        )
+        if not grouping['valid']:
+            groupby = None
     n = len(keys)
     fig = make_subplots(rows=1, cols=n, subplot_titles=keys)
     for i, key in enumerate(keys, 1):
@@ -109,7 +122,7 @@ def scatter_plot(x, y, color=None, xlabel='', ylabel='', title='', hover_text=No
     marker = dict(size=3, opacity=0.6)
     if color is not None:
         marker['color'] = color
-        marker['colorscale'] = 'Viridis'
+        marker['colorscale'] = NATURE_PLOTLY_CONTINUOUS_SCALE
     fig.add_trace(go.Scattergl(x=x, y=y, mode='markers', marker=marker, text=hover_text))
     fig.update_layout(title=title, xaxis_title=xlabel, yaxis_title=ylabel,
                      plot_bgcolor='white', width=700, height=500)
@@ -200,8 +213,7 @@ def cluster_heatmap(data, method='ward', metric='euclidean'):
     return dendro['leaves']
 
 
-DEFAULT_PALETTE = ['#1a237e', '#e53935', '#4caf50', '#ff9800', '#9c27b0',
-                   '#00bcd4', '#795548', '#607d8b', '#f44336', '#3f51b5']
+DEFAULT_PALETTE = list(NATURE_PALETTE)
 
 
 def build_annotation_bar(obs, columns, sample_order=None, palette=None):
@@ -239,7 +251,9 @@ def save_plotly_json(fig, plots_dir, filename, result_files,
                      file_type='plotly_json', category='heatmap', label=''):
     """保存 Plotly 图表为 JSON 并追加到 result_files 列表。"""
     import os
+    from modules.figure_style import style_plotly_figure
     fpath = os.path.join(plots_dir, filename)
+    style_plotly_figure(fig)
     with open(fpath, 'w') as f:
         f.write(fig.to_json(engine="json"))
     result_files.append({

@@ -95,20 +95,32 @@ class BulkTimecourseAnalysis(BaseAnalysis):
         return F_stats, pvalues
 
     def run(self, input_path):
-        import plotly.graph_objects as go
-        import plotly.express as px
+        import matplotlib.pyplot as plt
         from statsmodels.stats.multitest import multipletests
+        from modules.native_figures import heatmap_figure, line_figure
+        from modules.figure_style import NATURE_PALETTE, NATURE_TEXT, NATURE_GRID
 
         self.progress(5, "加载数据...")
         from modules.io_utils import read_expression_matrix
         adata = read_expression_matrix(input_path)
         from modules.io_utils import infer_expression_measurement
+        from modules.io_utils import obs_grouping_info
 
         time_column = self.params.get('time_column', 'minute')
-        group_column = self.params.get('group_column', '')
+        requested_group_column = str(self.params.get('group_column', '') or '').strip()
+        group_column = requested_group_column
         spline_df = int(self.params.get('spline_df', 3))
         n_clusters = int(self.params.get('n_clusters', 6))
         fdr_threshold = float(self.params.get('fdr_threshold', 0.05))
+
+        if group_column:
+            grouping = obs_grouping_info(
+                adata, group_column, max_categories=20,
+                max_numeric_categories=20, require_multiple=True,
+            )
+            if not grouping['valid']:
+                self.progress(-1, f"交互分组列已跳过：{grouping['reason']}")
+                group_column = ''
 
         self.progress(15, "解析时间信息...")
         if time_column not in adata.obs.columns:
@@ -217,27 +229,21 @@ class BulkTimecourseAnalysis(BaseAnalysis):
             n_pts = len(sorted_obs)
             theoretical_q = np.array([(i + 0.5) / (n_pts + 1) for i in range(n_pts)])
             theoretical_f = f_dist.ppf(theoretical_q, df1, df2)
-        fig_qq = go.Figure()
-        fig_qq.add_trace(go.Scatter(
-            x=theoretical_f, y=sorted_obs, mode='markers',
-            marker=dict(size=4, color='#1976d2', opacity=0.6),
-            name='Genes'
-        ))
-        max_val = max(float(theoretical_f.max()), float(sorted_obs.max())) * 1.1
-        fig_qq.add_trace(go.Scatter(
-            x=[0, max_val], y=[0, max_val], mode='lines',
-            line=dict(color='red', dash='dash'), name='y = x'
-        ))
-        fig_qq.update_layout(
-            title='Q-Q Plot (F-statistic)',
-            xaxis_title='Theoretical F quantiles',
-            yaxis_title='Observed F statistics',
-            plot_bgcolor='white', width=600, height=500
-        )
-        fpath = os.path.join(plots_dir, 'timecourse_qq.json')
-        with open(fpath, 'w') as f:
-            f.write(fig_qq.to_json(engine="json"))
-        result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'qq', 'label': 'Q-Q 图'})
+            fig_qq, ax_qq = plt.subplots(figsize=(6.8, 5.0), dpi=150)
+            ax_qq.scatter(theoretical_f, sorted_obs, s=12, color=NATURE_PALETTE[0],
+                          alpha=0.68, linewidths=0, rasterized=True)
+            max_val = max(float(theoretical_f.max()), float(sorted_obs.max())) * 1.1
+            ax_qq.plot([0, max_val], [0, max_val], color=NATURE_PALETTE[3],
+                       linestyle='--', linewidth=1.0)
+            ax_qq.set_title('Q-Q Plot (F-statistic)', loc='left', fontsize=10,
+                            fontweight='semibold', color=NATURE_TEXT)
+            ax_qq.set_xlabel('Theoretical F quantiles', fontsize=9)
+            ax_qq.set_ylabel('Observed F statistics', fontsize=9)
+            ax_qq.grid(False)
+            result_files.extend(self.save_matplotlib_figure(
+                fig_qq, plots_dir, 'timecourse_qq.png', 'qq', 'Q-Q 图',
+                formats=('png', 'svg'), dpi=300,
+            ))
 
         # Fuzzy c-means trajectory clustering
         cluster_df = None
@@ -301,29 +307,26 @@ class BulkTimecourseAnalysis(BaseAnalysis):
                 result_files.append({'file_path': tc_csv, 'file_type': 'csv', 'category': 'table', 'label': '轨迹聚类结果'})
 
                 # Cluster centers line chart
-                colors = px.colors.qualitative.Set2 if n_clust <= 8 else px.colors.qualitative.Light24
-                fig_centers = go.Figure()
+                colors = [NATURE_PALETTE[i % len(NATURE_PALETTE)] for i in range(n_clust)]
+                fig_centers, ax_centers = plt.subplots(figsize=(8.0, 5.0), dpi=150)
                 for ci in range(n_clust):
                     mask_c = cluster_labels == ci
                     if mask_c.sum() == 0:
                         continue
                     center = traj_z[mask_c, :].mean(axis=0)
-                    fig_centers.add_trace(go.Scatter(
-                        x=time_unique, y=center, mode='lines+markers',
-                        name=f'C{ci + 1} (n={mask_c.sum()})',
-                        line=dict(color=colors[ci % len(colors)], width=2),
-                        marker=dict(size=7)
-                    ))
-                fig_centers.update_layout(
-                    title='Cluster Centers (z-scored)',
-                    xaxis_title=time_column, yaxis_title='Z-score',
-                    plot_bgcolor='white', width=700, height=500,
-                    legend=dict(font=dict(size=10))
-                )
-                fpath = os.path.join(plots_dir, 'timecourse_cluster_centers.json')
-                with open(fpath, 'w') as f:
-                    f.write(fig_centers.to_json(engine="json"))
-                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'cluster_centers', 'label': '聚类中心轨迹'})
+                    ax_centers.plot(time_unique, center, color=colors[ci], linewidth=1.8,
+                                    marker='o', markersize=3.5,
+                                    label=f'C{ci + 1} (n={mask_c.sum()})')
+                ax_centers.set_title('Cluster Centers (z-scored)', loc='left', fontsize=10,
+                                     fontweight='semibold', color=NATURE_TEXT)
+                ax_centers.set_xlabel(time_column, fontsize=9)
+                ax_centers.set_ylabel('Z-score', fontsize=9)
+                ax_centers.grid(axis='y', color=NATURE_GRID, linewidth=0.5, alpha=0.7)
+                ax_centers.legend(frameon=False, fontsize=8)
+                result_files.extend(self.save_matplotlib_figure(
+                    fig_centers, plots_dir, 'timecourse_cluster_centers.png',
+                    'cluster_centers', '聚类中心轨迹', formats=('png', 'svg'), dpi=300,
+                ))
 
                 # Gene x Time heatmap ordered by cluster
                 order = np.argsort(cluster_labels)
@@ -337,23 +340,19 @@ class BulkTimecourseAnalysis(BaseAnalysis):
                     heatmap_z = heatmap_z[sel, :]
                     y_labels_cluster = [y_labels_cluster[j] for j in sel]
 
-                fig_heat = go.Figure(data=go.Heatmap(
-                    z=heatmap_z,
-                    x=[str(t) for t in time_unique],
-                    y=y_labels_cluster,
-                    colorscale='RdBu_r', zmid=0,
-                    colorbar=dict(title='Z-score')
-                ))
-                fig_heat.update_layout(
+                finite_heat = heatmap_z[np.isfinite(heatmap_z)]
+                max_abs = float(np.nanmax(np.abs(finite_heat))) if finite_heat.size else 1.0
+                fig_heat = heatmap_figure(
+                    heatmap_z, x_labels=[str(t) for t in time_unique],
+                    y_labels=y_labels_cluster,
                     title='Gene x Time Heatmap (ordered by cluster)',
-                    xaxis_title=time_column, yaxis_title='Gene',
-                    width=800, height=max(500, len(y_labels_cluster) * 12 + 100),
-                    yaxis=dict(tickfont=dict(size=7))
+                    x_label=time_column, y_label='Gene', colorbar_label='Z-score',
+                    vmin=-max_abs, vmax=max_abs,
                 )
-                fpath = os.path.join(plots_dir, 'timecourse_heatmap.json')
-                with open(fpath, 'w') as f:
-                    f.write(fig_heat.to_json(engine="json"))
-                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'heatmap', 'label': '基因x时间热图'})
+                result_files.extend(self.save_matplotlib_figure(
+                    fig_heat, plots_dir, 'timecourse_heatmap.png', 'heatmap',
+                    '基因x时间热图', formats=('png', 'svg'), dpi=300,
+                ))
 
         # Pairwise group comparison per timepoint
         pairwise_groups_str = self.params.get('pairwise_groups', '').strip()
@@ -439,54 +438,37 @@ class BulkTimecourseAnalysis(BaseAnalysis):
                     pw_pivot = pw_pivot.reindex(index=gene_subset, columns=time_list, fill_value=1.0)
 
                     neg_log_q = -np.log10(pw_pivot.values + 1e-300)
-                    fig_pw = go.Figure(data=go.Heatmap(
-                        z=neg_log_q,
-                        x=[str(t) for t in time_list],
-                        y=pw_pivot.index.tolist(),
-                        colorscale='YlOrRd',
-                        colorbar=dict(title='-log10(q)')
-                    ))
-                    fig_pw.update_layout(
+                    fig_pw = heatmap_figure(
+                        neg_log_q, x_labels=[str(t) for t in time_list],
+                        y_labels=pw_pivot.index.tolist(),
                         title=f'Pairwise -log10(q): {pw_a} vs {pw_b}',
-                        xaxis_title=time_column, yaxis_title='Gene',
-                        width=800, height=max(500, len(gene_subset) * 12 + 100),
-                        yaxis=dict(tickfont=dict(size=7))
+                        x_label=time_column, y_label='Gene', colorbar_label='-log10(q)',
+                        vmin=0, vmax=max(1.0, float(np.nanmax(neg_log_q)) if neg_log_q.size else 1.0),
                     )
-                    fpath = os.path.join(plots_dir, f'timecourse_pairwise_{safe_name}_heatmap.json')
-                    with open(fpath, 'w') as f:
-                        f.write(fig_pw.to_json(engine="json"))
-                    result_files.append({
-                        'file_path': fpath, 'file_type': 'plotly_json',
-                        'category': 'heatmap',
-                        'label': f'配对比较热图 ({pw_a} vs {pw_b})'
-                    })
+                    result_files.extend(self.save_matplotlib_figure(
+                        fig_pw, plots_dir, f'timecourse_pairwise_{safe_name}_heatmap.png',
+                        'heatmap', f'配对比较热图 ({pw_a} vs {pw_b})',
+                        formats=('png', 'svg'), dpi=300,
+                    ))
 
                     # Heatmap: log2FC
                     pw_pivot_fc = pw_df[pw_df['gene'].isin(gene_subset)].pivot_table(
                         index='gene', columns='time', values='log2FC', fill_value=0.0)
                     pw_pivot_fc = pw_pivot_fc.reindex(index=gene_subset, columns=time_list, fill_value=0.0)
 
-                    fig_pw_fc = go.Figure(data=go.Heatmap(
-                        z=pw_pivot_fc.values,
-                        x=[str(t) for t in time_list],
-                        y=pw_pivot_fc.index.tolist(),
-                        colorscale='RdBu_r', zmid=0,
-                        colorbar=dict(title='log2FC')
-                    ))
-                    fig_pw_fc.update_layout(
+                    max_fc = float(np.nanmax(np.abs(pw_pivot_fc.values))) if pw_pivot_fc.size else 1.0
+                    fig_pw_fc = heatmap_figure(
+                        pw_pivot_fc.values, x_labels=[str(t) for t in time_list],
+                        y_labels=pw_pivot_fc.index.tolist(),
                         title=f'Pairwise log2FC: {pw_a} vs {pw_b}',
-                        xaxis_title=time_column, yaxis_title='Gene',
-                        width=800, height=max(500, len(gene_subset) * 12 + 100),
-                        yaxis=dict(tickfont=dict(size=7))
+                        x_label=time_column, y_label='Gene', colorbar_label='log2FC',
+                        vmin=-max(1.0, max_fc), vmax=max(1.0, max_fc),
                     )
-                    fpath = os.path.join(plots_dir, f'timecourse_pairwise_{safe_name}_log2fc.json')
-                    with open(fpath, 'w') as f:
-                        f.write(fig_pw_fc.to_json(engine="json"))
-                    result_files.append({
-                        'file_path': fpath, 'file_type': 'plotly_json',
-                        'category': 'heatmap',
-                        'label': f'配对比较 log2FC ({pw_a} vs {pw_b})'
-                    })
+                    result_files.extend(self.save_matplotlib_figure(
+                        fig_pw_fc, plots_dir, f'timecourse_pairwise_{safe_name}_log2fc.png',
+                        'heatmap', f'配对比较 log2FC ({pw_a} vs {pw_b})',
+                        formats=('png', 'svg'), dpi=300,
+                    ))
 
                     n_pairwise_sig = int((pw_df['qvalue'] < fdr_threshold).sum())
                     del pw_df, pairwise_rows
@@ -547,5 +529,7 @@ class BulkTimecourseAnalysis(BaseAnalysis):
                 'n_clusters': n_clusters if do_cluster else 0,
                 'has_interaction': interaction_csv is not None,
                 'n_pairwise_sig': n_pairwise_sig,
+                'requested_group_column': requested_group_column,
+                'group_column': group_column,
             }
         }

@@ -54,6 +54,18 @@ class TestAnnotationMarkers:
         from modules.annotation import MARKER_SETS
         assert set(MARKER_SETS.keys()) == {'Universal', 'TME', 'Immune', 'Blood', 'PBMC'}
 
+    def test_organoid_marker_sets_cover_common_tissues(self):
+        """类器官面板按组织拆分，且每个类型至少有多个 marker。"""
+        from modules.annotation import ORGANOID_MARKER_SETS, get_marker_set
+        expected = {'intestinal', 'cerebral', 'kidney', 'liver', 'lung', 'pancreatic', 'cardiac'}
+        assert set(ORGANOID_MARKER_SETS) == expected
+        for organoid_type in expected:
+            panel = get_marker_set('Organoid', organoid_type)
+            assert panel
+            assert all(len(genes) >= 4 for genes in panel.values())
+        assert 'LGR5' in get_marker_set('Organoid', 'intestinal')['Intestinal stem cells']
+        assert 'NPHS2' in get_marker_set('Organoid', 'kidney')['Podocytes']
+
     def test_tme_markers_not_empty(self):
         """DEFAULT_TME_MARKERS 中每个细胞类型的基因列表非空。"""
         from modules.annotation import DEFAULT_TME_MARKERS
@@ -79,6 +91,36 @@ class TestAnnotationMarkers:
         )
         assert usable == {'T': ['Cd3d', 'Trac']}
         assert coverage['B'] == {'matched': 1, 'total': 2}
+
+    def test_cluster_marker_selector_is_data_driven_and_excludes_housekeeping(self):
+        """Dotplot genes should be cluster-specific, filtered, and globally unique."""
+        import anndata
+        pytest.importorskip('scanpy')
+        from modules.annotation import select_cluster_marker_genes
+
+        rng = np.random.default_rng(4)
+        genes = ['A_MARK', 'B_MARK', 'C_MARK', 'ACTB', 'RPL13', 'MT-GENE'] + [f'G{i}' for i in range(12)]
+        matrix = rng.poisson(0.05, size=(36, len(genes))).astype(float)
+        for start, gene_index in ((0, 0), (12, 1), (24, 2)):
+            matrix[start:start + 12, gene_index] += 8
+        adata = anndata.AnnData(
+            matrix,
+            obs=pd.DataFrame({'leiden': pd.Categorical(['0'] * 12 + ['1'] * 12 + ['2'] * 12)}),
+            var=pd.DataFrame(index=genes),
+        )
+
+        selected = select_cluster_marker_genes(adata, 'leiden', classic_markers={})
+        by_cluster = selected['cluster_markers']
+        assert {'0', '1', '2'} <= set(by_cluster)
+        assert {'A_MARK', 'B_MARK', 'C_MARK'} <= set(selected['genes'])
+        assert set(selected['genes']).isdisjoint({'ACTB', 'RPL13', 'MT-GENE'})
+        assert len(selected['genes']) == len(set(selected['genes']))
+        assert selected['n_data_driven'] >= 3
+        assert all(
+            item['source'] == 'data_driven'
+            for details in selected['marker_details'].values()
+            for item in details
+        )
 
 
 # ============================================================
@@ -144,6 +186,23 @@ class TestElbowLogic:
 
 class TestDEGLogic:
     """测试差异表达分析的辅助逻辑。"""
+
+    def test_three_colour_volcano_classification(self):
+        """火山图应按 padj 和 logFC 分为上调、下调和不显著三类。"""
+        from modules.deg import classify_volcano_regulation, VOLCANO_COLOR_MAP
+
+        labels = classify_volcano_regulation(
+            logfc=[2.0, -2.0, 0.5, 2.0, -2.0, np.nan],
+            padj=[0.01, 0.01, 0.01, 0.10, 0.10, 0.01],
+            logfc_cutoff=1.0,
+            pval_cutoff=0.05,
+        )
+
+        assert labels.tolist() == ['Up', 'Down', 'NS', 'NS', 'NS', 'NS']
+        assert set(labels) <= set(VOLCANO_COLOR_MAP)
+        assert VOLCANO_COLOR_MAP['Up'] == '#B64342'
+        assert VOLCANO_COLOR_MAP['Down'] == '#0F4D92'
+        assert VOLCANO_COLOR_MAP['NS'] == '#98A2B3'
 
     def test_correction_map(self):
         """校正方法映射正确。"""

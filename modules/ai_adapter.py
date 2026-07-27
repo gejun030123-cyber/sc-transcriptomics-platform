@@ -29,6 +29,38 @@ TOOLS_ANTHROPIC = [
         }
     },
     {
+        "name": "run_pipeline",
+        "description": "[需确认] 一次性提交多个有依赖关系的分析模块。后台会按 modules 的顺序串联前一步输出；不要用多个 run_analysis 代替全流程。返回 pipeline run ID，可查询进度和失败模块。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "analysis_type": {
+                    "type": "string",
+                    "enum": ["sc", "bulk"],
+                    "description": "sc=单细胞，bulk=Bulk RNA-seq"
+                },
+                "modules": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "按依赖顺序排列的模块；例如 sc: qc, normalize, hvg, dimred, clustering, annotation"
+                },
+                "params": {
+                    "type": "object",
+                    "description": "按模块名分组的参数，例如 {\"clustering\": {\"resolutions\": \"1.0\"}}"
+                },
+                "input_path": {
+                    "type": "string",
+                    "description": "可选输入文件；留空时自动使用项目当前数据"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "可选流程名称"
+                }
+            },
+            "required": ["analysis_type", "modules"]
+        }
+    },
+    {
         "name": "get_project_status",
         "description": "获取当前项目的完整状态：已上传文件、已完成任务、可用的中间文件。",
         "input_schema": {
@@ -74,7 +106,7 @@ TOOLS_ANTHROPIC = [
             "properties": {
                 "module_name": {
                     "type": "string",
-                    "description": "要决策的分析模块，如 bulk_normalize、bulk_deg、clustering、batch_correct"
+                    "description": "要决策的分析模块，如 bulk_normalize、bulk_deg、clustering、batch_correct、sc_timecourse"
                 },
                 "input_path": {
                     "type": "string",
@@ -286,7 +318,7 @@ AUTO_EXEC_TOOLS = {
     'recommend_analysis_config',
 }
 # 需要用户确认的工具
-CONFIRM_TOOLS = {'run_analysis', 'propose_parameter_sweep', 'run_parameter_sweep',
+CONFIRM_TOOLS = {'run_analysis', 'run_pipeline', 'propose_parameter_sweep', 'run_parameter_sweep',
                  'start_goal_agent', 'continue_goal_agent'}
 # 注：accept_branch 仅通过前端 Branch API 调用（POST /api/branches/<id>/accept），
 # 不作为 AI 工具暴露，确保用户在前端显式操作采纳。
@@ -318,10 +350,13 @@ SYSTEM_PROMPT = """你是一个生信分析助手，帮助用户进行 RNA-seq �
 2. 向用户展示：数据类型证据、推荐方法、完整参数、分组/比较、替代方法、前置步骤与风险。
 3. 如 should_run=false，停止提交并说明缺少的元数据或不适用原因。
 4. 只有用户确认后，才使用 recommend_analysis_config 返回的 input_path 和 recommended_params 调用 run_analysis。
-5. 不得把 DESeq2/edgeR 用于 FPKM/TPM 连续值；不得对已 log 数据重复标准化；不得在无时间列时推荐时序分析。
+5. 不得把 DESeq2/edgeR 用于 FPKM/TPM 连续值；不得对已 log 数据重复标准化；不得在无时间列时推荐时序分析；不得把单个细胞当作多时间点的独立生物学重复。
+
+## 全流程执行
+当用户要求“全流程/一键完成/从头跑到结果”时：先检查数据和必要元数据，并给出模块顺序与关键参数；获得一次确认后，必须调用 **run_pipeline** 一次性提交整个流程，不能逐个调用 run_analysis。流程在后台按顺序等待每一步完成后再执行下一步；回复中说明可通过 pipeline run 状态查看进度和失败位置。若设计检查表明后续模块缺少分组、比较或时间元数据，只提交可安全执行的核心流程，并明确说明未提交的模块和原因。
 
 ## 可用模块（完整列表）
-单细胞：qc, normalize, hvg, dimred, batch_correct, clustering, qc_reassess, annotation, deg, trajectory, proportion, cell_communication
+单细胞：qc, normalize, hvg, dimred, batch_correct, clustering, qc_reassess, annotation, sc_timecourse, deg, trajectory, proportion, cell_communication
 Bulk：bulk_qc, bulk_normalize, bulk_deg, bulk_pca, bulk_heatmap, bulk_enrichment, bulk_timecourse, bulk_deg_integration
 
 ## 回复规则

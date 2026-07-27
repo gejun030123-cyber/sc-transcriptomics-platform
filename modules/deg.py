@@ -1,4 +1,30 @@
 from modules.base import BaseAnalysis
+from modules.io_utils import resolve_obs_grouping
+
+
+VOLCANO_COLOR_MAP = {
+    'Up': '#B64342',       # Nature 风格红色：上调
+    'Down': '#0F4D92',     # Nature 风格深蓝：下调
+    'NS': '#98A2B3',       # 中性灰：不显著
+}
+
+
+def classify_volcano_regulation(logfc, padj, logfc_cutoff=1.0, pval_cutoff=0.05):
+    """Classify genes for the three-colour volcano plot.
+
+    The same adjusted-p-value and absolute-logFC thresholds are used by the
+    DEG count plot, CSV interpretation, and volcano colours:
+    ``Up`` / ``Down`` / ``NS``.
+    """
+    import numpy as np
+
+    logfc = np.asarray(logfc, dtype=float)
+    padj = np.asarray(padj, dtype=float)
+    labels = np.full(logfc.shape, 'NS', dtype=object)
+    significant = np.isfinite(logfc) & np.isfinite(padj) & (padj < pval_cutoff)
+    labels[significant & (logfc > logfc_cutoff)] = 'Up'
+    labels[significant & (logfc < -logfc_cutoff)] = 'Down'
+    return labels
 
 class DEGAnalysis(BaseAnalysis):
     MODULE_NAME = "deg"
@@ -9,13 +35,14 @@ class DEGAnalysis(BaseAnalysis):
     def run(self, input_path):
         import scanpy as sc
         import pandas as pd
-        from modules.visualization import umap_scatter
-        import plotly.graph_objects as go
-        import os, json
+        import os
+        from modules.native_figures import (
+            heatmap_figure, umap_panel_figure, scatter_figure, grouped_bar_figure,
+        )
 
         self.progress(5, "Loading data...")
         adata = self.load_adata(input_path)
-        groupby = self.params.get('groupby', 'celltype')
+        requested_groupby = str(self.params.get('groupby', 'celltype') or '').strip()
         method = self.params.get('method', 'wilcoxon')
         n_genes = int(self.params.get('n_genes', 20))
         reference = self.params.get('reference', 'rest')
@@ -26,8 +53,20 @@ class DEGAnalysis(BaseAnalysis):
         volcano_top_n = int(self.params.get('volcano_top_n', 10))
         volcano_genes_str = self.params.get('volcano_genes', '').strip()
 
-        if groupby not in adata.obs.columns:
-            groupby = 'leiden'
+        groupby, group_info = resolve_obs_grouping(
+            adata, requested_groupby, fallbacks=['leiden'],
+            max_categories=50, max_numeric_categories=20,
+            require_multiple=True,
+        )
+        if groupby is None:
+            raise ValueError(
+                f"groupby '{requested_groupby}' 不是有效的分类分组列："
+                f"{group_info.get('reason', '')}"
+            )
+        if groupby != requested_groupby:
+            self.progress(-1, f"分组列已改用 '{groupby}'：{group_info.get('requested_reason', '')}")
+        if not isinstance(adata.obs[groupby].dtype, pd.CategoricalDtype):
+            adata.obs[groupby] = adata.obs[groupby].astype(str).astype('category')
 
         self.progress(20, f"Running DEG analysis ({method})...")
         ref_kwarg = {} if reference == 'rest' else {'reference': str(reference)}
@@ -87,21 +126,84 @@ class DEGAnalysis(BaseAnalysis):
         result_files = []
 
         deg_df = pd.DataFrame(deg_data)
+        if not deg_df.empty:
+            deg_df['regulation'] = classify_volcano_regulation(
+                deg_df['logfc'].to_numpy(),
+                deg_df['pval_adj'].to_numpy(),
+                logfc_cutoff=logfc_cutoff,
+                pval_cutoff=pval_cutoff,
+            )
         csv_path = os.path.join(results_dir, 'deg_results.csv')
         deg_df.to_csv(csv_path, index=False)
         result_files.append({'file_path': csv_path, 'file_type': 'csv', 'category': 'table', 'label': f'Top {n_genes} DEG per Cluster'})
+
+        marker_selection = {
+            'cluster_markers': {}, 'genes': [], 'warnings': [],
+            'n_data_driven': 0, 'n_classic_anchor': 0, 'n_relaxed': 0,
+            'parameters': {},
+        }
+        custom_dotplot_str = self.params.get('custom_dotplot_genes', '').strip()
+        if not custom_dotplot_str:
+            try:
+                from modules.annotation import select_cluster_marker_genes
+                marker_selection = select_cluster_marker_genes(
+                    adata,
+                    groupby,
+                    method=method,
+                    n_rank_genes=max(1, min(100, int(n_genes))),
+                    min_markers=1,
+                    max_markers=5,
+                    padj_cutoff=pval_cutoff,
+                    min_pct=min_pct,
+                    min_delta_pct=0.05,
+                )
+                if marker_selection.get('warnings'):
+                    self.progress(-1, '；'.join(marker_selection['warnings'][:2]))
+            except Exception as exc:
+                self.progress(-1, f'DEG marker dotplot 选择失败，回退到排名结果：{exc}')
 
         first_group = groups[0] if groups else None
         if first_group:
             g_mask = deg_df['cluster'] == first_group
             g_df = deg_df[g_mask].copy()
             g_df['-log10(pval_adj)'] = -np.log10(g_df['pval_adj'].clip(lower=1e-300))
-            fig = go.Figure()
-            sig = (g_df['pval_adj'] < pval_cutoff) & (g_df['logfc'].abs() > logfc_cutoff)
-            fig.add_trace(go.Scattergl(x=g_df.loc[sig, 'logfc'], y=g_df.loc[sig, '-log10(pval_adj)'],
-                                       mode='markers', marker=dict(color='#e53935', size=4), name='Significant'))
-            fig.add_trace(go.Scattergl(x=g_df.loc[~sig, 'logfc'], y=g_df.loc[~sig, '-log10(pval_adj)'],
-                                       mode='markers', marker=dict(color='#9e9e9e', size=3), name='Not significant'))
+            if 'regulation' not in g_df:
+                g_df['regulation'] = classify_volcano_regulation(
+                    g_df['logfc'].to_numpy(),
+                    g_df['pval_adj'].to_numpy(),
+                    logfc_cutoff=logfc_cutoff,
+                    pval_cutoff=pval_cutoff,
+                )
+            sig = g_df['regulation'].isin(['Up', 'Down'])
+            volcano_colors = g_df['regulation'].map(VOLCANO_COLOR_MAP).fillna(
+                VOLCANO_COLOR_MAP['NS']
+            ).to_numpy()
+            fig = scatter_figure(
+                g_df['logfc'].values, g_df['-log10(pval_adj)'].values,
+                title=f'Volcano Plot: {first_group}', x_label='Log2 FC',
+                y_label='-log10(padj)', colors=volcano_colors, size=11,
+                alpha=0.78,
+            )
+            ax = fig.axes[0]
+            ax.axvline(logfc_cutoff, color='#98A2B3', linestyle='--', linewidth=0.7)
+            ax.axvline(-logfc_cutoff, color='#98A2B3', linestyle='--', linewidth=0.7)
+            ax.axhline(-np.log10(pval_cutoff), color='#98A2B3', linestyle='--', linewidth=0.7)
+            from matplotlib.lines import Line2D
+            from matplotlib.patches import Patch
+
+            regulation_counts = g_df['regulation'].value_counts()
+            legend_handles = [
+                Patch(facecolor=VOLCANO_COLOR_MAP['Up'], edgecolor='none',
+                      label=f"Up-regulated (n={int(regulation_counts.get('Up', 0))})"),
+                Patch(facecolor=VOLCANO_COLOR_MAP['Down'], edgecolor='none',
+                      label=f"Down-regulated (n={int(regulation_counts.get('Down', 0))})"),
+                Patch(facecolor=VOLCANO_COLOR_MAP['NS'], edgecolor='none',
+                      label=f"Not significant (n={int(regulation_counts.get('NS', 0))})"),
+                Line2D([0], [0], color='#98A2B3', linestyle='--', linewidth=0.8,
+                       label='Thresholds'),
+            ]
+            ax.legend(handles=legend_handles, loc='upper right', frameon=False,
+                      fontsize=7.5, handlelength=1.5, borderaxespad=0.5)
             # Gene annotations on volcano
             annotate_genes = set()
             if volcano_genes_str:
@@ -113,12 +215,13 @@ class DEGAnalysis(BaseAnalysis):
                 gene_row = g_df[g_df['gene'] == gene_name]
                 if not gene_row.empty:
                     row = gene_row.iloc[0]
-                    fig.add_annotation(x=row['logfc'], y=row['-log10(pval_adj)'],
-                                      text=gene_name, showarrow=True, arrowhead=2, ax=20, ay=-20,
-                                      font=dict(size=9))
-            fig.update_layout(title=f'Volcano Plot: {first_group}', xaxis_title='Log2 FC', yaxis_title='-log10(padj)',
-                             plot_bgcolor='white', width=600, height=400)
-            result_files.append(self.save_plotly_json(fig, plots_dir, f'deg_volcano_{first_group}.json', 'volcano', f'Volcano: {first_group}'))
+                    ax.annotate(gene_name, (row['logfc'], row['-log10(pval_adj)']),
+                                xytext=(4, 4), textcoords='offset points', fontsize=7,
+                                color='#111827')
+            result_files.extend(self.save_matplotlib_figure(
+                fig, plots_dir, f'deg_volcano_{first_group}.png', 'volcano',
+                f'Volcano: {first_group}', formats=('png', 'svg'), dpi=300,
+            ))
 
         if self.params.get('show_deg_counts_bar', True) and not deg_df.empty:
             try:
@@ -130,33 +233,14 @@ class DEGAnalysis(BaseAnalysis):
                     sig = sub['pval_adj'] < pval_cutoff
                     up_counts.append(int((sig & (sub['logfc'] > logfc_cutoff)).sum()))
                     down_counts.append(int((sig & (sub['logfc'] < -logfc_cutoff)).sum()))
-                fig_counts = go.Figure()
-                fig_counts.add_trace(go.Bar(
-                    x=group_order,
-                    y=up_counts,
-                    name='Up',
-                    marker_color='#e53935',
-                    hovertemplate='Cluster: %{x}<br>Up DEGs: %{y}<extra></extra>',
-                ))
-                fig_counts.add_trace(go.Bar(
-                    x=group_order,
-                    y=down_counts,
-                    name='Down',
-                    marker_color='#3949ab',
-                    hovertemplate='Cluster: %{x}<br>Down DEGs: %{y}<extra></extra>',
-                ))
-                fig_counts.update_layout(
+                fig_counts = grouped_bar_figure(
+                    group_order, [('Up', up_counts), ('Down', down_counts)],
                     title=f'Significant DEG Counts (padj<{pval_cutoff}, |logFC|>{logfc_cutoff})',
-                    xaxis_title=groupby,
-                    yaxis_title='Gene count',
-                    barmode='group',
-                    plot_bgcolor='white',
-                    width=max(650, 60 * max(1, len(group_order))),
-                    height=430,
+                    x_label=groupby, y_label='Gene count', rotation=35,
                 )
-                result_files.append(self.save_plotly_json(
-                    fig_counts, plots_dir, 'deg_significant_counts_bar.json',
-                    'bar', 'Significant DEG Counts'
+                result_files.extend(self.save_matplotlib_figure(
+                    fig_counts, plots_dir, 'deg_significant_counts_bar.png',
+                    'bar', 'Significant DEG Counts', formats=('png', 'svg'), dpi=300,
                 ))
             except Exception as e:
                 self.progress(-1, f"DEG count summary plot failed: {e}")
@@ -164,19 +248,19 @@ class DEGAnalysis(BaseAnalysis):
         # DEG Dotplot
         if self.params.get('show_dotplot', True):
             try:
-                custom_dotplot_str = self.params.get('custom_dotplot_genes', '').strip()
                 if custom_dotplot_str:
                     top_genes_list = [g.strip() for g in custom_dotplot_str.replace('\n', ',').split(',') if g.strip()]
                     not_found = [g for g in top_genes_list if g not in adata.var_names]
                     top_genes_list = [g for g in top_genes_list if g in adata.var_names]
                     dotplot_label = '自定义基因 Dotplot'
                 else:
-                    top_genes_list = []
+                    top_genes_list = marker_selection.get('genes', [])[:30]
                     not_found = []
-                    for g in groups:
-                        group_df = sc.get.rank_genes_groups_df(adata, group=g)
-                        top_genes_list.extend(group_df.head(5)['names'].tolist())
-                    top_genes_list = list(dict.fromkeys(top_genes_list))[:30]
+                    if not top_genes_list:
+                        for g in groups:
+                            group_df = sc.get.rank_genes_groups_df(adata, group=g)
+                            top_genes_list.extend(group_df.head(5)['names'].tolist())
+                        top_genes_list = list(dict.fromkeys(top_genes_list))[:30]
                     dotplot_label = 'DEG Dotplot'
 
                 if top_genes_list:
@@ -195,10 +279,6 @@ class DEGAnalysis(BaseAnalysis):
         if plot_genes_umap and 'X_umap' in adata.obsm:
             gene_list = [g.strip() for g in plot_genes_umap.split(',') if g.strip() and g.strip() in adata.var_names]
             for gene in gene_list[:5]:  # Limit to 5 genes
-                fig_gene = umap_scatter(adata, gene, title=f'{gene} Expression')
-                fpath = os.path.join(plots_dir, f'deg_gene_umap_{gene}.json')
-                with open(fpath, 'w') as f: f.write(json.dumps(fig_gene))
-                result_files.append({'file_path': fpath, 'file_type': 'plotly_json', 'category': 'umap', 'label': f'{gene} Expression'})
                 try:
                     fig_static = self.build_publication_umap(
                         adata, gene, title=f'{gene} Expression'
@@ -210,11 +290,10 @@ class DEGAnalysis(BaseAnalysis):
                     import matplotlib.pyplot as plt
                     plt.close(fig_static)
                 except Exception as exc:
-                    self.progress(-1, f'{gene} 静态表达 UMAP 导出失败（不影响交互图）：{exc}')
+                    self.progress(-1, f'{gene} 表达 UMAP 导出失败：{exc}')
 
         if self.params.get('show_top_marker_umap_panel', True) and 'X_umap' in adata.obsm and not deg_df.empty:
             try:
-                from plotly.subplots import make_subplots
                 marker_limit = int(self.params.get('top_marker_umap_genes', 6))
                 marker_candidates = []
                 for g in groups:
@@ -224,50 +303,13 @@ class DEGAnalysis(BaseAnalysis):
                     marker_candidates.extend(genes_for_group[:1])
                 marker_genes = [g for g in dict.fromkeys(marker_candidates) if g in adata.var_names][:max(1, marker_limit)]
                 if marker_genes:
-                    coords = adata.obsm['X_umap'][:, :2]
-                    n_cols = min(3, len(marker_genes))
-                    n_rows = int(np.ceil(len(marker_genes) / n_cols))
-                    fig_marker_umap = make_subplots(
-                        rows=n_rows,
-                        cols=n_cols,
-                        subplot_titles=marker_genes,
+                    fig_marker_umap = umap_panel_figure(
+                        adata, marker_genes, titles=marker_genes,
+                        point_size=4, opacity=0.70, ncols=min(3, len(marker_genes)),
                     )
-                    for i, gene in enumerate(marker_genes):
-                        expr = adata[:, gene].X
-                        if hasattr(expr, 'toarray'):
-                            expr = expr.toarray()
-                        expr = np.asarray(expr).ravel()
-                        row = i // n_cols + 1
-                        col = i % n_cols + 1
-                        fig_marker_umap.add_trace(go.Scattergl(
-                            x=coords[:, 0],
-                            y=coords[:, 1],
-                            mode='markers',
-                            marker=dict(
-                                size=3,
-                                color=expr,
-                                colorscale='Viridis',
-                                opacity=0.75,
-                                showscale=False,
-                            ),
-                            text=adata.obs_names.tolist(),
-                            hovertemplate='%{text}<br>' + gene + ': %{marker.color:.3f}<extra></extra>',
-                            name=gene,
-                        ), row=row, col=col)
-                    fig_marker_umap.update_layout(
-                        title='Top Marker Feature UMAPs',
-                        plot_bgcolor='white',
-                        width=350 * n_cols,
-                        height=320 * n_rows,
-                        showlegend=False,
-                    )
-                    for row in range(1, n_rows + 1):
-                        for col in range(1, n_cols + 1):
-                            fig_marker_umap.update_xaxes(title_text='UMAP-1', row=row, col=col)
-                            fig_marker_umap.update_yaxes(title_text='UMAP-2', row=row, col=col)
-                    result_files.append(self.save_plotly_json(
-                        fig_marker_umap, plots_dir, 'deg_top_marker_umap_panel.json',
-                        'umap', 'Top Marker Feature UMAPs'
+                    result_files.extend(self.save_matplotlib_figure(
+                        fig_marker_umap, plots_dir, 'deg_top_marker_umap_panel.png',
+                        'umap', 'Top Marker Feature UMAPs', formats=('png', 'svg'), dpi=300,
                     ))
             except Exception as e:
                 self.progress(-1, f"Top marker UMAP panel failed: {e}")
@@ -311,31 +353,30 @@ class DEGAnalysis(BaseAnalysis):
                     row_mean = mean_matrix.mean(axis=1, keepdims=True)
                     row_std = mean_matrix.std(axis=1, keepdims=True) + 1e-10
                     z = np.clip((mean_matrix - row_mean) / row_std, -3, 3)
-                    fig_heat = go.Figure(data=go.Heatmap(
-                        z=z,
-                        x=group_order,
-                        y=heatmap_genes,
-                        colorscale='RdBu',
-                        zmid=0,
-                        colorbar=dict(title='Row z-score'),
-                        hovertemplate='Group: %{x}<br>Gene: %{y}<br>z-score: %{z:.2f}<extra></extra>',
-                    ))
-                    fig_heat.update_layout(
+                    fig_heat = heatmap_figure(
+                        z, x_labels=group_order, y_labels=heatmap_genes,
                         title=f'Top Marker Heatmap by {groupby}',
-                        xaxis_title=groupby,
-                        yaxis_title='Marker genes',
-                        plot_bgcolor='white',
-                        width=max(650, 80 * len(group_order)),
-                        height=max(450, 18 * len(heatmap_genes)),
+                        x_label=groupby, y_label='Marker genes',
+                        colorbar_label='Row z-score',
                     )
-                    result_files.append(self.save_plotly_json(
-                        fig_heat, plots_dir, 'deg_marker_heatmap.json',
-                        'heatmap', 'Cluster Marker Heatmap'
+                    result_files.extend(self.save_matplotlib_figure(
+                        fig_heat, plots_dir, 'deg_marker_heatmap.png',
+                        'heatmap', 'Cluster Marker Heatmap', formats=('png', 'svg'), dpi=300,
                     ))
             except Exception as e:
                 self.progress(-1, f"Marker heatmap generation failed: {e}")
 
         self.progress(90, "Saving output...")
+        adata.uns['marker_selection'] = {
+            'cluster_key': groupby,
+            'used_in_dotplot': not bool(custom_dotplot_str),
+            'cluster_markers': marker_selection.get('cluster_markers', {}),
+            'n_data_driven': int(marker_selection.get('n_data_driven', 0)),
+            'n_classic_anchor': int(marker_selection.get('n_classic_anchor', 0)),
+            'n_relaxed': int(marker_selection.get('n_relaxed', 0)),
+            'warnings': marker_selection.get('warnings', []),
+            'parameters': marker_selection.get('parameters', {}),
+        }
         output_path = self.save_output(adata, 'deg')
 
         self.progress(100, "Done")
@@ -349,5 +390,16 @@ class DEGAnalysis(BaseAnalysis):
                 'reference': reference,
                 'total_deg_genes': len(deg_data),
                 'custom_dotplot_genes': self.params.get('custom_dotplot_genes', '').strip() or None,
+                'requested_groupby': requested_groupby,
+                'groupby': groupby,
+                'marker_selection': {
+                    'used_in_dotplot': not bool(custom_dotplot_str),
+                    'cluster_markers': marker_selection.get('cluster_markers', {}),
+                    'n_data_driven': int(marker_selection.get('n_data_driven', 0)),
+                    'n_classic_anchor': int(marker_selection.get('n_classic_anchor', 0)),
+                    'n_relaxed': int(marker_selection.get('n_relaxed', 0)),
+                    'warnings': marker_selection.get('warnings', []),
+                    'parameters': marker_selection.get('parameters', {}),
+                },
             }
         }

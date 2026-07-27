@@ -4,6 +4,7 @@
 <div class="d-flex justify-content-between align-items-center mb-3">
     <h4>分析结果 — {{ project.name }}</h4>
     <div class="d-flex gap-2">
+        <a href="/projects/{{ project.id }}/figure-studio" class="btn btn-primary btn-sm">图形美化</a>
         <a href="/projects/{{ project.id }}/results/project-report" class="btn btn-outline-primary btn-sm">项目报告</a>
         <a href="/projects/{{ project.id }}/results/plot-gallery" class="btn btn-outline-primary btn-sm">图表图库</a>
         <a href="/projects/{{ project.id }}/results/plots-archive" class="btn btn-outline-primary btn-sm">下载全部图表 ZIP</a>

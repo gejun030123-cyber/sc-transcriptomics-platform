@@ -318,6 +318,9 @@ class TestSCModuleClustering:
 
         out = sc.read_h5ad(result['output_adata'])
         assert 'leiden' in out.obs.columns
+        assert 'marker_selection' in out.uns
+        assert 'marker_selection' in result['summary']
+        assert result['summary']['marker_selection']['parameters']['method'] == 'wilcoxon'
 
 
 class TestSCModuleQCReassess:
@@ -342,6 +345,26 @@ class TestSCModuleQCReassess:
         mod = _instantiate(QCReassessAnalysis, str(tmp_path))
         result = mod.run(clu_result['output_adata'])
         _assert_result_keys(result)
+
+    @_timeout(60)
+    def test_qc_reassess_falls_back_from_continuous_metric_cluster_key(self, tmp_path):
+        """连续 QC 指标不能被当作 cluster key 生成伪簇。"""
+        from modules.qc_reassess import QCReassessAnalysis
+
+        adata = _make_sc_anndata()
+        adata.obs['continuous_qc'] = np.arange(adata.n_obs, dtype=float)
+        input_path = str(tmp_path / 'input.h5ad')
+        adata.write_h5ad(input_path)
+
+        mod = _instantiate(QCReassessAnalysis, str(tmp_path), params={
+            'cluster_key': 'continuous_qc',
+            'auto_remove': False,
+        })
+        result = mod.run(input_path)
+
+        assert result['summary']['requested_cluster_key'] == 'continuous_qc'
+        assert result['summary']['cluster_key'] == 'leiden'
+        assert result['summary']['n_clusters'] <= 50
 
 
 class TestSCModuleDEG:
@@ -470,7 +493,7 @@ class TestSCAnnotation:
     @_timeout(120)
     @pytest.mark.skipif(
         not os.environ.get('RUN_ANNOTATION_TESTS'),
-        reason="注释依赖 celltypist，设置 RUN_ANNOTATION_TESTS=1 启用"
+        reason="注释完整集成测试默认跳过，设置 RUN_ANNOTATION_TESTS=1 启用"
     )
     def test_annotation_returns_valid_result(self, tmp_path):
         """Annotation run() 返回有效结果。"""
@@ -481,8 +504,8 @@ class TestSCAnnotation:
         adata.write_h5ad(input_path)
 
         mod = _instantiate(AnnotationAnalysis, str(tmp_path), params={
-            'method': 'celltypist',
-            'model': 'Immune_All_Low',
+            'method': 'auto_marker',
+            'marker_set': 'Universal',
         })
         result = mod.run(input_path)
         _assert_result_keys(result)
@@ -544,6 +567,9 @@ class TestBulkModulePCA:
         result = mod.run(tsv_path)
         _assert_result_keys(result)
         _validate_result_files(result['result_files'])
+        assert result['summary']['color_by_used'] == '_auto_group'
+        assert result['summary']['grouping_source'] == 'sample_name_inference'
+        assert result['summary']['group_counts'] == {'Ctrl': 3, 'Treat': 3}
 
 
 class TestBulkModuleDEG:
@@ -1625,7 +1651,7 @@ class TestWorkerIntegration:
 
         expected_sc = {'qc', 'normalize', 'hvg', 'dimred', 'batch_correct',
                        'clustering', 'qc_reassess', 'annotation', 'deg',
-                       'trajectory', 'proportion', 'cell_communication', 'subcluster'}
+                       'trajectory', 'sc_timecourse', 'proportion', 'cell_communication', 'subcluster'}
         expected_bulk = {'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca',
                         'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
                         'bulk_deg_integration'}

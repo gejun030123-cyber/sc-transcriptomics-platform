@@ -49,7 +49,10 @@ def test_subcluster_run_writes_reusable_outputs(tmp_path):
     assert os.path.exists(result['output_adata'])
     assert result['summary']['n_cells'] == 12
     assert result['summary']['n_subclusters'] >= 1
+    assert 'marker_selection' in result['summary']
     result_names = {os.path.basename(item['file_path']) for item in result['result_files']}
-    assert {'subcluster_umap.json', 'subcluster_size_bar.json', 'subcluster_deg_results.csv'} <= result_names
+    assert {'subcluster_umap.png', 'subcluster_umap.svg',
+            'subcluster_size_bar.png', 'subcluster_size_bar.svg',
+            'subcluster_deg_results.csv'} <= result_names
     output = __import__('scanpy').read_h5ad(result['output_adata'])
     assert {'parent_cluster', 'subcluster'} <= set(output.obs.columns)

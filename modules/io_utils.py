@@ -1,6 +1,238 @@
 import os
 import numpy as np
 import pandas as pd
+from config import Config
+
+
+QC_OBS_COLUMNS = frozenset({
+    'total_counts', 'n_genes_by_counts', 'pct_counts_mt', 'size_factor',
+    'total_counts_mt', 'total_counts_ribo', 'pct_counts_ribo', '_auto_group',
+})
+
+# These fields describe cells, libraries, or technical processing rather than
+# the biological grouping that should normally drive DEG/proportion analyses.
+# They remain available in the UI for manual selection and for batch/sample
+# specific parameters; they are simply not the first generic ``groupby`` pick.
+TECHNICAL_OBS_COLUMNS = frozenset({
+    'barcode', 'barcodes', 'cell_barcode', 'cell_id', 'cellid', 'cell_index',
+    'sample', 'sample_id', 'library_id', 'orig_ident', 'orig.ident',
+    'source_type', 'source_description',
+    'batch', 'technical_batch', 'sequencing_batch', 'library_batch',
+})
+
+_GROUPING_PRIORITIES = {
+    'default': (
+        'analysis_group', 'condition', 'treatment', 'treatment_group',
+        'group', 'sample_group', 'celltype', 'cell_type', 'annotation',
+        'cell_type_annotation', 'leiden', 'cluster', 'seurat_clusters',
+    ),
+    'bulk': (
+        'analysis_group', 'condition', 'treatment', 'treatment_group',
+        'group', 'sample_group',
+    ),
+    'proportion': (
+        'celltype', 'cell_type', 'annotation', 'cell_type_annotation',
+        'leiden', 'cluster', 'condition', 'treatment', 'group',
+    ),
+    'cluster': (
+        'leiden', 'cluster', 'seurat_clusters', 'celltype', 'cell_type',
+        'annotation',
+    ),
+    'condition': (
+        'condition', 'treatment', 'treatment_group', 'group', 'sample_group',
+        'analysis_group',
+    ),
+}
+
+_BATCH_PRIORITY = (
+    'batch', 'technical_batch', 'sequencing_batch', 'library_batch',
+    'sample', 'sample_id', 'library_id', 'orig.ident', 'orig_ident',
+)
+
+_SAMPLE_PRIORITY = (
+    'sample_id', 'sample', 'library_id', 'orig.ident', 'orig_ident',
+)
+
+
+def _normalise_obs_column_name(column):
+    """Normalise only for matching aliases; preserve the original column name."""
+    return str(column).strip().lower().replace('-', '_').replace(' ', '_')
+
+
+def is_technical_obs_column(column):
+    """Return whether an obs field is normally technical/identifier metadata."""
+    normalised = _normalise_obs_column_name(column)
+    return normalised in {
+        _normalise_obs_column_name(name) for name in TECHNICAL_OBS_COLUMNS
+    }
+
+
+def _obs_priority(column, priority_names):
+    """Give preferred aliases a stable rank, including leiden_0.8-like names."""
+    normalised = _normalise_obs_column_name(column)
+    aliases = [_normalise_obs_column_name(name) for name in priority_names]
+    try:
+        return aliases.index(normalised)
+    except ValueError:
+        for index, alias in enumerate(aliases):
+            if alias in {'leiden', 'cluster'} and normalised.startswith(alias + '_'):
+                return index
+        return len(aliases) + 100
+
+
+def obs_grouping_info(adata, column, *, max_categories=50,
+                      max_numeric_categories=20, require_multiple=False):
+    """Describe whether an ``obs`` column is safe for grouping operations.
+
+    Analysis modules frequently receive a free-form ``cluster_key``/``batch_key``
+    or ``groupby`` parameter.  Presence alone is not enough: QC metrics such as
+    ``log1p_n_genes_by_counts`` are numeric and often nearly one value per cell,
+    which turns a crosstab or per-group loop into hundreds of pseudo-groups.
+    Keep the rule in one place so modules use the same semantics.
+    """
+    result = {
+        'column': str(column or ''),
+        'valid': False,
+        'n_unique': 0,
+        'reason': '',
+    }
+    if not column:
+        result['reason'] = '未指定分组列'
+        return result
+    if column not in getattr(adata, 'obs', pd.DataFrame()).columns:
+        result['reason'] = f"列 '{column}' 不存在于 adata.obs"
+        return result
+
+    values = adata.obs[column]
+    n_unique = int(values.nunique(dropna=False))
+    result['n_unique'] = n_unique
+    if n_unique < (2 if require_multiple else 1):
+        result['reason'] = '分组数量不足'
+        return result
+
+    if pd.api.types.is_numeric_dtype(values) and n_unique > max_numeric_categories:
+        result['reason'] = (
+            f"列 '{column}' 是连续/高基数数值列（{n_unique} 个取值），"
+            '不能作为分类分组列'
+        )
+        return result
+
+    # Reject sample/cell identifiers and other almost-one-value-per-row fields;
+    # for small datasets the relative limit is stricter than the absolute cap.
+    n_obs = max(int(getattr(adata, 'n_obs', len(values))), 1)
+    cardinality_limit = int(max_categories)
+    relative_limit = max(20, int(0.2 * n_obs))
+    if n_unique > cardinality_limit or (n_unique > relative_limit and n_unique > 20):
+        safe_limit = min(cardinality_limit, relative_limit) if relative_limit < cardinality_limit else cardinality_limit
+        result['reason'] = (
+            f"列 '{column}' 的分组数 {n_unique} 超过安全上限 {safe_limit}"
+        )
+        return result
+
+    result['valid'] = True
+    return result
+
+
+def rank_obs_grouping_candidates(adata, module_name='', *, purpose='groupby',
+                                 include_technical=False):
+    """Return safe obs grouping columns in a parameter-aware order.
+
+    The old UI used the physical obs column order, which commonly puts
+    ``barcode``/``batch``/``sample`` before ``condition`` or ``leiden``.  This
+    helper keeps those fields selectable but separates their automatic role:
+    biological group fields for ``groupby``/``group_column``, technical fields
+    for ``batch_key``, and cluster fields for ``cluster_key``.
+    """
+    module = str(module_name or '').strip().lower()
+    purpose = str(purpose or 'groupby').strip().lower()
+    if purpose == 'batch_key':
+        priority = _BATCH_PRIORITY
+        allow_technical = True
+    elif purpose == 'sample_key':
+        priority = _SAMPLE_PRIORITY
+        allow_technical = True
+    elif purpose == 'cluster_key':
+        priority = (
+            _GROUPING_PRIORITIES['proportion']
+            if module == 'cell_communication'
+            else _GROUPING_PRIORITIES['cluster']
+        )
+        allow_technical = False
+    elif purpose == 'condition_key' or purpose == 'group_column':
+        priority = _GROUPING_PRIORITIES['condition']
+        allow_technical = bool(include_technical)
+    elif module == 'bulk_deg' or module.startswith('bulk_'):
+        priority = _GROUPING_PRIORITIES['bulk']
+        allow_technical = bool(include_technical)
+    elif module == 'proportion':
+        priority = _GROUPING_PRIORITIES['proportion']
+        allow_technical = bool(include_technical)
+    else:
+        priority = _GROUPING_PRIORITIES['default']
+        allow_technical = bool(include_technical)
+
+    candidates = []
+    columns = list(getattr(adata, 'obs', pd.DataFrame()).columns)
+    for index, column in enumerate(columns):
+        if column in QC_OBS_COLUMNS:
+            continue
+        if not allow_technical and is_technical_obs_column(column):
+            continue
+        info = obs_grouping_info(
+            adata, column, max_categories=50,
+            max_numeric_categories=20, require_multiple=True,
+        )
+        if not info['valid']:
+            continue
+        values = adata.obs[column].astype(str)
+        counts = values.value_counts()
+        # A grouping with singleton levels is not a useful automatic design.
+        if len(counts) < 2 or int(counts.min()) < 2:
+            continue
+        candidates.append((
+            _obs_priority(column, priority), index, column,
+        ))
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in candidates]
+
+
+def resolve_obs_grouping(adata, requested, fallbacks=(), *, max_categories=50,
+                         max_numeric_categories=20, require_multiple=False):
+    """Return ``(selected_column, info)`` using the first valid candidate.
+
+    ``selected_column`` is ``None`` when neither the requested column nor a
+    fallback is safe.  The returned ``info`` also contains the reason for a
+    rejected requested column, allowing callers to surface an actionable warning.
+    """
+    candidates = []
+    for candidate in [requested, *fallbacks]:
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    requested_info = obs_grouping_info(
+        adata, requested, max_categories=max_categories,
+        max_numeric_categories=max_numeric_categories,
+        require_multiple=require_multiple,
+    )
+    for candidate in candidates:
+        info = obs_grouping_info(
+            adata, candidate, max_categories=max_categories,
+            max_numeric_categories=max_numeric_categories,
+            require_multiple=require_multiple,
+        )
+        if info['valid']:
+            info = dict(info)
+            info['requested_column'] = str(requested or '')
+            info['requested_valid'] = bool(requested_info['valid'])
+            info['requested_reason'] = requested_info['reason']
+            return candidate, info
+
+    requested_info = dict(requested_info)
+    requested_info['requested_column'] = str(requested or '')
+    requested_info['requested_valid'] = bool(requested_info['valid'])
+    requested_info['requested_reason'] = requested_info['reason']
+    return None, requested_info
 
 
 def infer_expression_measurement(adata, input_path=''):
@@ -37,9 +269,21 @@ def infer_sample_group_candidates(sample_names):
         clean = re.sub(
             r'_(count|FPKM|TPM|fpkm|tpm|Counts|normalized)$', '', name)
         tokens = [token for token in re.split(r'[-_]', clean) if token]
-        if len(tokens) < 2 or not re.fullmatch(r'(?:rep)?\d+', tokens[-1], re.I):
+        if len(tokens) < 2:
             return []
-        parsed.append((name, tokens[:-1]))
+
+        # Most matrices use ``Ctrl_1``/``Ctrl-1``, but exported bulk tables
+        # also commonly encode the biological replicate without a separator,
+        # for example ``EC_CT_BSA1``. Split only a terminal numeric replicate
+        # suffix, leaving the experimental factor itself intact (BSA here).
+        replicate_match = re.fullmatch(r'(.+?)(?:rep)?(\d+)', tokens[-1], re.I)
+        if re.fullmatch(r'(?:rep)?\d+', tokens[-1], re.I):
+            group_tokens = tokens[:-1]
+        elif replicate_match and replicate_match.group(1):
+            group_tokens = tokens[:-1] + [replicate_match.group(1)]
+        else:
+            return []
+        parsed.append((name, group_tokens))
 
     if not parsed:
         return []
@@ -298,6 +542,79 @@ def _standardize_imported_adata(adata, input_format=None, species=None, genome=N
     return adata
 
 
+def read_10x_mtx_compat(mtx_dir, var_names='gene_symbols'):
+    """Read a 10x Matrix Market directory with mixed gzip/plain files safely.
+
+    10x downloads are sometimes assembled from files with different compression
+    states.  ``scanpy.read_10x_mtx`` expects one consistent filename set, so a
+    temporary all-gzip view is created when needed.
+    """
+    import gzip
+    import shutil
+    import tempfile
+    import scanpy as sc
+
+    if not os.path.isdir(mtx_dir):
+        raise FileNotFoundError(f"10x 矩阵目录不存在: {mtx_dir}")
+
+    def _pick(*names):
+        return next((name for name in names if os.path.isfile(os.path.join(mtx_dir, name))), None)
+
+    matrix = _pick('matrix.mtx.gz', 'matrix.mtx')
+    barcodes = _pick('barcodes.tsv.gz', 'barcodes.tsv')
+    features = _pick('features.tsv.gz', 'features.tsv', 'genes.tsv.gz', 'genes.tsv')
+    if not matrix or not barcodes or not features:
+        raise FileNotFoundError(
+            '10x 数据不完整：需要 matrix.mtx(.gz)、barcodes.tsv(.gz) 和 '
+            'features.tsv(.gz) 或 genes.tsv(.gz)'
+        )
+
+    # Use the source directly only when it already has a complete compressed
+    # set; otherwise stage all three selected files to avoid omitting the
+    # already-compressed member of a mixed set.
+    if (matrix.endswith('.gz') and barcodes.endswith('.gz')
+            and features == 'features.tsv.gz'):
+        return sc.read_10x_mtx(mtx_dir, var_names=var_names, cache=False)
+
+    # Pass the directory explicitly as a defense in depth: an external caller
+    # may import this module after a library has already cached ``/tmp``.
+    temp_dir = tempfile.mkdtemp(prefix='10x_gzip_', dir=Config.runtime_tmp_dir())
+    try:
+        for source_name, target_name in (
+            (matrix, 'matrix.mtx.gz'),
+            (barcodes, 'barcodes.tsv.gz'),
+            # New Scanpy releases unconditionally look for features.tsv.gz.
+            # A v2 genes.tsv has the same first two fields and is therefore
+            # staged under that filename for a version-independent read.
+            (features, 'features.tsv.gz'),
+        ):
+            source = os.path.join(mtx_dir, source_name)
+            target = os.path.join(temp_dir, target_name)
+            if source_name.startswith('genes.'):
+                # Scanpy 1.11 requires the third feature-type column, whereas
+                # 10x v2 genes.tsv has only gene ID and symbol.  Add the
+                # conventional type while staging it as a v3-style file.
+                opener = gzip.open if source_name.endswith('.gz') else open
+                with opener(source, 'rt', encoding='utf-8') as src, gzip.open(
+                    target, 'wt', encoding='utf-8'
+                ) as dst:
+                    for line in src:
+                        fields = line.rstrip('\r\n').split('\t')
+                        if len(fields) == 2:
+                            dst.write(f'{fields[0]}\t{fields[1]}\tGene Expression\n')
+                        else:
+                            dst.write(line if line.endswith(('\n', '\r')) else line + '\n')
+                continue
+            if source_name.endswith('.gz'):
+                shutil.copy2(source, target)
+            else:
+                with open(source, 'rb') as src, gzip.open(target, 'wb') as dst:
+                    shutil.copyfileobj(src, dst)
+        return sc.read_10x_mtx(temp_dir, var_names=var_names, cache=False)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def read_single_cell_data(input_path, input_format='auto', species=None, genome=None):
     """
     Read common single-cell input formats into AnnData.
@@ -326,7 +643,7 @@ def read_single_cell_data(input_path, input_format='auto', species=None, genome=
         mtx_dir = source_path if os.path.isdir(source_path) else os.path.dirname(source_path)
         if not mtx_dir:
             mtx_dir = '.'
-        adata = sc.read_10x_mtx(mtx_dir, var_names='gene_symbols', cache=True)
+        adata = read_10x_mtx_compat(mtx_dir, var_names='gene_symbols')
     elif fmt == '10x_h5':
         adata = sc.read_10x_h5(source_path)
     elif fmt == 'loom':
@@ -455,43 +772,7 @@ def convert_10x_to_h5ad(mtx_dir, output_path, species=None, genome=None):
     返回:
         anndata.AnnData 对象
     """
-    if not os.path.isdir(mtx_dir):
-        raise FileNotFoundError(f"10x 矩阵目录不存在: {mtx_dir}")
-    import scanpy as sc
-
-    # Recent Scanpy versions expect compressed 10x filenames by default.  The
-    # web uploader also accepts plain .mtx/.tsv files, so create a temporary
-    # gzip view when a ZIP contains the uncompressed form.
-    read_dir = mtx_dir
-    temp_dir = None
-    plain_to_gzip = {
-        'matrix.mtx': 'matrix.mtx.gz',
-        'barcodes.tsv': 'barcodes.tsv.gz',
-        'features.tsv': 'features.tsv.gz',
-        'genes.tsv': 'genes.tsv.gz',
-    }
-    if any(os.path.exists(os.path.join(mtx_dir, plain))
-           and not os.path.exists(os.path.join(mtx_dir, compressed))
-           for plain, compressed in plain_to_gzip.items()):
-        import gzip
-        import shutil
-        import tempfile
-
-        temp_dir = tempfile.mkdtemp(prefix='10x_gzip_')
-        for plain, compressed in plain_to_gzip.items():
-            source = os.path.join(mtx_dir, plain)
-            if not os.path.isfile(source):
-                continue
-            target = os.path.join(temp_dir, compressed)
-            with open(source, 'rb') as src, gzip.open(target, 'wb') as dst:
-                shutil.copyfileobj(src, dst)
-        read_dir = temp_dir
-    try:
-        adata = sc.read_10x_mtx(read_dir, var_names='gene_symbols', cache=True)
-    finally:
-        if temp_dir:
-            import shutil
-            shutil.rmtree(temp_dir, ignore_errors=True)
+    adata = read_10x_mtx_compat(mtx_dir, var_names='gene_symbols')
     adata.var_names_make_unique()
 
     # 保留 Ensembl ID（read_10x_mtx 在 var_names='gene_symbols' 时

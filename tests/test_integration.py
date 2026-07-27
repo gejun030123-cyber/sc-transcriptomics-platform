@@ -257,28 +257,11 @@ class TestModuleOutputCompleteness:
             results_dir=results_dir, base_mean_filter=0
         )
 
-        # 火山图 JSON 应存在
+        # 火山图统一为原生 Matplotlib 静态输出。
         volcano_files = [rf for rf in result_files if rf.get('category') == 'volcano']
         assert len(volcano_files) >= 1, "应生成火山图"
-
-        with open(volcano_files[0]['file_path']) as f:
-            vol_data = json.load(f)
-
-        # 计算 trace 中的数据点总数
-        total_points = 0
-        for trace in vol_data['data']:
-            x_data = trace.get('x', {})
-            if isinstance(x_data, dict) and 'bdata' in x_data:
-                import base64, struct
-                fmt = {'f4': 'f', 'f8': 'd'}.get(x_data.get('dtype', 'f8'), 'd')
-                decoded = base64.b64decode(x_data['bdata'])
-                count = len(decoded) // struct.calcsize(fmt)
-                total_points += count
-            elif isinstance(x_data, list):
-                total_points += len(x_data)
-
-        assert total_points == n_genes, \
-            f"火山图总点数 ({total_points}) 应等于基因数 ({n_genes})"
+        assert {rf['file_type'] for rf in volcano_files} == {'png', 'svg'}
+        assert all(os.path.exists(rf['file_path']) for rf in volcano_files)
 
 
 # ────────────────────────────────────────────

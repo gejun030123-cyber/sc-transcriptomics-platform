@@ -126,3 +126,66 @@ def test_welch_ttest_log_expression_uses_mean_difference_as_log2fc():
     assert result.loc['changed', 'log2FC'] == pytest.approx(2.0)
     assert result.loc['stable', 'log2FC'] == pytest.approx(0.0)
     assert result.loc['changed', 'qvalue'] < 0.05
+
+
+def test_volcano_display_ceiling_handles_padj_underflow():
+    """Extreme/zero padj values must not stretch the panel to y=300."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    from modules.bulk_deg import _draw_bulk_volcano, _volcano_y_limit
+
+    padj = np.array([0.0, 1e-80, 0.01, 0.5])
+    assert _volcano_y_limit(padj, 0.05) <= 30
+
+    fig, ax = plt.subplots()
+    info = _draw_bulk_volcano(
+        ax,
+        pd.DataFrame({
+            'gene': ['A', 'B', 'C', 'D'],
+            'log2FC': [2.0, -1.5, 0.2, 0.0],
+            'padj': padj,
+            'regulation': ['Up', 'Down', 'NS', 'NS'],
+        }),
+        pval_threshold=0.05,
+        fc_threshold=2.0,
+        top_n=0,
+    )
+    assert info['n_clipped'] == 2
+    assert ax.get_ylim()[1] <= 30
+    plt.close(fig)
+
+
+def test_volcano_gene_labels_use_spaced_boxes_and_arrows():
+    """Dense top genes stay readable: cap labels and separate each side."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    from modules.bulk_deg import _draw_bulk_volcano
+
+    n_each = 8
+    deg_df = pd.DataFrame({
+        'gene': [f'UP{i}' for i in range(n_each)] + [f'DOWN{i}' for i in range(n_each)],
+        'log2FC': np.r_[np.linspace(1.2, 2.0, n_each), np.linspace(-1.2, -2.0, n_each)],
+        'padj': np.r_[np.linspace(1e-9, 8e-9, n_each), np.linspace(1e-9, 8e-9, n_each)],
+        'regulation': ['Up'] * n_each + ['Down'] * n_each,
+    })
+
+    fig, ax = plt.subplots()
+    info = _draw_bulk_volcano(ax, deg_df, top_n=50, show_legend=False)
+    fig.canvas.draw()
+    labels = [text for text in ax.texts if text.get_text().startswith(('UP', 'DOWN'))]
+
+    assert len(labels) == 10  # visual labels are capped; the Top-DEG CSV is unchanged
+    assert all(label.get_bbox_patch() is not None for label in labels)
+    assert all(label.arrow_patch is not None for label in labels)
+    for alignment in ('left', 'right'):
+        y_positions = sorted(
+            label.get_position()[1] for label in labels
+            if label.get_horizontalalignment() == alignment
+        )
+        assert all(
+            second - first >= max(0.55, info['y_limit'] * 0.04) - 1e-7
+            for first, second in zip(y_positions, y_positions[1:])
+        )
+    plt.close(fig)

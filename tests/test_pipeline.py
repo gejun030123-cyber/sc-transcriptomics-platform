@@ -13,7 +13,7 @@ class TestModuleRegistry:
     def test_all_modules_registered(self):
         """所有注册模块都在注册表中。"""
         from modules import MODULE_REGISTRY
-        assert len(MODULE_REGISTRY) == 22
+        assert len(MODULE_REGISTRY) == 23
 
     def test_registry_values_are_classes(self):
         """注册表的值都是类（有 run 方法）。"""
@@ -25,7 +25,7 @@ class TestModuleRegistry:
         """关键模块存在。"""
         from modules import MODULE_REGISTRY
         expected = ['qc', 'normalize', 'hvg', 'dimred', 'clustering',
-                    'bulk_qc', 'bulk_normalize', 'bulk_deg', 'convert_10x']
+                    'sc_timecourse', 'bulk_qc', 'bulk_normalize', 'bulk_deg', 'convert_10x']
         for mod in expected:
             assert mod in MODULE_REGISTRY, f"缺少模块: {mod}"
 

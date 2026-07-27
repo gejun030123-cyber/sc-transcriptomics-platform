@@ -89,6 +89,18 @@ def score_cluster_signature(adata_path, cluster_key, positive_markers, negative_
             'cluster_scores': [],
             'warnings': [],
         }
+    from modules.io_utils import obs_grouping_info
+    grouping = obs_grouping_info(
+        adata, cluster_key, max_categories=50,
+        max_numeric_categories=20, require_multiple=False,
+    )
+    if not grouping['valid']:
+        return {
+            'error': f"cluster_key '{cluster_key}' 不是有效的分类聚类列：{grouping['reason']}",
+            'cluster_key': cluster_key,
+            'cluster_scores': [],
+            'warnings': [grouping['reason']],
+        }
 
     # 匹配 marker 基因
     pos_found, pos_missing = _normalize_gene_names(adata.var_names, positive_markers)

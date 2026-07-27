@@ -324,8 +324,17 @@ def run_branch(pid, branch_id):
                 if not output_adata:
                     raise ValueError(f"模块 {mod_name} 未返回 output_adata")
 
+                summary = result.get('summary', {})
+                result_error = result.get('error') if isinstance(result, dict) else None
+                summary_error = summary.get('error') if isinstance(summary, dict) else None
+                if result_error or summary_error:
+                    summary_json = json.dumps(summary, ensure_ascii=False, default=str)
+                    error_message = str(result_error or summary_error)
+                    task.mark_failed(error_message, summary_json)
+                    raise ValueError(f"模块 {mod_name}：{error_message}")
+
                 register_task_outputs(task, branch.project_id, branch_dir, result)
-                task.mark_completed(output_adata, json.dumps(result.get('summary', {}), ensure_ascii=False))
+                task.mark_completed(output_adata, json.dumps(summary, ensure_ascii=False, default=str))
                 current_input = output_adata
                 current_task = None
 

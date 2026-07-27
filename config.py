@@ -1,5 +1,6 @@
 import os
 import re
+import tempfile
 
 
 def _load_dotenv(path=None):
@@ -53,6 +54,18 @@ class Config:
 
     SECRET_KEY = _load_secret.__func__()
     DATA_DIR = os.environ.get('DATA_DIR', os.path.join(_BASE_DIR, 'data'))
+    # Keep transient analysis files on the project data volume by default.
+    # ``/tmp`` is commonly mounted on the root filesystem and can fill up when
+    # 10x compatibility staging or plotting jobs handle large matrices.
+    RUNTIME_TMP_DIR = os.path.abspath(os.environ.get(
+        'RUNTIME_TMP_DIR', os.path.join(DATA_DIR, 'runtime_tmp')
+    ))
+    NUMBA_CACHE_DIR = os.path.abspath(os.environ.get(
+        'NUMBA_CACHE_DIR', os.path.join(RUNTIME_TMP_DIR, 'numba_cache')
+    ))
+    MPLCONFIG_DIR = os.path.abspath(os.environ.get(
+        'MPLCONFIGDIR', os.path.join(RUNTIME_TMP_DIR, 'mplconfig')
+    ))
     DB_PATH = os.environ.get('DB_PATH', os.path.join(_BASE_DIR, 'instance', 'bioinfo.db'))
     CELLMARKER_PATH = os.environ.get('CELLMARKER_PATH', os.path.join(os.path.dirname(_BASE_DIR), 'CellMarker_Augmented_2021.txt'))
 
@@ -102,6 +115,35 @@ class Config:
         return os.path.join(cls.DATA_DIR, 'projects', pid, 'plots')
 
     @classmethod
+    def runtime_tmp_dir(cls):
+        """Return a writable, project-owned directory for disposable files."""
+        path = os.path.abspath(cls.RUNTIME_TMP_DIR)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    @classmethod
+    def configure_runtime_tmpdir(cls):
+        """Route Python and common Unix temporary-file lookups away from ``/tmp``.
+
+        This runs while ``config`` is imported, before analysis libraries are
+        loaded.  ``RUNTIME_TMP_DIR`` remains an explicit deployment override
+        for installations that keep data on a separate mounted volume.
+        """
+        path = cls.runtime_tmp_dir()
+        for variable in ('TMPDIR', 'TMP', 'TEMP'):
+            os.environ[variable] = path
+        for variable, cache_dir in (
+            ('NUMBA_CACHE_DIR', cls.NUMBA_CACHE_DIR),
+            ('MPLCONFIGDIR', cls.MPLCONFIG_DIR),
+        ):
+            os.makedirs(cache_dir, exist_ok=True)
+            os.environ[variable] = cache_dir
+        # ``tempfile`` caches its selected directory, so update it explicitly
+        # as well as the environment variables.
+        tempfile.tempdir = path
+        return path
+
+    @classmethod
     def branches_dir(cls, pid):
         """候选分支输出目录，隔离于主线 intermediate/."""
         cls._validate_pid(pid)
@@ -127,3 +169,8 @@ class Config:
         if not real_path.startswith(proj_dir + os.sep) and real_path != proj_dir:
             return False, f"路径不在项目目录内: {path}"
         return True, None
+
+
+# Apply the non-root temporary directory before Scanpy, Matplotlib, or worker
+# modules can initialize their own caches.
+Config.configure_runtime_tmpdir()

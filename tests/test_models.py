@@ -73,6 +73,25 @@ class TestProjectModel:
         assert p.id is not None
         assert len(p.id) == 12
 
+    def test_refresh_status_tracks_mainline_tasks(self, test_project):
+        from models import AnalysisTask, Project
+
+        assert Project.refresh_status(test_project) == 'empty'
+
+        task = AnalysisTask(project_id=test_project, module_name='qc')
+        task.save()
+        assert Project.refresh_status(test_project) == 'processing'
+
+        task.mark_running()
+        task.mark_failed('missing dependency', '{"status": "unavailable"}')
+        assert Project.refresh_status(test_project) == 'failed'
+
+        completed = AnalysisTask(project_id=test_project, module_name='normalize')
+        completed.save()
+        completed.mark_running()
+        completed.mark_completed('/tmp/output.h5ad', '{}')
+        assert Project.refresh_status(test_project) == 'completed'
+
 
 class TestAnalysisTaskModel:
     """测试 AnalysisTask 模型。"""

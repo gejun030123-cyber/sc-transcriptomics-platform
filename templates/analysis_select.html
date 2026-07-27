@@ -32,12 +32,47 @@
                         data-bs-toggle="modal" data-bs-target="#savePipelineModal">保存为流程模板</button>
             </div>
         </div>
+
+        <section class="card p-3 mt-3 analysis-copilot" aria-labelledby="analysis-copilot-title">
+            <div class="d-flex justify-content-between align-items-start gap-2">
+                <div>
+                    <h6 class="mb-1" id="analysis-copilot-title">AI 分析协作助手</h6>
+                    <p class="text-muted small mb-0">基于当前步骤、输入数据与已填写参数提供建议。</p>
+                </div>
+                <span class="badge text-bg-light border" id="copilot-status">连接中</span>
+            </div>
+            <div class="copilot-context mt-2" id="copilot-context">当前步骤：{{ module.display }}</div>
+            <div class="copilot-actions mt-2">
+                <button type="button" class="btn btn-outline-primary btn-sm" onclick="askCopilot('recommend')">推荐参数</button>
+                <button type="button" class="btn btn-outline-secondary btn-sm" onclick="askCopilot('explain')">解释此步骤</button>
+                <button type="button" class="btn btn-outline-secondary btn-sm" onclick="askCopilot('check')">检查输入</button>
+                {% if module.name == 'sc_timecourse' %}
+                <button type="button" class="btn btn-outline-warning btn-sm" onclick="askCopilot('temporal_design')">检查时序设计</button>
+                {% endif %}
+            </div>
+            <div class="copilot-messages mt-2" id="copilot-messages" aria-live="polite">
+                <div class="copilot-message assistant">告诉我你的分析目标；我会结合当前表单给出方法、参数和备选方案。所有执行操作仍需你确认。</div>
+            </div>
+            <div class="input-group input-group-sm mt-2">
+                <textarea class="form-control" id="copilot-input" rows="2" placeholder="例如：我要比较治疗组与对照组，当前参数合适吗？"></textarea>
+                <button type="button" class="btn btn-primary" id="copilot-send" onclick="sendCopilotMessage()">发送</button>
+            </div>
+            <button type="button" class="btn btn-link btn-sm p-0 mt-2 text-start" onclick="clearCopilotHistory()">清空本项目对话</button>
+        </section>
     </div>
 
     <div class="col-md-9">
         <div class="card p-4">
             <h4>{{ module.display }}</h4>
             <p class="text-muted">{{ module.desc }}</p>
+
+            {% if module.name == 'sc_timecourse' %}
+            <div class="alert alert-warning small" id="temporal-design-card">
+                <div class="fw-semibold mb-1">先确认实验设计，再运行时序统计</div>
+                <div>需要真实时间列、<code>sample_id</code> 生物学重复、细胞类型列，以及原始 UMI <code>counts</code> 层。时间点不是技术 batch，不能把它作为 Harmony/BBKNN/scVI 的校正列。</div>
+                <div class="mt-1" id="temporal-design-status">选择输入数据后，系统会尝试填入时间点和样本列。</div>
+            </div>
+            {% endif %}
 
             <form method="post" class="param-form">
                 <!-- 预设工具栏 -->
@@ -75,24 +110,40 @@
                                 <label style="font-weight:normal"><input type="checkbox" name="_viz_export_png" checked> PNG（300 dpi）</label>
                             </div></label>
                         </div>
+                        <div class="d-flex flex-wrap align-items-center gap-2 mt-3 small">
+                            <span class="text-muted">快速图形预设：</span>
+                            <button type="button" class="btn btn-outline-secondary btn-sm" onclick="applyVisualizationQuickPreset('paper')">论文图</button>
+                            <button type="button" class="btn btn-outline-secondary btn-sm" onclick="applyVisualizationQuickPreset('compact')">紧凑预览</button>
+                            <button type="button" class="btn btn-outline-secondary btn-sm" onclick="applyVisualizationQuickPreset('presentation')">汇报图</button>
+                            <span class="text-muted">可通过上方“保存预设”保存为项目模板。</span>
+                        </div>
                     </div>
                 </div>
 
                 <div class="mb-3">
                     <label class="form-label">输入数据</label>
+                    <div id="input-guidance" class="alert alert-info py-2 px-3 small mb-2"
+                         {% if not recommended_input %}style="display:none;"{% endif %}>
+                        <div><strong>系统推荐：</strong><span id="recommended-input-label">{{ recommended_input.name if recommended_input else '' }}</span></div>
+                        <div id="recommended-input-reason" class="mt-1">{{ recommended_input.reason if recommended_input else '' }}</div>
+                        <div id="recommended-input-source" class="text-muted mt-1">{{ recommended_input.module_label if recommended_input else '' }}{% if recommended_input and recommended_input.finished_at %} · {{ recommended_input.finished_at[:16] }}{% endif %}</div>
+                    </div>
                     <select name="input_path" class="form-select" required>
                         <option value="">-- 请选择输入文件 --</option>
-                        {% for h in uploaded_h5ad %}
-                        <option value="{{ h.path }}">{{ h.name }} (已上传)</option>
-                        {% endfor %}
-                        {% for t in completed_tasks %}
-                        {% if t.output_adata_path %}
-                        <option value="{{ t.output_adata_path }}" {% if loop.first %}selected{% endif %}>
-                            {{ module_display_map.get(t.module_name, t.module_name) }}{% if t.finished_at %} ({{ t.finished_at[:16] }}){% endif %} [{{ t.id }}]
+                        {% for item in input_options %}
+                        <option value="{{ item.path }}"
+                                data-label="{{ item.name|e }}"
+                                data-reason="{{ item.reason|e }}"
+                                data-source="{{ item.module_label|e }}{% if item.finished_at %} · {{ item.finished_at[:16]|e }}{% endif %}"
+                                {% if item.recommended %}selected{% endif %}>
+                            {% if item.recommended %}★ 推荐 · {% endif %}{{ item.module_label }} · {{ item.name }}{% if item.task_id %} [{{ item.task_id }}]{% endif %}
                         </option>
-                        {% endif %}
                         {% endfor %}
                     </select>
+                    {% if not input_options %}
+                    <div class="text-danger small mt-2">当前项目没有可用输入文件，请先上传数据或完成上游分析。</div>
+                    {% endif %}
+                    <small class="text-muted d-block mt-1">优先使用带“★ 推荐”的上一步输出；只有在分支分析或重跑时才手动切换历史文件。</small>
                 </div>
 
                 <!-- 数据信息面板 -->
@@ -118,13 +169,53 @@
                     </div>
                 </div>
 
+                <div id="obs-column-picker" class="alert alert-light border mb-3 py-2" style="display:none;">
+                    <div class="fw-semibold small mb-1">可手动选择的 adata.obs 列</div>
+                    <div class="small text-muted mb-1">点击下面的列名，可填入当前参数输入框；输入框本身也支持下拉选择。</div>
+                    <div id="obs-column-chips" class="d-flex flex-wrap gap-1"></div>
+                    <div id="obs-column-status" class="small text-muted mt-1"></div>
+                </div>
+                <datalist id="obs-columns-datalist"></datalist>
+
+                <div id="design-preflight-panel" class="card p-3 mb-3 border-primary-subtle" style="display:none;">
+                    <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+                        <div>
+                            <h6 class="mb-0">分析前检查与 metadata 映射</h6>
+                            <div class="small text-muted">根据当前输入和参数预览比较、重复与统计风险；不会修改原始数据。</div>
+                        </div>
+                        <span id="design-preflight-status" class="badge bg-secondary">检查中</span>
+                    </div>
+                    <div id="design-preflight-summary" class="small mb-2"></div>
+                    <div id="design-preflight-roles" class="small mb-2"></div>
+                    <div id="design-preflight-contrast" class="small mb-2"></div>
+                    <div id="design-preflight-checks" class="list-group list-group-flush"></div>
+                    <div class="d-flex flex-wrap gap-2 mt-3">
+                        <button type="button" class="btn btn-outline-primary btn-sm" id="btn-apply-design-mapping" disabled>填入建议的 metadata 映射</button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-apply-design-contrast" style="display:none;">填入建议比较</button>
+                    </div>
+                </div>
+
                 {% for param in schema %}
                 <div class="mb-3 param-field" data-param-key="{{ param.key }}"{% if param.get('show_if') %} data-show-if='{{ param.get('show_if')|tojson }}'{% endif %}>
                     <label class="form-label">{{ param.label }}</label>
-                    {% if param.type == 'select' %}
+                    {% if module.name == 'bulk_enrichment' and param.key == 'input_source' %}
+                    <select name="{{ param.key }}" class="form-select">
+                        <option value="">-- 请选择一个 DEG 比较（或使用自定义基因）--</option>
+                        {% for source in enrichment_deg_sources %}
+                        <option value="{{ source.path }}" {% if source.path == param.default %}selected{% endif %}>
+                            {{ source.label }} [{{ source.task_id }}]
+                        </option>
+                        {% endfor %}
+                    </select>
+                    {% if enrichment_deg_sources|length > 1 %}
+                    <small class="text-primary d-block mt-1">检测到 {{ enrichment_deg_sources|length }} 个比较。一次富集只对应一个比较，避免混合不同对比的基因。</small>
+                    {% elif not enrichment_deg_sources %}
+                    <small class="text-danger d-block mt-1">未找到可用 DEG 结果。请先完成差异表达分析，或使用下方自定义基因列表。</small>
+                    {% endif %}
+                    {% elif param.type == 'select' %}
                     <select name="{{ param.key }}" class="form-select">
                         {% for opt in param.options %}
-                        <option value="{{ opt }}" {% if opt == param.default %}selected{% endif %}>{{ opt }}</option>
+                        <option value="{{ opt }}" {% if opt == param.default %}selected{% endif %}>{{ param.option_labels.get(opt, opt) if param.option_labels else opt }}</option>
                         {% endfor %}
                     </select>
                     {% elif param.type == 'dynamic_select' %}
@@ -134,6 +225,10 @@
                         <option value="{{ param.default }}" selected>{{ param.default }}</option>
                         {% endif %}
                     </select>
+                    {% elif param.type == 'dynamic_multiselect' %}
+                    <div class="multiselect-group dynamic-multiselect border rounded p-2" data-key="{{ param.key }}" data-depends-on="{{ param.depends_on }}" data-default="{{ param.default }}" style="max-height:180px;overflow-y:auto;">
+                        <span class="text-muted small multiselect-loading">请先选择输入文件和分组列</span>
+                    </div>
                     {% elif param.type == 'checkbox' %}
                     <input type="checkbox" name="{{ param.key }}" class="form-check-input"
                            {% if param.default %}checked{% endif %}>
@@ -164,11 +259,33 @@
                     {% endif %}
                     {% elif param.type == 'number' %}
                     <input type="number" name="{{ param.key }}" class="form-control"
-                           value="{{ param.default }}" step="{{ param.step|default(1) }}">
+                           value="{{ param.default }}" step="{{ param.step|default(1) }}"
+                           {% if param.min is defined %}min="{{ param.min }}"{% endif %}
+                           {% if param.max is defined %}max="{{ param.max }}"{% endif %}>
                     {% else %}
-                    <input type="text" name="{{ param.key }}" class="form-control{% if param.key in ('groupby', 'group_column', 'batch_key', 'cluster_key') %} groupby-field{% endif %}"
+                    {% if module.name == 'bulk_heatmap' and param.key == 'deg_comparison' %}
+                    <select name="{{ param.key }}" class="form-select">
+                        <option value="">-- 使用最新 DEG 结果 --</option>
+                        {% for source in heatmap_deg_sources %}
+                        <option value="{{ source.path }}" {% if source.path == param.default %}selected{% endif %}>{{ source.label }}</option>
+                        {% endfor %}
+                    </select>
+                    {% if not heatmap_deg_sources %}
+                    <small class="text-danger d-block mt-1">未找到可用的单个 DEG 比较，请先完成差异表达分析。</small>
+                    {% endif %}
+                    {% else %}
+                    <input type="text" name="{{ param.key }}" class="form-control{% if param.key in ('groupby', 'group_column', 'batch_key', 'cluster_key', 'color_by') %} groupby-field{% endif %}"
                            value="{{ param.default }}" data-key="{{ param.key }}"
-                           placeholder="{% if param.key in ('groupby', 'group_column') %}输入分组列名，选择文件后自动填充{% elif param.key == 'batch_key' %}输入批次列名{% else %}{{ param.default }}{% endif %}">
+                           {% if param.key in ('groupby', 'group_column', 'batch_key', 'cluster_key', 'color_by') %}list="obs-columns-datalist"{% endif %}
+                           placeholder="{% if param.key in ('groupby', 'group_column', 'color_by') %}输入分组列名，选择文件后自动填充{% elif param.key == 'batch_key' %}输入批次列名{% else %}{{ param.default }}{% endif %}">
+                    {% if param.key in ('groupby', 'group_column', 'batch_key', 'cluster_key', 'color_by') %}
+                    <select class="form-select form-select-sm mt-1 obs-column-select"
+                            data-target-key="{{ param.key }}">
+                        <option value="">-- 从 obs 列选择并填入 {{ param.label }} --</option>
+                    </select>
+                    <small class="text-primary d-block mt-1">可直接输入，或使用上方下拉框选择真实的 obs 列名。</small>
+                    {% endif %}
+                    {% endif %}
                     {% endif %}
                     {% if param.help %}
                     <small class="text-muted d-block mt-1" style="font-size:0.82rem; line-height:1.4; border-left: 2px solid #dee2e6; padding-left: 8px;">{{ param.help }}</small>
@@ -249,6 +366,16 @@
 .module-drag-list .module-item.active { background: #e7f1ff; font-weight: 600; }
 .module-drag-list .module-item.dragging { opacity: 0.4; }
 .module-drag-list .module-item.drag-over { border-top: 2px solid #0d6efd; }
+.analysis-copilot { border-top: 3px solid #1a237e; }
+.copilot-context { padding: 7px 8px; background: #f4f6ff; border-radius: 6px; color: #4b5563; font-size: 11px; line-height: 1.45; }
+.copilot-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.copilot-messages { max-height: 280px; overflow-y: auto; padding: 2px; }
+.copilot-message { border-radius: 8px; padding: 8px; margin-bottom: 6px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.copilot-message.assistant { background: #f3f4f6; color: #374151; }
+.copilot-message.user { background: #e8eaf6; color: #1a237e; margin-left: 12px; }
+.copilot-message.error { background: #fef2f2; color: #b91c1c; }
+.copilot-proposal { border: 1px solid #f59e0b; background: #fffbeb; border-radius: 8px; padding: 8px; margin: 6px 0; font-size: 11px; }
+.copilot-proposal pre { max-height: 100px; overflow: auto; margin: 5px 0; white-space: pre-wrap; }
 </style>
 <script>
 // === 预设系统 ===
@@ -313,6 +440,37 @@ function applyPresetToForm(presetParams) {
 function findParamControl(name) {
     return Array.from(document.querySelectorAll('.param-form input, .param-form select, .param-form textarea'))
         .find(el => el.name === name);
+}
+
+function applyVisualizationQuickPreset(name) {
+    const presets = {
+        paper: {
+            _viz_theme: 'nature', _viz_width: 900, _viz_height: 650,
+            _viz_fontsize: 11, _viz_fontfamily: 'Helvetica',
+            _viz_umap_point_size: 4, _viz_umap_opacity: 0.75,
+            _viz_legend_fontsize: 9, _viz_export_svg: true, _viz_export_png: true,
+        },
+        compact: {
+            _viz_theme: 'default', _viz_width: 700, _viz_height: 460,
+            _viz_fontsize: 11, _viz_fontfamily: 'Arial',
+            _viz_umap_point_size: 4, _viz_umap_opacity: 0.7,
+            _viz_legend_fontsize: 9, _viz_export_svg: false, _viz_export_png: true,
+        },
+        presentation: {
+            _viz_theme: 'default', _viz_width: 1200, _viz_height: 760,
+            _viz_fontsize: 16, _viz_fontfamily: 'Arial',
+            _viz_umap_point_size: 7, _viz_umap_opacity: 0.82,
+            _viz_legend_fontsize: 12, _viz_export_svg: true, _viz_export_png: true,
+        },
+    };
+    const values = presets[name];
+    if (!values) return;
+    Object.entries(values).forEach(([fieldName, value]) => {
+        const field = document.querySelector(`[name="${fieldName}"]`);
+        if (!field) return;
+        if (field.type === 'checkbox') field.checked = Boolean(value);
+        else field.value = value;
+    });
 }
 
 function getParamValue(name) {
@@ -517,6 +675,222 @@ document.querySelector('.param-form').addEventListener('submit', function() {
 const inputSelect = document.querySelector('select[name="input_path"]');
 const dynamicSelects = document.querySelectorAll('.dynamic-select');
 const groupbyFields = document.querySelectorAll('.groupby-field');
+const obsColumnSelects = document.querySelectorAll('.obs-column-select');
+let activeObsColumnField = null;
+
+function renderObsColumnPicker(columns, errorMessage = '') {
+    const picker = document.getElementById('obs-column-picker');
+    const chips = document.getElementById('obs-column-chips');
+    const status = document.getElementById('obs-column-status');
+    const datalist = document.getElementById('obs-columns-datalist');
+    if (!picker || !chips || !status || !datalist) return;
+
+    const names = [...new Set((columns || []).map(value => String(value)))];
+    datalist.innerHTML = '';
+    names.forEach(name => {
+        const option = document.createElement('option');
+        option.value = name;
+        datalist.appendChild(option);
+    });
+    obsColumnSelects.forEach(select => {
+        const key = select.dataset.targetKey;
+        const target = findParamControl(key);
+        const currentValue = target ? target.value : '';
+        select.innerHTML = '';
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = `-- 从 obs 列选择并填入 ${key} --`;
+        select.appendChild(placeholder);
+        names.forEach(name => {
+            const option = document.createElement('option');
+            option.value = name;
+            option.textContent = name;
+            select.appendChild(option);
+        });
+        if (names.includes(currentValue)) select.value = currentValue;
+        select.onchange = () => {
+            if (!select.value) return;
+            const field = findParamControl(key);
+            if (!field) return;
+            field.value = select.value;
+            if (field.classList.contains('groupby-field')) activeObsColumnField = field;
+            field.dispatchEvent(new Event('change', {bubbles: true}));
+            field.dispatchEvent(new Event('input', {bubbles: true}));
+        };
+    });
+    chips.innerHTML = '';
+    if (!names.length) {
+        picker.style.display = errorMessage ? 'block' : 'none';
+        status.textContent = errorMessage || '';
+        return;
+    }
+    picker.style.display = 'block';
+    status.textContent = `${names.length} 个可用列；先点击目标参数输入框，再点击下方列名即可填入。`;
+    names.forEach(name => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn btn-outline-secondary btn-sm py-0 px-1';
+        button.textContent = name;
+        button.title = '填入当前选中的分组参数';
+        button.addEventListener('click', () => {
+            const target = activeObsColumnField || Array.from(groupbyFields).find(
+                field => ['groupby', 'group_column', 'color_by'].includes(field.dataset.key)
+            );
+            if (!target) return;
+            target.value = name;
+            target.dispatchEvent(new Event('input', {bubbles: true}));
+            target.focus();
+            status.textContent = `已将“${name}”填入 ${target.dataset.key}；请继续选择实验组/对照组。`;
+        });
+        chips.appendChild(button);
+    });
+}
+
+let latestDesignPreflight = null;
+let designPreflightRequest = 0;
+let designPreflightTimer = null;
+
+function designStatusBadge(status) {
+    if (status === 'ready') return ['bg-success', '可直接分析'];
+    if (status === 'blocked') return ['bg-danger', '需先修正'];
+    return ['bg-warning text-dark', '探索性 / 需复核'];
+}
+
+function renderDesignPreflight(data) {
+    const panel = document.getElementById('design-preflight-panel');
+    const status = document.getElementById('design-preflight-status');
+    const summary = document.getElementById('design-preflight-summary');
+    const roles = document.getElementById('design-preflight-roles');
+    const contrast = document.getElementById('design-preflight-contrast');
+    const checks = document.getElementById('design-preflight-checks');
+    const mappingButton = document.getElementById('btn-apply-design-mapping');
+    const contrastButton = document.getElementById('btn-apply-design-contrast');
+    if (!panel || !status || !summary || !roles || !contrast || !checks) return;
+    panel.style.display = '';
+
+    if (data.error) {
+        status.className = 'badge bg-danger';
+        status.textContent = '检查失败';
+        summary.innerHTML = '<span class="text-danger">' + escapeHtml(data.error) + '</span>';
+        roles.innerHTML = '';
+        contrast.innerHTML = '';
+        checks.innerHTML = '';
+        if (mappingButton) mappingButton.disabled = true;
+        if (contrastButton) contrastButton.style.display = 'none';
+        return;
+    }
+
+    latestDesignPreflight = data;
+    const [badgeClass, badgeText] = designStatusBadge(data.status);
+    status.className = 'badge ' + badgeClass;
+    status.textContent = badgeText;
+    const measurement = data.measurement_type ? `表达尺度：${escapeHtml(data.measurement_type)}` : '';
+    const intro = data.status === 'ready'
+        ? '当前选择满足该模块的最小前提。'
+        : (data.status === 'blocked' ? '存在不能执行的前提条件，请先处理下方红色项。' : '可生成结果，但存在需要在解释时保留的统计限制。');
+    summary.innerHTML = `<span class="${data.status === 'blocked' ? 'text-danger' : (data.status === 'ready' ? 'text-success' : 'text-warning-emphasis')}">${intro}</span>${measurement ? ' <span class="text-muted ms-1">' + measurement + '</span>' : ''}`;
+
+    const roleNames = {
+        condition_candidates: '条件', sample_candidates: '生物学样本',
+        batch_candidates: '技术 batch', time_candidates: '时间点',
+        celltype_candidates: '细胞类型 / cluster',
+    };
+    const roleRows = Object.entries(roleNames).map(([key, label]) => {
+        const values = (data.metadata_roles && data.metadata_roles[key]) || [];
+        return values.length ? `<span class="me-3"><strong>${label}：</strong>${values.map(escapeHtml).join(', ')}</span>` : '';
+    }).filter(Boolean);
+    const mapped = Object.entries(data.recommended_params || {}).map(([key, value]) =>
+        `<code>${escapeHtml(key)}</code> → <code>${escapeHtml(String(value))}</code>`
+    );
+    roles.innerHTML = roleRows.length
+        ? `<div class="mb-1">候选 metadata：${roleRows.join('')}</div>${mapped.length ? '<div class="text-muted">建议填入：' + mapped.join('；') + '</div>' : ''}`
+        : '<span class="text-muted">未检测到可直接映射的 metadata 列；可继续手动填写参数。</span>';
+
+    const groups = (data.contrast && data.contrast.groups) || [];
+    const selected = (data.contrast && data.contrast.selected) || {};
+    if (groups.length) {
+        const groupText = groups.map(group => `${escapeHtml(group.name)} (n=${escapeHtml(String(group.n))})`).join('；');
+        const selectedText = selected.group1 && selected.group2
+            ? `建议比较：<strong>${escapeHtml(selected.group1)} vs ${escapeHtml(selected.group2)}</strong>` : '';
+        contrast.innerHTML = `<strong>比较预览：</strong>${groupText}${selectedText ? '<span class="ms-2">' + selectedText + '</span>' : ''}`;
+    } else {
+        contrast.innerHTML = '';
+    }
+
+    checks.innerHTML = ((data.checks || []).map(check => {
+        const color = check.status === 'pass' ? 'success' : (check.status === 'blocked' ? 'danger' : 'warning text-dark');
+        const label = check.status === 'pass' ? '通过' : (check.status === 'blocked' ? '需处理' : '复核');
+        const value = check.value === undefined || check.value === null
+            ? '' : `<div class="text-muted small mt-1">${escapeHtml(typeof check.value === 'object' ? JSON.stringify(check.value) : String(check.value))}</div>`;
+        return `<div class="list-group-item px-0 py-2"><div class="d-flex justify-content-between gap-2"><div><strong>${escapeHtml(check.name)}</strong><div class="text-muted">${escapeHtml(check.message)}</div>${value}</div><span class="badge bg-${color}">${label}</span></div></div>`;
+    })).join('') || '<div class="text-muted small">没有额外检查项。</div>';
+
+    if (mappingButton) mappingButton.disabled = !Object.keys(data.recommended_params || {}).length;
+    const hasContrastFields = findParamControl('group1') && findParamControl('group2');
+    if (contrastButton) contrastButton.style.display = hasContrastFields && selected.group1 && selected.group2 ? '' : 'none';
+}
+
+async function refreshDesignPreflight() {
+    const filePath = inputSelect ? inputSelect.value : '';
+    const panel = document.getElementById('design-preflight-panel');
+    if (!filePath || !panel) return;
+    const status = document.getElementById('design-preflight-status');
+    panel.style.display = '';
+    if (status) {
+        status.className = 'badge bg-secondary';
+        status.textContent = '检查中';
+    }
+    const requestId = ++designPreflightRequest;
+    try {
+        const response = await fetch(`/api/projects/${PROJECT_ID}/design-preflight`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                file_path: filePath,
+                module_name: MODULE_NAME,
+                params: collectCurrentParams(),
+            }),
+        });
+        const data = await response.json();
+        if (requestId === designPreflightRequest) renderDesignPreflight(data);
+    } catch (error) {
+        if (requestId === designPreflightRequest) renderDesignPreflight({error: error.message || '请求失败'});
+    }
+}
+
+function scheduleDesignPreflight() {
+    clearTimeout(designPreflightTimer);
+    designPreflightTimer = setTimeout(refreshDesignPreflight, 350);
+}
+
+document.getElementById('btn-apply-design-mapping')?.addEventListener('click', () => {
+    const params = (latestDesignPreflight && latestDesignPreflight.recommended_params) || {};
+    Object.entries(params).forEach(([key, value]) => {
+        const field = findParamControl(key);
+        if (!field) return;
+        const isDefault = field.value === (field.defaultValue || '');
+        if (!field.value || isDefault) field.value = value;
+    });
+    updateConditionalParams();
+    updateDynamicSelects();
+    scheduleDesignPreflight();
+});
+
+document.getElementById('btn-apply-design-contrast')?.addEventListener('click', () => {
+    const selected = latestDesignPreflight && latestDesignPreflight.contrast && latestDesignPreflight.contrast.selected;
+    if (!selected || !selected.group1 || !selected.group2) return;
+    const group1 = findParamControl('group1');
+    const group2 = findParamControl('group2');
+    if (!group1 || !group2) return;
+    updateDynamicSelects();
+    window.setTimeout(() => {
+        group1.value = selected.group1;
+        group2.value = selected.group2;
+        group1.dispatchEvent(new Event('change'));
+        group2.dispatchEvent(new Event('change'));
+        scheduleDesignPreflight();
+    }, 80);
+});
 
 let autoGroupMapping = null;  // 存储自动检测的分组映射
 let autoGroupCandidates = [];
@@ -571,9 +945,9 @@ async function fetchColumnValues(filePath, column) {
 
 async function fetchObsColumns(filePath) {
     try {
-        const r = await fetch(`/api/obs-columns?file_path=${encodeURIComponent(filePath)}`);
+        const r = await fetch(`/api/obs-columns?file_path=${encodeURIComponent(filePath)}&module_name=${encodeURIComponent(MODULE_NAME)}`);
         return await r.json();
-    } catch(e) { return {columns: [], sample_groups: {}}; }
+    } catch(e) { return {columns: [], sample_groups: {}, error: '读取 obs 列失败：' + e.message}; }
 }
 
 function updateDynamicSelects() {
@@ -629,6 +1003,38 @@ function updateDynamicSelects() {
         if (currentVal && sel.querySelector(`option[value="${currentVal}"]`)) {
             sel.value = currentVal;
         }
+    });
+
+    document.querySelectorAll('.dynamic-multiselect').forEach(async (group) => {
+        const column = groupbyMap[group.dataset.dependsOn] || '';
+        const selected = new Set(Array.from(group.querySelectorAll('input:checked')).map(input => input.value));
+        const defaultValues = String(group.dataset.default || '').split(',').filter(Boolean);
+        if (!column) {
+            group.innerHTML = '<span class="text-muted small">请先输入分组列名</span>';
+            return;
+        }
+        let values = [];
+        if (column === '_auto_group_' && autoGroupMapping) values = autoGroupMapping.values || [];
+        else values = await fetchColumnValues(filePath, column);
+        group.replaceChildren();
+        if (!values.length) {
+            group.innerHTML = '<span class="text-muted small">未读取到可选分组</span>';
+            return;
+        }
+        values.forEach(value => {
+            const label = document.createElement('label');
+            label.className = 'd-block small mb-1';
+            label.style.cursor = 'pointer';
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.name = group.dataset.key;
+            checkbox.value = value;
+            checkbox.className = 'form-check-input me-1';
+            checkbox.checked = selected.has(value) || defaultValues.includes(value);
+            label.appendChild(checkbox);
+            label.appendChild(document.createTextNode(value));
+            group.appendChild(label);
+        });
     });
 }
 
@@ -767,6 +1173,11 @@ async function suggestGroupbyColumns() {
 
     const result = await fetchObsColumns(filePath);
     const columns = result.columns || [];
+    renderObsColumnPicker(columns, result.error || '');
+    const groupingCandidates = result.grouping_candidates || [];
+    const suggestions = result.suggestions || {};
+    const timeCandidates = result.time_candidates || [];
+    const sampleCandidates = result.sample_candidates || [];
     const sampleGroups = result.sample_groups || {};
 
     autoGroupMapping = sampleGroups.auto_group || null;
@@ -775,32 +1186,87 @@ async function suggestGroupbyColumns() {
     groupbyFields.forEach(f => {
         const oldHint = f.parentNode.querySelector('.auto-group-hint');
         if (oldHint && (columns.length > 0 || !autoGroupMapping)) oldHint.remove();
-        if (columns.length > 0) {
-            // 有 obs 列：如果当前值是默认值或为空，建议第一个非 QC 列
-            const defaultVal = f.getAttribute('value') || '';
-            if (!f.value || f.value === defaultVal) {
-                const suggestion = columns.find(c => !['total_counts', 'n_genes_by_counts', 'pct_counts_mt'].includes(c));
-                if (suggestion) f.value = suggestion;
-            }
-        } else if (autoGroupMapping && ['groupby', 'group_column'].includes(f.dataset.key)) {
-            // 从样本名自动检测到分组，强制覆盖默认值
+        const key = f.dataset.key;
+        const defaultVal = f.getAttribute('value') || '';
+        const isDefaultValue = !f.value || f.value === defaultVal || f.value === '_auto_group_';
+        const suggestion = suggestions[key] || (
+            ['groupby', 'group_column', 'color_by'].includes(key) ? groupingCandidates[0] : ''
+        );
+        if (suggestion && isDefaultValue) {
+            // 按参数语义分别选择：groupby/condition、batch_key、cluster_key
+            // 不再全部复用同一个第一个候选列。
+            f.value = suggestion;
+        } else if (!suggestion && autoGroupMapping && isDefaultValue
+                   && ['groupby', 'group_column', 'color_by'].includes(key)) {
+            // 没有可靠的 obs 生物分组时，再从样本名自动检测分组
             f.value = '_auto_group_';
             renderAutoGroupHint(f);
         }
     });
+    suggestTemporalMetadata(columns, timeCandidates, sampleCandidates);
     updateDynamicSelects();
+    scheduleDesignPreflight();
+}
+
+function suggestTemporalMetadata(columns, timeCandidates, sampleCandidates) {
+    if (MODULE_NAME !== 'sc_timecourse') return;
+    const byName = (names) => names.find(name => columns.includes(name)) || '';
+    const setIfDefault = (key, suggestion) => {
+        const field = findParamControl(key);
+        if (!field || !suggestion) return;
+        const initial = field.defaultValue || '';
+        if (!field.value || field.value === initial) field.value = suggestion;
+    };
+    const namedTime = byName(['timepoint', 'time', 'time_value', 'day', 'days', 'hour', 'hours', 'week', 'stage']);
+    const namedSample = byName(['sample_id', 'sample', 'library_id', 'orig.ident']);
+    const namedCelltype = byName(['celltype', 'cell_type', 'annotation', 'leiden']);
+    const namedCondition = byName(['condition', 'treatment', 'group', 'treatment_group']);
+    setIfDefault('timepoint_key', timeCandidates[0] || namedTime);
+    setIfDefault('sample_key', sampleCandidates[0] || namedSample);
+    setIfDefault('celltype_key', namedCelltype);
+    setIfDefault('condition_key', namedCondition);
+
+    const status = document.getElementById('temporal-design-status');
+    if (status) {
+        const timeField = findParamControl('timepoint_key');
+        const sampleField = findParamControl('sample_key');
+        const timeText = timeField && columns.includes(timeField.value) ? '已识别时间列：' + timeField.value : '未识别时间列，请在 h5ad.obs 中补充后填写。';
+        const sampleText = sampleField && columns.includes(sampleField.value) ? '样本列：' + sampleField.value : '未识别 sample_id；将仅生成描述性图。';
+        status.textContent = timeText + '；' + sampleText;
+    }
 }
 
 if (inputSelect) {
-    inputSelect.addEventListener('change', suggestGroupbyColumns);
+    function updateInputGuidance() {
+        const selected = inputSelect.selectedOptions[0];
+        const panel = document.getElementById('input-guidance');
+        if (!selected || !selected.value || !panel) return;
+        panel.style.display = 'block';
+        document.getElementById('recommended-input-label').textContent = selected.dataset.label || selected.textContent.trim();
+        document.getElementById('recommended-input-reason').textContent = selected.dataset.reason || '已选择此输入文件';
+        document.getElementById('recommended-input-source').textContent = selected.dataset.source || '';
+    }
+    inputSelect.addEventListener('change', () => {
+        updateInputGuidance();
+        suggestGroupbyColumns();
+    });
+    updateInputGuidance();
 }
 
 groupbyFields.forEach(f => {
+    f.addEventListener('focus', () => { activeObsColumnField = f; });
     f.addEventListener('change', updateDynamicSelects);
     f.addEventListener('input', () => {
         clearTimeout(f._debounce);
         f._debounce = setTimeout(updateDynamicSelects, 500);
     });
+});
+
+document.querySelectorAll('.param-form input, .param-form select, .param-form textarea').forEach(field => {
+    if (!field.name || field.name === 'input_path' || field.name.startsWith('_')) return;
+    const refresh = () => scheduleDesignPreflight();
+    field.addEventListener('change', refresh);
+    if (field.type !== 'checkbox' && field.tagName !== 'SELECT') field.addEventListener('input', refresh);
 });
 
 document.querySelectorAll('.dynamic-select[data-key="group1"]').forEach(sel => {
@@ -812,7 +1278,7 @@ const form = document.querySelector('form.param-form');
 if (form) {
     form.addEventListener('submit', (e) => {
         const groupbyVal = Array.from(groupbyFields).find(
-            f => ['groupby', 'group_column'].includes(f.dataset.key));
+            f => ['groupby', 'group_column', 'color_by'].includes(f.dataset.key));
         if (groupbyVal && groupbyVal.value === '_auto_group_' && autoGroupMapping) {
             // 注入隐藏字段传递自动分组映射
             let hidden = form.querySelector('input[name="_auto_group_mapping"]');
@@ -1048,5 +1514,183 @@ document.getElementById('btn-reset-defaults').addEventListener('click', function
         }
     });
 });
+
+// === 嵌入式 AI 分析协作助手 ===
+let copilotBusy = false;
+let copilotPendingTools = [];
+
+function copilotElement(id) {
+    return document.getElementById(id);
+}
+
+function addCopilotMessage(role, content) {
+    const message = document.createElement('div');
+    message.className = 'copilot-message ' + role;
+    message.textContent = content == null ? '' : String(content);
+    copilotElement('copilot-messages').appendChild(message);
+    message.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function setCopilotStatus(text, healthy) {
+    const status = copilotElement('copilot-status');
+    status.textContent = text;
+    status.className = 'badge border ' + (healthy ? 'text-bg-success' : 'text-bg-light');
+}
+
+function currentCopilotContext() {
+    const selected = document.querySelector('select[name="input_path"] option:checked');
+    const input = selected && selected.value
+        ? (selected.dataset.label || selected.textContent.trim())
+        : '尚未选择输入文件';
+    const params = collectCurrentParams();
+    const visibleParams = {};
+    Object.entries(params).forEach(([key, value]) => {
+        const control = findParamControl(key);
+        if (!control || !control.closest('.param-field') || control.closest('.param-field').style.display !== 'none') {
+            visibleParams[key] = value;
+        }
+    });
+    return {
+        module: MODULE_NAME,
+        module_display: '{{ module.display|e }}',
+        input,
+        params: visibleParams,
+    };
+}
+
+function refreshCopilotContext() {
+    const context = currentCopilotContext();
+    copilotElement('copilot-context').textContent = '当前步骤：' + context.module_display + '；输入：' + context.input;
+}
+
+async function loadCopilotState() {
+    refreshCopilotContext();
+    try {
+        const [configResponse, historyResponse] = await Promise.all([
+            fetch('/api/chat/config'), fetch('/api/chat/history/' + PROJECT_ID),
+        ]);
+        const config = await configResponse.json();
+        const history = await historyResponse.json();
+        if (!configResponse.ok || !config.configured) {
+            setCopilotStatus('未配置', false);
+            return;
+        }
+        setCopilotStatus(config.model || '已连接', true);
+        if (historyResponse.ok && history.messages && history.messages.length) {
+            const messages = copilotElement('copilot-messages');
+            messages.innerHTML = '';
+            history.messages.slice(-8).forEach(item => addCopilotMessage(item.role, item.content));
+        }
+    } catch (error) {
+        setCopilotStatus('连接失败', false);
+    }
+}
+
+function askCopilot(kind) {
+    const prompts = {
+        recommend: '请先读取当前数据特征，为此步骤推荐方法、完整参数、理由与备选方案；先不要执行。',
+        explain: '请解释当前分析步骤的目的、输入要求、主要参数和结果应如何判断。',
+        check: '请检查当前所选输入是否适合此步骤，并指出执行前还缺少哪些信息或上游结果。',
+        temporal_design: '请审计当前多时间点单细胞设计：确认真实时间列、sample_id 生物学重复、celltype、counts 层、技术 batch 与时间是否混杂；给出能否进行样本级推断、参数设置与风险。先不要执行。',
+    };
+    copilotElement('copilot-input').value = prompts[kind] || '';
+    sendCopilotMessage();
+}
+
+function addCopilotProposal(tool, index) {
+    const proposal = document.createElement('div');
+    proposal.className = 'copilot-proposal';
+    proposal.id = 'copilot-proposal-' + index;
+    const title = document.createElement('strong');
+    title.textContent = 'AI 建议执行：' + tool.name;
+    const detail = document.createElement('pre');
+    detail.textContent = JSON.stringify(tool.args || {}, null, 2);
+    const confirm = document.createElement('button');
+    confirm.type = 'button';
+    confirm.className = 'btn btn-primary btn-sm me-1';
+    confirm.textContent = '确认执行';
+    confirm.onclick = () => approveCopilotTool(index);
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn btn-outline-secondary btn-sm';
+    cancel.textContent = '取消';
+    cancel.onclick = () => proposal.remove();
+    proposal.append(title, detail, confirm, cancel);
+    copilotElement('copilot-messages').appendChild(proposal);
+}
+
+async function approveCopilotTool(index) {
+    const tool = copilotPendingTools[index];
+    if (!tool) return;
+    try {
+        const response = await fetch('/api/chat/approve', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tool_name: tool.name, args: tool.args || {}, project_id: PROJECT_ID}),
+        });
+        const data = await response.json();
+        addCopilotMessage(data.error ? 'error' : 'assistant', data.error ? '执行失败：' + data.error : (data.message || '任务已提交。'));
+        const proposal = copilotElement('copilot-proposal-' + index);
+        if (proposal) proposal.remove();
+    } catch (error) {
+        addCopilotMessage('error', '执行请求失败：' + error.message);
+    }
+}
+
+async function sendCopilotMessage() {
+    if (copilotBusy) return;
+    const input = copilotElement('copilot-input');
+    const requestText = input.value.trim();
+    if (!requestText) return;
+    const context = currentCopilotContext();
+    input.value = '';
+    addCopilotMessage('user', requestText);
+    copilotBusy = true;
+    copilotElement('copilot-send').disabled = true;
+    setCopilotStatus('思考中', true);
+    try {
+        const response = await fetch('/api/chat', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({message: requestText, context: context, project_id: PROJECT_ID}),
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) {
+            addCopilotMessage('error', 'AI 请求失败：' + (data.error || '未知错误'));
+            setCopilotStatus('请求失败', false);
+            return;
+        }
+        setCopilotStatus((data.config && data.config.model) || '已连接', true);
+        if (data.reply) addCopilotMessage('assistant', data.reply);
+        copilotPendingTools = data.proposed_tools || [];
+        copilotPendingTools.forEach(addCopilotProposal);
+    } catch (error) {
+        addCopilotMessage('error', '网络错误：' + error.message);
+        setCopilotStatus('网络错误', false);
+    } finally {
+        copilotBusy = false;
+        copilotElement('copilot-send').disabled = false;
+    }
+}
+
+async function clearCopilotHistory() {
+    try {
+        await fetch('/api/chat/clear/' + PROJECT_ID, {method: 'POST'});
+        copilotElement('copilot-messages').innerHTML = '';
+        addCopilotMessage('assistant', '对话已清空。请告诉我你的分析目标。');
+    } catch (error) {
+        addCopilotMessage('error', '清空失败：' + error.message);
+    }
+}
+
+copilotElement('copilot-input').addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        sendCopilotMessage();
+    }
+});
+document.querySelectorAll('.param-form input, .param-form select, .param-form textarea').forEach(control => {
+    control.addEventListener('change', refreshCopilotContext);
+    control.addEventListener('input', refreshCopilotContext);
+});
+loadCopilotState();
 </script>
 {% endblock %}

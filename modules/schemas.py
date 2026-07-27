@@ -11,6 +11,7 @@ SC_MODULE_LIST = [
     {'name': 'subcluster', 'display': '子簇精细分析', 'desc': '选定一个簇进行重聚类、差异表达、热图和通路富集'},
     {'name': 'qc_reassess', 'display': 'QC 重新评估', 'desc': '聚类后检查 doublet 和 QC 指标，标记低质量簇'},
     {'name': 'annotation', 'display': '细胞注释', 'desc': '基于 Marker 的细胞类型注释'},
+    {'name': 'sc_timecourse', 'display': '单细胞时序动态', 'desc': '按真实时间点分析样本级细胞组成与伪 bulk 基因动态'},
     {'name': 'deg', 'display': '差异表达', 'desc': '差异表达基因分析'},
     {'name': 'trajectory', 'display': '轨迹分析', 'desc': '拟时序分析'},
     {'name': 'proportion', 'display': '比例分析', 'desc': '细胞比例分析'},
@@ -121,10 +122,17 @@ PARAM_SCHEMAS = {
         {'key': 'n_iterations', 'label': 'Leiden 迭代次数', 'type': 'number', 'default': 2, 'help': 'Leiden 算法迭代次数。-1 为运行至收敛。'},
         {'key': 'distance_metric', 'label': '距离度量', 'type': 'select', 'options': ['euclidean', 'cosine', 'correlation', 'manhattan'], 'default': 'euclidean', 'help': '邻居图的距离度量。'},
         {'key': 'use_corrected', 'label': '使用校正后表示', 'type': 'checkbox', 'default': True, 'help': '优先使用批次校正后的嵌入（如有）。'},
-        {'key': 'batch_key', 'label': '批次列名', 'type': 'text', 'default': 'batch', 'help': '用于生成 cluster 批次组成图的 obs 列名。数据中不存在该列时自动跳过。'},
+        {'key': 'batch_key', 'label': '批次列名', 'type': 'text', 'default': 'batch', 'help': '用于生成 cluster 批次组成图的 obs 列名，建议选择 batch/sample 等分类列；连续高基数列会自动跳过。数据中不存在该列时也会自动跳过。'},
         {'key': 'auto_select_resolution', 'label': '自动选择最优分辨率', 'type': 'checkbox', 'default': False, 'help': '使用聚类质量指标自动选择最优分辨率。'},
         {'key': 'resolution_metric', 'label': '评估指标', 'type': 'select', 'options': ['silhouette', 'calinski', 'davies_bouldin'], 'default': 'silhouette', 'help': '自动选择分辨率时的质量评估指标。'},
         {'key': 'primary_resolution', 'label': '主分辨率（可选）', 'type': 'text', 'default': '', 'help': '指定最终写入 leiden 的主分辨率，例如 0.8。留空则使用首个分辨率或自动选择结果。'},
+        {'key': 'marker_selection_method', 'label': 'Marker 排名方法', 'type': 'select', 'options': ['wilcoxon', 'logreg'], 'default': 'wilcoxon', 'help': '按 cluster 独立排名 marker。Wilcoxon 默认提供校正 P 值；Logistic regression 主要按效应排名，小数据集无显著 P 值时会明确标记为探索性候选。'},
+        {'key': 'marker_rank_genes', 'label': '每簇候选排名数', 'type': 'number', 'default': 200, 'step': 10, 'help': '每个 cluster 先保留多少个候选基因再按表达比例、logFC 和特异性筛选。'},
+        {'key': 'marker_padj_cutoff', 'label': 'Marker 校正 P 值阈值', 'type': 'number', 'default': 0.05, 'step': 0.01, 'help': '数据驱动 marker 的 adjusted P-value 上限。'},
+        {'key': 'marker_min_pct', 'label': 'Marker 最小表达比例', 'type': 'number', 'default': 0.1, 'step': 0.05, 'help': '基因在目标 cluster 中的最小检测比例，避免由极少数细胞驱动。'},
+        {'key': 'marker_min_delta_pct', 'label': 'Marker 最小特异性差值', 'type': 'number', 'default': 0.05, 'step': 0.05, 'help': '目标 cluster 与其他 cluster 的检测比例差值下限。'},
+        {'key': 'marker_min_per_cluster', 'label': '每簇最少 Marker 数', 'type': 'number', 'default': 2, 'step': 1, 'help': '每个 cluster 期望展示的最少 marker；小数据集不足时会保留实际可用数量。'},
+        {'key': 'marker_max_per_cluster', 'label': '每簇最多 Marker 数', 'type': 'number', 'default': 5, 'step': 1, 'help': '每个 cluster 最多展示的 marker 数，避免 dotplot 过密；不同簇之间默认全局去重。'},
         {'key': 'show_labeled_umap', 'label': '生成带标签 Cluster UMAP', 'type': 'checkbox', 'default': True, 'help': '在主分辨率 UMAP 上显示 cluster 编号，便于人工复核分群是否符合预期。'},
         {'key': 'show_resolution_sankey', 'label': '生成分辨率流向图', 'type': 'checkbox', 'default': True, 'help': '用 Sankey 图展示不同 Leiden 分辨率之间的簇拆分关系，辅助选择合适分辨率。'},
         {'key': 'show_cluster_size_bar', 'label': '生成 Cluster 细胞数图', 'type': 'checkbox', 'default': True, 'help': '展示主分辨率每个 cluster 的细胞数量，用于识别过小簇、过度分裂或不均衡分群。'},
@@ -150,7 +158,7 @@ PARAM_SCHEMAS = {
         {'key': 'enrichment_top_n', 'label': '每子簇展示 Top 通路数', 'type': 'number', 'default': 10, 'step': 1, 'show_if': {'run_enrichment': True}, 'help': '通路气泡图中每个子簇展示的最多通路数量。'},
     ],
     'qc_reassess': [
-        {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于评估的聚类列名。'},
+        {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于评估的分类聚类列名（通常为 leiden）；连续 QC 指标或高基数列会自动回退。'},
         {'key': 'doublet_threshold', 'label': 'Doublet 比例阈值', 'type': 'number', 'default': 0.3, 'step': 0.05, 'help': 'Doublet 比例高于此值的簇标记为低质量。'},
         {'key': 'mt_threshold', 'label': 'MT 比例阈值', 'type': 'number', 'default': 15.0, 'step': 1.0, 'help': '平均 MT 比例高于此值的簇标记为低质量。'},
         {'key': 'ribosomal_threshold', 'label': '核糖体比例阈值（0 = 不检查）', 'type': 'number', 'default': 0, 'step': 1.0, 'help': '平均核糖体比例高于此值的簇标记为低质量。0 表示不检查。'},
@@ -160,27 +168,66 @@ PARAM_SCHEMAS = {
         {'key': 'show_cluster_qc_bar', 'label': '生成按簇 QC 汇总图', 'type': 'checkbox', 'default': True, 'help': '按 cluster 展示细胞数、检测基因数、MT% 和 doublet fraction，低质量簇用颜色标记。'},
     ],
     'annotation': [
-        {'key': 'method', 'label': '注释方法', 'type': 'select', 'options': ['multi_evidence', 'auto_marker', 'manual', 'celltypist'], 'default': 'multi_evidence', 'help': 'multi_evidence：Marker 规则、Cluster 一致性与可用的 CellTypist 交叉证据（推荐）；auto_marker：仅规则打分；manual：手工映射；celltypist：仅 CellTypist。'},
-        {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于分组的聚类列名。'},
+        {'key': 'method', 'label': '注释方法', 'type': 'select', 'options': ['multi_evidence', 'auto_marker', 'manual'], 'default': 'multi_evidence', 'help': 'multi_evidence：Marker 规则、逐细胞 Top1/Top2 和 Cluster 一致性复核（推荐）；auto_marker：仅规则打分；manual：手工映射。CellTypist 作为可选参考证据，不直接替换 Marker 标签。'},
+        {'key': 'annotation_version', 'label': '注释版本', 'type': 'text', 'default': 'v1', 'help': '用于区分自动注释、人工修订和不同 Marker 方案；不会覆盖输出中的旧 h5ad。'},
+        {'key': 'annotation_comment', 'label': '注释备注（可选）', 'type': 'textarea', 'default': '', 'help': '记录本次注释的实验背景、人工判断或需要后续复核的事项。'},
+        {'key': 'state_score_threshold', 'label': '细胞状态评分阈值', 'type': 'number', 'default': 0.35, 'step': 0.05, 'min': 0.0, 'max': 1.0, 'help': '仅用于标记 Cycling、IFN、Stress 等状态；不改变 cell_type。多个状态可同时进入 cell_state_flags。'},
+        {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于分组的分类聚类列名（通常为 leiden）；连续 QC 指标不能作为 cluster。'},
         {'key': 'resolution', 'label': 'Leiden 分辨率', 'type': 'text', 'default': '0.8', 'help': '对应的 Leiden 分辨率，用于定位正确的聚类列。'},
-        {'key': 'marker_set', 'label': 'Marker 基因集', 'type': 'select', 'options': ['Universal', 'TME', 'Immune', 'Blood', 'PBMC'], 'default': 'Universal', 'help': 'Universal：未知组织的通用大谱系初注释（推荐起点）；TME/Immune/Blood/PBMC：已知场景的细分 marker 集。初注释后可对子簇使用场景集或自定义 marker 精修。'},
+        {'key': 'marker_set', 'label': 'Marker 基因集', 'type': 'select', 'options': ['Universal', 'Organoid', 'TME', 'Immune', 'Blood', 'PBMC'], 'default': 'Universal', 'help': 'Universal：未知组织的通用大谱系初注释（推荐起点）；Organoid：按类器官类型选择发育/组织谱系 marker；TME/Immune/Blood/PBMC：已知场景的细分 marker 集。初注释后可对子簇使用场景集或自定义 marker 精修。'},
+        {'key': 'use_celltypist_reference', 'label': '启用 CellTypist 参考交叉验证', 'type': 'checkbox', 'default': False, 'show_if': {'method': ['multi_evidence', 'auto_marker']}, 'help': '使用本地已下载的人类 CellTypist 模型生成独立参考标签、置信度和冲突状态；只写入参考证据，不覆盖最终 Marker 注释。缺少依赖或模型时自动回退并记录警告。'},
+        {'key': 'celltypist_model', 'label': 'CellTypist 人类模型', 'type': 'select', 'options': ['Immune_All_Low.pkl', 'Immune_All_High.pkl', 'Cells_Intestinal_Tract.pkl', 'Developing_Human_Organs.pkl', 'Developing_Human_Brain.pkl', 'Cells_Fetal_Lung.pkl', 'Cells_Lung_Airway.pkl', 'Human_Lung_Atlas.pkl', 'Nuclei_Lung_Airway.pkl', 'Healthy_Human_Liver.pkl', 'Adult_Human_PancreaticIslet.pkl', 'Fetal_Human_Pancreas.pkl', 'Healthy_Adult_Heart.pkl', 'Adult_Human_Skin.pkl', 'Fetal_Human_Skin.pkl', 'Adult_Human_Vascular.pkl', 'Cells_Adult_Breast.pkl', 'Pan_Fetal_Human.pkl'], 'default': 'Immune_All_Low.pkl', 'show_if': {'use_celltypist_reference': True}, 'help': '只从项目 data/references/celltypist 读取，不在分析期间自动下载；应选择与组织和物种匹配的模型。'},
+        {'key': 'celltypist_mode', 'label': 'CellTypist 匹配模式', 'type': 'select', 'options': ['prob match', 'best match'], 'default': 'prob match', 'show_if': {'use_celltypist_reference': True}, 'help': 'prob match 可输出 Unknown/多标签，适合类器官参考复核；best match 总会选择一个最相近标签，需谨慎解释。'},
+        {'key': 'celltypist_p_threshold', 'label': 'CellTypist 概率阈值', 'type': 'number', 'default': 0.5, 'step': 0.05, 'min': 0.0, 'max': 1.0, 'show_if': {'use_celltypist_reference': True}, 'help': 'prob match 的最低概率阈值，同时用于标记低置信度参考结果；低于阈值不参与一致性判断。'},
+        {'key': 'celltypist_majority_voting', 'label': '启用 CellTypist 簇多数投票', 'type': 'checkbox', 'default': False, 'show_if': {'use_celltypist_reference': True}, 'help': '需要额外 over-clustering；默认关闭，避免在类器官过渡态中把混合簇强行平滑。'},
+        {'key': 'organoid_type', 'label': '类器官类型', 'type': 'select', 'options': ['intestinal', 'cerebral', 'kidney', 'liver', 'lung', 'pancreatic', 'cardiac'], 'default': 'intestinal', 'show_if': {'marker_set': 'Organoid'}, 'help': '仅在 Marker 基因集选择 Organoid 时生效。面板用于第一轮候选注释，需结合实验阶段、物种和 marker 覆盖度人工复核；不要把类器官面板当作跨协议通用真值。'},
+        {'key': 'maturity_time_key', 'label': '成熟度时间列（可选）', 'type': 'text', 'default': '', 'show_if': {'marker_set': 'Organoid'}, 'help': '填写 adata.obs 中的培养天数/时间点列名，如 culture_day、day、timepoint；留空时自动寻找这些列。不会把时间点直接当作成熟标签，而是与表达成熟度并列展示。'},
         {'key': 'custom_markers', 'label': '自定义 Marker（可选）', 'type': 'textarea', 'default': '', 'help': 'auto_marker 模式：CellType:GENE1,GENE2 格式。manual 模式：ClusterID:CellType 格式。'},
+        {'key': 'negative_markers', 'label': '自定义负向 Marker（可选）', 'type': 'textarea', 'default': '', 'show_if': {'method': ['auto_marker', 'multi_evidence']}, 'help': '格式：CellType:GENE1,GENE2；这些基因表达会降低候选类型分数，但不会单独强制改成 Unknown。留空使用内置互斥 panel。'},
+        {'key': 'negative_marker_weight', 'label': '负向 Marker 惩罚权重', 'type': 'number', 'default': 0.5, 'step': 0.1, 'min': 0.0, 'max': 2.0, 'show_if': {'method': ['auto_marker', 'multi_evidence']}, 'help': '建议 0.3-0.8。权重过高可能误伤真实过渡态，先查看负向证据和复核表再调整。'},
+        {'key': 'doublet_score_threshold', 'label': '疑似 Doublet 阈值', 'type': 'number', 'default': 0.3, 'step': 0.05, 'min': 0.0, 'max': 1.0, 'show_if': {'method': ['auto_marker', 'multi_evidence']}, 'help': '两个独立 marker 模块分数接近时提高；仅标记 suspect_doublet/review，不自动删除细胞。'},
+        {'key': 'ambient_score_threshold', 'label': '环境 RNA 信号阈值', 'type': 'number', 'default': 0.35, 'step': 0.05, 'min': 0.0, 'max': 1.0, 'show_if': {'method': ['auto_marker', 'multi_evidence']}, 'help': '基于高普遍性 marker 的启发式信号；没有 empty droplets 时只能用于提示复核，不能当作定量去污染结果。'},
+        {'key': 'ambient_prevalence', 'label': '环境候选基因普遍性阈值', 'type': 'number', 'default': 0.5, 'step': 0.05, 'min': 0.0, 'max': 1.0, 'show_if': {'method': ['auto_marker', 'multi_evidence']}, 'help': '某 marker 在超过该比例细胞中被检测到时，纳入环境 RNA 启发式检查。'},
+        {'key': 'marker_selection_method', 'label': 'Marker 排名方法', 'type': 'select', 'options': ['wilcoxon', 'logreg'], 'default': 'wilcoxon', 'help': '每个 cluster 独立排名 dotplot 基因。Wilcoxon 默认提供校正 P 值；Logistic regression 主要按效应排名，小数据集无显著 P 值时会标记为探索性候选。'},
+        {'key': 'marker_rank_genes', 'label': '每簇候选排名数', 'type': 'number', 'default': 200, 'step': 10, 'help': '每个 cluster 先保留多少个候选基因再按表达比例、logFC 和特异性筛选。'},
+        {'key': 'marker_padj_cutoff', 'label': 'Marker 校正 P 值阈值', 'type': 'number', 'default': 0.05, 'step': 0.01, 'help': '数据驱动 marker 的 adjusted P-value 上限。'},
+        {'key': 'marker_min_pct', 'label': 'Marker 最小表达比例', 'type': 'number', 'default': 0.1, 'step': 0.05, 'help': '基因在目标 cluster 中的最小检测比例，避免由极少数细胞驱动。'},
+        {'key': 'marker_min_delta_pct', 'label': 'Marker 最小特异性差值', 'type': 'number', 'default': 0.05, 'step': 0.05, 'help': '目标 cluster 与其他 cluster 的检测比例差值下限。'},
+        {'key': 'marker_min_per_cluster', 'label': '每簇最少 Marker 数', 'type': 'number', 'default': 2, 'step': 1, 'help': '每个 cluster 期望展示的最少 marker；小数据集不足时会保留实际可用数量。'},
+        {'key': 'marker_max_per_cluster', 'label': '每簇最多 Marker 数', 'type': 'number', 'default': 5, 'step': 1, 'help': '每个 cluster 最多展示的 marker 数，避免 dotplot 过密；不同簇之间默认全局去重。'},
         {'key': 'min_markers_per_type', 'label': '每类型最少可用 Marker 数', 'type': 'number', 'default': 2, 'step': 1, 'show_if': {'method': 'auto_marker'}, 'help': '当前数据中命中少于此数量的类型不参与打分，避免因基因面板缺失而误注释。'},
         {'key': 'min_annotation_score', 'label': '自动注释最低 Marker 得分', 'type': 'number', 'default': 0.0, 'step': 0.05, 'show_if': {'method': 'auto_marker'}, 'help': '大于 0 时，最高 marker score 低于阈值的细胞标为 Unknown。建议先查看 Marker 覆盖度和得分热图后调整。'},
         {'key': 'cluster_agreement_threshold', 'label': 'Cluster 最低标签一致率', 'type': 'number', 'default': 0.6, 'step': 0.05, 'show_if': {'method': 'multi_evidence'}, 'help': '同一 cluster 内 Marker 标签多数比例低于此值时标记为 Unknown，避免将混杂 cluster 强行命名。'},
-        {'key': 'celltypist_model', 'label': 'CellTypist 模型', 'type': 'select', 'options': ['Immune_All_Low', 'Immune_All_High', 'Adult_COVID19_PBMC', 'Adult_Human_Pancreas'], 'default': 'Immune_All_Low', 'help': 'CellTypist 预训练模型。仅 celltypist 方法生效。'},
-        {'key': 'celltypist_threshold', 'label': 'CellTypist 概率阈值', 'type': 'number', 'default': 0.5, 'step': 0.05, 'help': 'CellTypist 预测概率阈值。低于此值标为 Unknown。'},
-        {'key': 'celltypist_majority_voting', 'label': '多数投票', 'type': 'checkbox', 'default': True, 'help': 'CellTypist 多数投票模式，提高注释一致性。'},
         {'key': 'confidence_method', 'label': '置信度方法', 'type': 'select', 'options': ['none', 'entropy', 'score_margin'], 'default': 'none', 'help': '注释置信度评估方法。entropy：基于评分熵。score_margin：基于最高分与次高分差距。'},
-        {'key': 'mark_unknown', 'label': '低置信度标 Unknown', 'type': 'checkbox', 'default': True, 'help': '将低置信度的注释标记为 Unknown。'},
+        {'key': 'mark_unknown', 'label': '低置信度自动标 Unknown', 'type': 'checkbox', 'default': False, 'help': '默认关闭：低置信度只标记为 review。开启后，只有低置信度且 cluster 内标签不一致时才自动标为 Unknown，避免广泛 marker panel 的熵值偏低造成大面积误删。'},
+        {'key': 'confidence_cutoff', 'label': '低置信度阈值', 'type': 'number', 'default': 0.2, 'min': 0.0, 'max': 1.0, 'step': 0.05, 'show_if': {'confidence_method': ['entropy', 'score_margin']}, 'help': '仅在开启自动标 Unknown 时生效；建议结合逐簇复核表调整，不建议单独用它否定 cluster 内一致的标签。'},
         {'key': 'merge_similar_threshold', 'label': '相似簇合并阈值（0 = 不合并）', 'type': 'number', 'default': 0, 'step': 0.05, 'help': '相似度高于此值的相邻簇合并为同一细胞类型。0 表示不合并。'},
         {'key': 'show_celltype_composition', 'label': '生成细胞类型组成图', 'type': 'checkbox', 'default': True, 'help': '展示每种注释细胞类型的数量和比例，用于检查注释组成和样本结构。'},
         {'key': 'show_marker_score_heatmap', 'label': '生成 Marker score 热图', 'type': 'checkbox', 'default': True, 'help': '按 cluster 展示各细胞类型 marker score 的相对强弱，用于解释自动注释依据。'},
         {'key': 'show_marker_expression_violin', 'label': '生成 Marker 表达验证图', 'type': 'checkbox', 'default': True, 'help': '按注释细胞类型展示核心 marker 表达分布，用于人工确认注释是否符合生物学预期。'},
         {'key': 'show_annotation_score_umap', 'label': '生成注释置信度 UMAP', 'type': 'checkbox', 'default': True, 'help': '把 annotation confidence 或 score margin 映射到 UMAP，用于定位低置信度区域和可能需要重分群的细胞。'},
     ],
+    'sc_timecourse': [
+        {'key': 'timepoint_key', 'label': '真实时间点列名', 'type': 'text', 'default': 'timepoint', 'help': '必填。adata.obs 中的真实采样时间列，如 timepoint、day、hour。不能用 DPT pseudotime 代替。至少 3 个时间点。'},
+        {'key': 'time_order', 'label': '时间点顺序（可选）', 'type': 'text', 'default': '', 'help': '逗号分隔，如 D0,D3,D7。D0/D3/D7、0h/12h 等会自动排序；任意标签请显式指定，以免 D10 排在 D2 前。'},
+        {'key': 'confirm_batch_is_biological_timepoint', 'label': '确认 batch 列确为真实采样时间', 'type': 'checkbox', 'default': False, 'help': '仅当 timepoint_key 填 batch 且该列实际记录采样时间时勾选。技术建库/测序 batch 不能产生时序 p 值/FDR。'},
+        {'key': 'sample_key', 'label': '生物学重复 / 样本列名', 'type': 'text', 'default': 'sample_id', 'help': '强烈建议提供，如 sample_id 或 library_id。每个样本必须只属于一个时间点和条件；缺失、近似每细胞唯一或重复不足时仅输出描述性图，不报告 p 值/FDR。'},
+        {'key': 'confirm_batch_is_biological_sample', 'label': '确认 batch 实为独立生物学样本', 'type': 'checkbox', 'default': False, 'help': '仅当 sample_key 填 batch 且该列确实是独立生物学样本时勾选。技术建库/测序 batch 不能作为统计重复。'},
+        {'key': 'condition_key', 'label': '条件列名（可选）', 'type': 'text', 'default': '', 'help': '如 treatment、condition。填写后分别展示每个条件的时间曲线；当前版本不进行 time × condition 交互检验，不能据此声称处理改变时间轨迹。'},
+        {'key': 'celltype_key', 'label': '细胞类型列名', 'type': 'text', 'default': 'celltype', 'help': '优先使用已注释 celltype；不存在时才回退 annotation 或 leiden。'},
+        {'key': 'min_replicates_per_timepoint', 'label': '每时间点最少生物学重复', 'type': 'number', 'default': 2, 'min': 2, 'step': 1, 'help': '每个条件 × 时间点达到该样本数，才报告样本级 Kruskal 筛选 p 值与 BH-FDR。下限为 2，理想为 3 或以上。'},
+        {'key': 'min_cells_per_celltype_sample', 'label': '每样本/细胞类型最少细胞数', 'type': 'number', 'default': 20, 'step': 1, 'help': '低于此数的 sample × celltype 不纳入伪 bulk 表达趋势，减少稀有细胞的高方差影响。'},
+        {'key': 'max_genes', 'label': '候选动态基因数', 'type': 'number', 'default': 300, 'step': 50, 'help': '优先使用 HVG 并按方差选择的最大基因数。基因 FDR 只在该候选集合内校正，属于探索性筛选而非全转录组检验。'},
+        {'key': 'top_dynamic_genes', 'label': '动态基因热图 Top N', 'type': 'number', 'default': 30, 'step': 5, 'help': '按 FDR 和趋势效应展示的细胞类型特异动态基因数。'},
+        {'key': 'top_celltypes', 'label': '组成曲线展示细胞类型数', 'type': 'number', 'default': 8, 'step': 1, 'help': '按总体平均比例选择用于折线图和热图的细胞类型数，避免图例过密。'},
+        {'key': 'enable_gene_trends', 'label': '运行伪 bulk 基因动态', 'type': 'checkbox', 'default': True, 'help': '优先从 layers["counts"] 聚合 sample × celltype 原始 counts 并进行样本级时间筛选；缺少 counts 层时仅给描述性均值曲线。'},
+        {'key': 'show_timepoint_umap', 'label': '生成时间点 UMAP', 'type': 'checkbox', 'default': True, 'help': '按真实时间点着色已有 UMAP，用于检查时间状态是否与嵌入结构一致。'},
+        {'key': 'show_composition_trajectory', 'label': '生成细胞组成时间曲线', 'type': 'checkbox', 'default': True, 'help': '展示每个时间点的样本平均细胞类型比例；CSV 同时保留每个样本的原始比例。'},
+        {'key': 'show_composition_heatmap', 'label': '生成细胞组成热图', 'type': 'checkbox', 'default': True, 'help': '展示时间点 × 细胞类型组成，适合发现短暂或阶段特异的细胞群变化。'},
+        {'key': 'show_gene_heatmap', 'label': '生成动态基因热图', 'type': 'checkbox', 'default': True, 'help': '按每个 celltype 内的时间变化展示 Top 动态基因。行标准化仅用于可视化，不改变统计结果。'},
+    ],
     'deg': [
-        {'key': 'groupby', 'label': '分组依据', 'type': 'text', 'default': '', 'help': '差异分析的分组依据列名。留空则自动使用 leiden。'},
+        {'key': 'groupby', 'label': '分组依据', 'type': 'text', 'default': '', 'help': '差异分析的分类分组列名。留空或无效时自动使用 leiden；连续 QC 指标不能作为分组。'},
         {'key': 'reference', 'label': '参考组', 'type': 'dynamic_select', 'depends_on': 'groupby', 'default': 'rest', 'help': '参考组。rest 表示以所有其他组为对照。'},
         {'key': 'method', 'label': '统计方法', 'type': 'select', 'options': ['wilcoxon', 't-test', 'logreg', 't-test_overestim_var'], 'default': 'wilcoxon', 'help': '统计检验方法。'},
         {'key': 'n_genes', 'label': '显示 Top N 基因数', 'type': 'number', 'default': 20, 'help': '每个簇显示的 Top N 差异基因数。'},
@@ -200,7 +247,7 @@ PARAM_SCHEMAS = {
         {'key': 'marker_heatmap_top_n', 'label': '热图每簇 Top marker 数', 'type': 'number', 'default': 3, 'help': '每个簇纳入 marker 热图的 Top 基因数量。数值越大热图越全面但也越拥挤。'},
     ],
     'trajectory': [
-        {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于轨迹推断和可视化的聚类列名。'},
+        {'key': 'cluster_key', 'label': '聚类列名', 'type': 'text', 'default': 'leiden', 'help': '用于轨迹推断和可视化的分类聚类列名；连续 QC 指标会被忽略或回退。'},
         {'key': 'plot_genes', 'label': '拟时序基因表达（可选）', 'type': 'textarea', 'default': '', 'help': '手动输入基因名，逗号或换行分隔。最多 10 个基因。'},
         {'key': 'enable_paga', 'label': '启用 PAGA', 'type': 'checkbox', 'default': False, 'help': '生成 PAGA 轨迹图，展示簇间连接强度。'},
         {'key': 'show_pseudotime_distribution', 'label': '生成拟时序分布图', 'type': 'checkbox', 'default': True, 'help': '按 cluster 展示 DPT pseudotime 分布，用于判断轨迹方向和分支是否合理。'},
@@ -211,16 +258,23 @@ PARAM_SCHEMAS = {
         {'key': 'n_branchings', 'label': '分支点数量', 'type': 'number', 'default': 0, 'help': '允许的分支点数量。0 为无分支（线性轨迹）。'},
     ],
     'proportion': [
-        {'key': 'groupby', 'label': '分组依据', 'type': 'text', 'default': 'celltype', 'help': '统计比例的细胞类型列名。'},
-        {'key': 'batch_key', 'label': '批次列名', 'type': 'text', 'default': 'batch', 'help': '用于比较的分组列名。'},
+        {'key': 'groupby', 'label': '分组依据', 'type': 'text', 'default': 'celltype', 'help': '统计比例的分类细胞类型列名；连续或高基数列会拒绝。'},
+        {'key': 'batch_key', 'label': '展示/比较列（兼容旧流程）', 'type': 'text', 'default': 'batch', 'help': '用于汇总柱状图和旧版细胞计数关联检验的分类列。新的样本级比较优先使用下方“条件列”。'},
+        {'key': 'sample_key', 'label': '生物学样本列（推荐）', 'type': 'text', 'default': '', 'help': '如 sample_id、library_id。样本而非单个细胞是比例统计的独立重复；缺失、近乎一细胞一个 ID 或技术 batch 时只输出描述性结果。'},
+        {'key': 'condition_key', 'label': '条件列（推荐）', 'type': 'text', 'default': '', 'help': '如 condition、treatment、group。与 sample_key 同时填写后，按样本计算每个细胞类型比例并输出 Mann-Whitney/Kruskal 与 BH-FDR。'},
+        {'key': 'analysis_unit', 'label': '统计单位', 'type': 'select', 'options': ['auto', 'sample', 'cell'], 'default': 'auto', 'help': 'auto：有可靠 sample_key + condition_key 时进行样本级检验，否则仅描述性；sample：强制请求样本级结果但设计不合格时仍降级；cell：只保留细胞计数关联展示，不报告样本级 p 值。'},
+        {'key': 'min_samples_per_condition', 'label': '每条件最少样本数', 'type': 'number', 'default': 2, 'min': 2, 'step': 1, 'help': '每个条件至少有该数量的独立生物学样本才报告样本级 p 值和 BH-FDR；理想为 3 或以上。'},
+        {'key': 'min_cells_per_sample', 'label': '每样本最少细胞数', 'type': 'number', 'default': 10, 'min': 1, 'step': 1, 'help': '总细胞数低于此阈值的样本仍写入表格，但不进入样本级检验，避免低深度样本驱动差异。'},
+        {'key': 'confirm_batch_is_biological_sample', 'label': '确认 batch 实为生物学样本', 'type': 'checkbox', 'default': False, 'help': '仅当 sample_key 填 batch 且该列实际代表独立生物学样本时启用。'},
+        {'key': 'confirm_batch_is_biological_condition', 'label': '确认 batch 实为生物学条件', 'type': 'checkbox', 'default': False, 'help': '仅当 condition_key 填 batch 且该列实际记录生物学分组时启用。'},
         {'key': 'compare_groups', 'label': '指定比较组（可选）', 'type': 'text', 'default': '', 'help': '格式：GroupA-vs-GroupB，多个比较用分号分隔。'},
-        {'key': 'stat_test', 'label': '统计检验', 'type': 'select', 'options': ['chi_square', 'fisher_exact', 'permutation'], 'default': 'chi_square', 'help': '比例差异的统计检验方法。'},
+        {'key': 'stat_test', 'label': '细胞计数关联检验', 'type': 'select', 'options': ['chi_square', 'fisher_exact', 'permutation'], 'default': 'chi_square', 'help': '用于旧版 cell count 列联表关联展示，不将细胞视为生物学重复。样本级推断自动选择二组 Mann-Whitney 或多组 Kruskal，并对 celltype 做 BH-FDR。'},
         {'key': 'n_permutations', 'label': '置换检验次数', 'type': 'number', 'default': 1000, 'help': '置换检验的置换次数。仅 permutation 方法生效。'},
         {'key': 'min_cells_per_group', 'label': '最小细胞数', 'type': 'number', 'default': 10, 'help': '每组最小细胞数，低于此值的组不参与比较。'},
         {'key': 'show_proportion_heatmap', 'label': '生成比例热图', 'type': 'checkbox', 'default': True, 'help': '以 heatmap 展示每个样本/分组中的细胞类型比例，便于横向比较组成差异。'},
     ],
     'cell_communication': [
-        {'key': 'cluster_key', 'label': '细胞类型列', 'type': 'text', 'default': 'celltype', 'help': '用于通讯分析的细胞类型列名。需先运行注释模块。'},
+        {'key': 'cluster_key', 'label': '细胞类型列', 'type': 'text', 'default': 'celltype', 'help': '用于通讯分析的分类细胞类型列名。需先运行注释模块；连续/高基数列会拒绝。'},
         {'key': 'resource', 'label': '配体-受体数据库', 'type': 'select', 'options': ['consensus', 'cellcall', 'cellchatdb', 'omnipath'], 'default': 'consensus', 'help': 'consensus：综合多数据库（推荐）。cellcall/cellchatdb：特定数据库。omnipath：OmniPath 数据库。'},
         {'key': 'organism', 'label': '物种', 'type': 'select', 'options': ['human', 'mouse'], 'default': 'human', 'help': '物种选择，影响配体-受体对匹配。'},
         {'key': 'min_prop', 'label': '最小表达比例', 'type': 'number', 'default': 0.1, 'step': 0.05, 'help': '基因在细胞群中的最小表达比例，低于此值的不参与分析。'},
@@ -253,7 +307,7 @@ PARAM_SCHEMAS = {
          'help': 'CPM 标准化的缩放目标值。默认 1e6（标准 CPM）。'},
     ],
     'bulk_deg': [
-        {'key': 'groupby', 'label': '分组列名', 'type': 'text', 'default': '', 'help': '分组列名。adata.obs 中用于区分实验组和对照组的列。如 condition、treatment、group。'},
+        {'key': 'groupby', 'label': '分组列名', 'type': 'text', 'default': '', 'help': '分类分组列名。adata.obs 中用于区分实验组和对照组的列，如 condition、treatment、group；不能填连续 QC 指标。'},
         {'key': 'group1', 'label': '实验组', 'type': 'dynamic_select', 'depends_on': 'groupby', 'default': '', 'help': '实验组名称。将与对照组比较计算差异基因。'},
         {'key': 'group2', 'label': '对照组', 'type': 'dynamic_select', 'depends_on': 'groupby', 'default': '', 'help': '对照组名称。rest 表示以所有其他样本为对照。'},
         {'key': 'method', 'label': '统计方法', 'type': 'select', 'options': ['t-test', 'mann-whitney', 'deseq2', 'edger', 'limma'], 'default': 't-test', 'help': '统计方法。t-test：参数检验，适合正态分布数据，速度快。Mann-Whitney：非参数检验，不假设正态分布，更稳健。DESeq2：基于负二项分布的差异分析，RNA-seq 金标准，需要原始计数。edgeR：基于负二项分布模型和经验贝叶斯方法，适合多组比较和复杂实验设计。limma-voom：基于线性模型和经验贝叶斯收缩，适合复杂实验设计，稳健且灵敏。'},
@@ -281,7 +335,7 @@ PARAM_SCHEMAS = {
     ],
     'bulk_pca': [
         {'key': 'n_comps', 'label': 'PCA 主成分数量', 'type': 'number', 'default': 10, 'help': 'PCA 主成分数量。通常 5-10 即可。样本数少时自动降至 n_samples-1。'},
-        {'key': 'color_by', 'label': '颜色分组列名（留空则不着色）', 'type': 'text', 'default': '', 'help': '用于着色的 obs 列名。留空则不着色。如 condition、batch、celltype 等。'},
+        {'key': 'color_by', 'label': '颜色分组列名', 'type': 'text', 'default': '_auto_group_', 'help': '用于 PCA 着色。默认从样本名自动识别分组；也可从下方 obs 列选择真实 metadata（如 condition、batch）。无法识别时会明确提示，不会静默合并为同一组。'},
         {'key': 'dimred_method', 'label': '降维方法', 'type': 'select', 'options': ['pca', 'umap', 'tsne'], 'default': 'pca', 'help': '降维可视化方法。PCA：线性降维，保留全局结构。UMAP：非线性降维，保留局部结构。t-SNE：非线性降维，适合发现聚类。'},
     ],
     'bulk_heatmap': [
@@ -351,8 +405,8 @@ PARAM_SCHEMAS = {
          'options': ['all', 'top20', 'none'], 'default': 'all',
          'help': '基因名标签显示方式。'},
         {'key': 'show_sample_labels', 'label': '样本名显示', 'type': 'select',
-         'options': ['all', 'none'], 'default': 'all',
-         'help': '样本名标签显示方式。'},
+         'options': ['auto', 'all', 'none'], 'default': 'auto',
+         'help': 'auto=样本较多时自动间隔显示（推荐）；all=显示全部；none=隐藏。'},
         {'key': 'gene_font_size', 'label': '基因名字体大小', 'type': 'number', 'default': 8, 'step': 1,
          'help': '基因名标签字体大小。'},
         {'key': 'sample_font_size', 'label': '样本名字体大小', 'type': 'number', 'default': 9, 'step': 1,
@@ -361,6 +415,17 @@ PARAM_SCHEMAS = {
          'help': '额外注释条列名，逗号分隔（如 group,batch）。groupby 列自动包含。'},
         {'key': 'groupby', 'label': '样本分组列名', 'type': 'text', 'default': '',
          'help': '主分组列名，用于默认注释条。留空则不添加。'},
+        {'key': 'sample_display_mode', 'label': '热图展示样本范围', 'type': 'select',
+         'options': ['all', 'deg_groups', 'selected_groups', 'selected_samples'], 'default': 'all',
+         'option_labels': {'all': '全部样本', 'deg_groups': '仅 DEG 两组',
+                           'selected_groups': '仅勾选分组', 'selected_samples': '仅勾选样本'},
+         'help': 'all=全部样本；deg_groups=只显示所选 DEG 比较的两组；selected_groups=仅显示勾选分组；selected_samples=仅显示指定样本。仅影响热图展示，不重新计算 DEG。'},
+        {'key': 'sample_display_groups', 'label': '展示分组', 'type': 'dynamic_multiselect',
+         'depends_on': 'groupby', 'default': '', 'show_if': {'sample_display_mode': 'selected_groups'},
+         'help': '从样本分组列中勾选要展示的组。'},
+        {'key': 'sample_display_names', 'label': '展示样本名', 'type': 'textarea', 'default': '',
+         'show_if': {'sample_display_mode': 'selected_samples'},
+         'help': '输入需要展示的样本名，逗号或换行分隔；样本名必须与输入矩阵完全一致。'},
         # === 第二阶段新增 ===
         {'key': 'deg_comparison', 'label': 'DEG 比较选择', 'type': 'text', 'default': '',
          'help': '指定使用哪组 DEG 结果（如 results_0），留空取最新。gene_import_source=deg 时生效。'},
@@ -392,8 +457,8 @@ PARAM_SCHEMAS = {
          'help': '调整后 p-value 截断值。0.05 为标准，0.01 为严格。'},
         {'key': 'top_n', 'label': '展示通路数', 'type': 'number', 'default': 20,
          'help': '可视化中显示的 Top N 显著通路数。'},
-        {'key': 'input_source', 'label': 'DEG 结果文件路径', 'type': 'text', 'default': '',
-         'help': '来自已完成的 DEG 分析的 CSV 结果文件路径。包含 gene 和 regulation/log2FC 列。'},
+        {'key': 'input_source', 'label': 'DEG 比较结果', 'type': 'text', 'default': '',
+         'help': '选择一个已完成的 DEG 比较。ORA/GSEA 每次仅分析一个比较，结果表需包含 gene 和 regulation/log2FC 列。'},
         {'key': 'split_direction', 'label': '分开分析上调/下调基因', 'type': 'checkbox', 'default': False, 'help': '开启后将 DEG 结果按 Up/Down 拆分，分别做 ORA 富集分析，生成独立的气泡图。'},
         {'key': 'custom_genes', 'label': '自定义基因列表（可选）', 'type': 'textarea', 'default': '', 'help': '手动输入基因名，逗号或换行分隔。填写后忽略 DEG 结果文件，直接用此列表做 ORA。'},
     ],
@@ -473,11 +538,19 @@ def filter_active_params(schema, params):
 
 def parse_form_params(schema, form):
     """从 Flask request.form 中解析参数，根据 schema 定义做类型转换。"""
+    def form_values(key):
+        if hasattr(form, 'getlist'):
+            return form.getlist(key)
+        value = form.get(key)
+        return [] if value in (None, '') else [value]
+
     values = {}
     for param in schema:
         key = param['key']
         if param['type'] == 'checkbox':
             values[key] = form.get(key) == 'on'
+        elif param['type'] == 'dynamic_multiselect':
+            values[key] = ','.join(form_values(key))
         else:
             val = form.get(key)
             values[key] = val if val not in (None, '') else param['default']
@@ -491,6 +564,8 @@ def parse_form_params(schema, form):
             params[param['key']] = float(val) if val else param['default']
         elif param['type'] == 'checkbox':
             params[param['key']] = form.get(param['key']) == 'on'
+        elif param['type'] == 'dynamic_multiselect':
+            params[param['key']] = ','.join(form_values(param['key']))
         else:
             params[param['key']] = val or param['default']
     return filter_active_params(schema, params)

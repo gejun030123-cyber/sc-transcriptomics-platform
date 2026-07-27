@@ -29,7 +29,6 @@ DEPENDENCY_GROUPS = {
         ("patsy", "patsy"),
     ],
     "optional": [
-        ("celltypist", "celltypist"),
         ("liana", "liana"),
         ("harmonypy", "harmonypy"),
         ("bbknn", "bbknn"),
@@ -38,6 +37,7 @@ DEPENDENCY_GROUPS = {
         ("torch", "torch"),
         ("kneed", "kneed"),
         ("kaleido", "kaleido"),
+        ("celltypist", "celltypist"),
         ("openai", "openai"),
         ("anthropic", "anthropic"),
     ],
@@ -49,13 +49,41 @@ MODULE_DEPENDENCIES = {
     "hvg": ["scanpy", "omicverse"],
     "dimred": ["scanpy"],
     "batch_correct": ["scanpy"],
+    "clustering": ["scanpy"],
+    "subcluster": ["scanpy"],
+    "qc_reassess": ["scanpy", "pandas"],
     "annotation": ["scanpy"],
     "deg": ["scanpy"],
-    "cell_communication": ["liana"],
+    "trajectory": ["scanpy"],
+    "sc_timecourse": ["anndata", "pandas", "scipy"],
+    "proportion": ["anndata", "pandas", "scipy"],
+    "cell_communication": ["scanpy", "liana"],
     "bulk_qc": ["anndata", "pandas"],
     "bulk_normalize": ["numpy", "pandas"],
-    "bulk_deg": ["scipy", "statsmodels"],
-    "bulk_enrichment": ["gseapy"],
+    "bulk_pca": ["anndata", "pandas", "scikit-learn"],
+    "bulk_deg": ["pandas", "scipy", "statsmodels", "omicverse"],
+    "bulk_heatmap": ["anndata", "pandas", "scanpy", "scipy"],
+    # The current implementation uses OmicVerse and local/Enrichr gene-set
+    # files.  gseapy is used by subcluster's optional enrichment path, not by
+    # the core Bulk enrichment module.
+    "bulk_enrichment": ["omicverse"],
+    "bulk_timecourse": ["pandas", "scipy", "patsy"],
+    "bulk_deg_integration": ["pandas"],
+    "convert_10x": ["scanpy"],
+}
+
+MODULE_OPTIONAL_DEPENDENCIES = {
+    "dimred": [("kneed", "Kneedle 自动 PC 选择")],
+    "batch_correct": [
+        ("harmonypy", "Harmony 批次校正"),
+        ("bbknn", "BBKNN 批次校正"),
+        ("scanorama", "Scanorama 批次校正"),
+        ("scvi-tools", "scVI/SysVI 深度整合"),
+    ],
+    "subcluster": [("gseapy", "子簇通路富集")],
+    "annotation": [("celltypist", "CellTypist 参考交叉验证")],
+    "bulk_deg": [("inmoose", "DESeq2/edgeR/limma 兼容统计方法")],
+    "bulk_enrichment": [("gseapy", "兼容旧版 Enrichr 富集路径")],
 }
 
 
@@ -81,9 +109,14 @@ def dependency_status():
     modules = {}
     for module_name, deps in MODULE_DEPENDENCIES.items():
         missing = [dep for dep in deps if not packages.get(dep, _installed(dep.replace("-", "_")))]
+        optional_missing = []
+        for dep, capability in MODULE_OPTIONAL_DEPENDENCIES.get(module_name, []):
+            if not packages.get(dep, _installed(dep.replace("-", "_"))):
+                optional_missing.append({"package": dep, "capability": capability})
         modules[module_name] = {
             "available": len(missing) == 0,
             "missing": missing,
+            "optional_missing": optional_missing,
         }
 
     return {

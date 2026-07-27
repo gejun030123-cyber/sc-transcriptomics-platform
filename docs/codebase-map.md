@@ -510,7 +510,7 @@ def run(self, input_path):
 | batch_correct | batch_correct.py | ~170 | Harmony/ComBat/SysVI/scVI/BBKNN | scvi-tools（可选） |
 | clustering | clustering.py | ~155 | Leiden/Louvain 多分辨率聚类 | annotation.DEFAULT_TME_MARKERS |
 | qc_reassess | qc_reassess.py | ~160 | 聚类后 QC 重评估 | — |
-| annotation | annotation.py | ~260 | Marker 注释 + CellTypist | celltypist（可选） |
+| annotation | annotation.py | ~260 | 分层 cell lineage/type/subtype + 独立 cell state + 表达/时间成熟度证据 + 负向 marker/Doublet 复核 + 可选本地 CellTypist 参考 | scanpy, celltypist（可选） |
 | deg | deg.py | ~200 | Wilcoxon 差异表达 + 火山图 | statsmodels |
 | trajectory | trajectory.py | ~150 | 拟时序 + PAGA + 扩散图 | — |
 | proportion | proportion.py | ~170 | 细胞比例分析 + 统计检验 | scipy |
