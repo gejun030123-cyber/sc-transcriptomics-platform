@@ -12,6 +12,10 @@ from .trajectory import TrajectoryAnalysis
 from .sc_timecourse import SCTimecourseAnalysis
 from .proportion import ProportionAnalysis
 from .cell_communication import CellCommunicationAnalysis
+from .sc_batch import SCBatchImport
+from .sc_batch_export import SCBatchCSVExport, SCPseudobulkDEG
+from .sc_cell_deg import SCCellLevelDEG
+from .sc_cell_go import SCCellGOEnrichment
 from .bulk_qc import BulkQCAnalysis
 from .bulk_normalize import BulkNormalizeAnalysis
 from .bulk_deg import BulkDEGAnalysis
@@ -39,6 +43,11 @@ MODULE_REGISTRY = {
     'sc_timecourse': SCTimecourseAnalysis,
     'proportion': ProportionAnalysis,
     'cell_communication': CellCommunicationAnalysis,
+    'sc_batch_import': SCBatchImport,
+    'sc_cell_deg': SCCellLevelDEG,
+    'sc_cell_go': SCCellGOEnrichment,
+    'sc_pseudobulk_deg': SCPseudobulkDEG,
+    'sc_csv_export': SCBatchCSVExport,
     # Bulk RNA-seq 分析模块
     'bulk_qc': BulkQCAnalysis,
     'bulk_normalize': BulkNormalizeAnalysis,
@@ -54,7 +63,7 @@ MODULE_REGISTRY = {
 
 PIPELINE_ORDER = [
     'qc', 'normalize', 'hvg', 'dimred', 'batch_correct', 'clustering', 'subcluster',
-    'qc_reassess', 'annotation', 'sc_timecourse', 'deg', 'trajectory', 'proportion', 'cell_communication',
+    'qc_reassess', 'annotation', 'sc_timecourse', 'deg', 'sc_cell_deg', 'sc_cell_go', 'sc_pseudobulk_deg', 'trajectory', 'proportion', 'cell_communication', 'sc_csv_export',
     'bulk_qc', 'bulk_normalize', 'bulk_pca', 'bulk_deg', 'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
     'bulk_deg_integration',
 ]
@@ -75,6 +84,10 @@ PIPELINE_DEPS = {
     'trajectory': ['clustering'],
     'proportion': ['clustering'],
     'cell_communication': ['annotation'],
+    'sc_pseudobulk_deg': ['qc'],
+    'sc_cell_deg': ['clustering'],
+    'sc_cell_go': ['sc_cell_deg'],
+    'sc_csv_export': ['qc'],
     # Bulk RNA-seq
     'bulk_normalize': ['bulk_qc'],
     'bulk_pca': ['bulk_normalize'],

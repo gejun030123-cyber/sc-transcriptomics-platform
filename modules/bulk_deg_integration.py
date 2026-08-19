@@ -68,6 +68,10 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
 
     def run(self, input_path):
         from modules.native_figures import bar_figure, heatmap_figure
+        import matplotlib.pyplot as plt
+        from figure_engine import NatureFigureDirector, export_registered_figure
+        director = NatureFigureDirector()
+        nature_formats = ('svg', 'pdf', 'png')
 
         self.progress(5, "加载差异分析结果...")
         results_dir = os.path.join(self.project_dir, 'results')
@@ -191,6 +195,36 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
         os.makedirs(plots_dir, exist_ok=True)
         result_files = []
 
+        def _export_engine(fig, stem, label, spec, *, category='heatmap'):
+            spec = spec.with_updates(formats=nature_formats)
+            exported, report = export_registered_figure(
+                fig, os.path.join(plots_dir, stem), spec,
+                category=category, label=label,
+                qa_path=os.path.join(results_dir, f'{stem}_nature_readiness.json'),
+            )
+            result_files.extend(exported)
+            if not report.ready:
+                self.progress(-1, f'{label} Nature readiness {report.score}/100；请查看 QA 报告。')
+            plt.close(fig)
+
+        def _render_heatmap(matrix, row_labels, col_labels, stem, label, *, title,
+                            colorbar_label, vmin=None, vmax=None, symmetric=False,
+                            height_mm=100.0):
+            spec = director.spec_from_params(
+                'heatmap', self.params, width='double', title=title,
+                zscore='none', row_cluster=True, col_cluster=True,
+                max_row_labels=30, max_col_labels=18,
+            ).with_updates(formats=nature_formats, height_mm=height_mm)
+            fig = director.render(spec, {
+                'matrix': np.asarray(matrix, dtype=float),
+                'gene_labels': [str(v) for v in row_labels],
+                'sample_labels': [str(v) for v in col_labels],
+                'colorbar_label': colorbar_label,
+                'symmetric_color': symmetric,
+                'vmin': vmin, 'vmax': vmax,
+            })
+            _export_engine(fig, stem, label, spec)
+
         # 1. 一致性评分表
         self.progress(50, "保存一致性评分...")
         if len(consistency_df) > 0:
@@ -228,42 +262,24 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
 
         if intersection_data:
             top_intersections = intersection_data[:upset_top_n]
-            # Intersection labels become unreadable in a vertical bar chart
-            # once a design has several pairwise contrasts.  A horizontal
-            # layout gives each comparison combination its own readable row.
             import matplotlib.pyplot as plt
-            from modules.figure_style import NATURE_AXIS, NATURE_GRID, NATURE_PALETTE, NATURE_TEXT
+            from figure_engine import NatureFigureDirector, export_registered_figure
 
-            upset_labels = [str(item['sets']).replace(' ∩ ', '\n∩ ')
-                            for item in top_intersections]
-            upset_counts = [int(item['count']) for item in top_intersections]
-            fig_height = max(4.6, 0.43 * len(upset_labels) + 1.5)
-            fig_upset, ax_upset = plt.subplots(figsize=(10.0, fig_height), dpi=150)
-            y_positions = np.arange(len(upset_labels))
-            bars = ax_upset.barh(y_positions, upset_counts, color=NATURE_PALETTE[0], alpha=0.88)
-            ax_upset.set_yticks(y_positions, upset_labels, fontsize=7)
-            ax_upset.invert_yaxis()
-            ax_upset.set_xlabel('基因数', fontsize=9, color=NATURE_TEXT)
-            ax_upset.set_title('差异基因交集模式 (Upset)', loc='left', fontsize=10,
-                               fontweight='semibold', color=NATURE_TEXT)
-            ax_upset.grid(axis='x', color=NATURE_GRID, linewidth=0.5, alpha=0.7)
-            ax_upset.set_axisbelow(True)
-            ax_upset.tick_params(axis='x', labelsize=8, colors=NATURE_AXIS, width=0.7, length=3)
-            ax_upset.tick_params(axis='y', colors=NATURE_TEXT, length=0)
-            for spine_name, spine in ax_upset.spines.items():
-                spine.set_visible(spine_name in ('left', 'bottom'))
-                spine.set_color(NATURE_AXIS)
-                spine.set_linewidth(0.7)
-            x_offset = max(max(upset_counts, default=1) * 0.012, 0.5)
-            for bar, count in zip(bars, upset_counts):
-                ax_upset.text(bar.get_width() + x_offset, bar.get_y() + bar.get_height() / 2,
-                              f'{count:,}', va='center', ha='left', fontsize=7.5, color=NATURE_TEXT)
-            ax_upset.set_xlim(0, max(upset_counts, default=1) * 1.14)
-            fig_upset.tight_layout(pad=1.1)
-            result_files.extend(self.save_matplotlib_figure(
-                fig_upset, plots_dir, 'deg_integration_upset.png',
-                'bar', 'Upset 交集图', formats=('png', 'svg'), dpi=300,
-            ))
+            director = NatureFigureDirector()
+            upset_spec = director.spec_from_params(
+                'upset', self.params, width='double',
+                title='差异基因交集模式', top_intersections=upset_top_n,
+            )
+            fig_upset = director.render(upset_spec, top_intersections)
+            exported, readiness = export_registered_figure(
+                fig_upset, os.path.join(plots_dir, 'deg_integration_upset'), upset_spec,
+                category='upset', label='UpSet 交集图',
+                qa_path=os.path.join(results_dir, 'deg_integration_upset_nature_readiness.json'),
+            )
+            result_files.extend(exported)
+            if not readiness.ready:
+                self.progress(-1, f'UpSet Nature readiness {readiness.score}/100；请查看 QA 报告。')
+            plt.close(fig_upset)
 
         # 比较差异基因数统计表
         count_rows = []
@@ -287,16 +303,12 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
                         jval = intersection / union if union > 0 else 0.0
                         jaccard_matrix.loc[c1, c2] = jval
                         jaccard_matrix.loc[c2, c1] = jval
-            fig_jaccard = heatmap_figure(
-                jaccard_matrix.values, x_labels=comp_names, y_labels=comp_names,
-                title='差异基因 Jaccard 相似度',
-                x_label='Comparison', y_label='Comparison',
-                colorbar_label='Jaccard', vmin=0, vmax=1,
+            _render_heatmap(
+                jaccard_matrix.values, comp_names, comp_names,
+                'deg_integration_jaccard', 'Jaccard 相似度',
+                title='DEG Jaccard similarity', colorbar_label='Jaccard',
+                vmin=0, vmax=1, symmetric=False, height_mm=92.0,
             )
-            result_files.extend(self.save_matplotlib_figure(
-                fig_jaccard, plots_dir, 'deg_integration_jaccard.png',
-                'heatmap', 'Jaccard 相似度', formats=('png', 'svg'), dpi=300,
-            ))
 
         # 2b. Venn 图（2 或 3 个比较时生成）
         self.progress(62, "生成 Venn 图...")
@@ -329,7 +341,7 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
                         len(sig_sets[c0] & sig_sets[c1]),
                     )
                     v = venn2(subsets, set_labels=comp_names, ax=ax)
-                    colors = ['#e53935', '#1565c0']
+                    colors = ['#4C78A8', '#D08A5B']
                     for i, patch_id in enumerate(['10', '01']):
                         patch = v.get_patch_by_id(patch_id)
                         if patch:
@@ -347,21 +359,28 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
                         len(sig_sets[c0] & sig_sets[c1] & sig_sets[c2]),
                     )
                     v = venn3(subsets, set_labels=comp_names, ax=ax)
-                    colors = ['#e53935', '#1565c0', '#4caf50']
+                    colors = ['#4C78A8', '#D08A5B', '#7A6FA8']
                     for i, patch_id in enumerate(['100', '010', '001']):
                         patch = v.get_patch_by_id(patch_id)
                         if patch:
                             patch.set_color(colors[i])
                             patch.set_alpha(0.35)
 
-                ax.set_title(f'Venn: {" vs ".join(comp_names)}', fontsize=13)
+                ax.set_title(f'Venn: {" vs ".join(comp_names)}', fontsize=8,
+                             color='#20262E', fontweight='semibold', loc='left')
                 plt.tight_layout()
-                venn_files = self.save_matplotlib_figure(
-                    fig_venn, plots_dir, 'deg_integration_venn.png',
-                    'venn', 'Venn 图', formats=('png', 'svg'), dpi=300,
+                venn_spec = director.spec_from_params(
+                    'diagnostic', self.params, width='double', title='DEG overlap Venn',
+                ).with_updates(formats=nature_formats, height_mm=82.0)
+                venn_files, venn_report = export_registered_figure(
+                    fig_venn, os.path.join(plots_dir, 'deg_integration_venn'), venn_spec,
+                    category='venn', label='Venn 图',
+                    qa_path=os.path.join(results_dir, 'deg_integration_venn_nature_readiness.json'),
                 )
                 plt.close(fig_venn)
                 result_files.extend(venn_files)
+                if not venn_report.ready:
+                    self.progress(-1, f'Venn 图 Nature readiness {venn_report.score}/100；请查看 QA 报告。')
             else:
                 self.progress(-1, "警告: matplotlib_venn 未安装，跳过 Venn 图生成")
 
@@ -371,16 +390,12 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
             top_genes = consistency_df.head(consistency_n)['gene'].tolist()
             reg_subset = regulation_matrix.reindex(top_genes).dropna()
             if len(reg_subset) > 0:
-                fig_dir = heatmap_figure(
-                    reg_subset.values, x_labels=comp_names,
-                    y_labels=reg_subset.index.tolist(), title='差异方向一致性矩阵',
-                    x_label='Comparison', y_label='Gene',
-                    colorbar_label='Direction', vmin=-1, vmax=1,
+                _render_heatmap(
+                    reg_subset.values, top_genes, comp_names,
+                    'deg_integration_direction_heatmap', '方向一致性矩阵',
+                    title='DEG direction consistency', colorbar_label='Direction',
+                    vmin=-1, vmax=1, symmetric=True, height_mm=112.0,
                 )
-                result_files.extend(self.save_matplotlib_figure(
-                    fig_dir, plots_dir, 'deg_integration_direction_heatmap.png',
-                    'heatmap', '方向一致性矩阵', formats=('png', 'svg'), dpi=300,
-                ))
 
         # 4. logFC 矩阵热图
         self.progress(80, "生成 logFC 矩阵热图...")
@@ -389,16 +404,12 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
             logfc_subset = logfc_matrix.reindex(top_genes_fc).dropna()
             if len(logfc_subset) > 0:
                 logfc_subset = logfc_subset.clip(-logfc_clip, logfc_clip)
-                fig_heat = heatmap_figure(
-                    logfc_subset.values, x_labels=comp_names,
-                    y_labels=logfc_subset.index.tolist(), title='Top 差异基因 logFC 矩阵',
-                    x_label='Comparison', y_label='Gene',
-                    colorbar_label='log2FC', vmin=-logfc_clip, vmax=logfc_clip,
+                _render_heatmap(
+                    logfc_subset.values, top_genes_fc, comp_names,
+                    'deg_integration_logfc_heatmap', 'logFC 矩阵热图',
+                    title='Top DEG log2FC matrix', colorbar_label='log2FC',
+                    vmin=-logfc_clip, vmax=logfc_clip, symmetric=True, height_mm=112.0,
                 )
-                result_files.extend(self.save_matplotlib_figure(
-                    fig_heat, plots_dir, 'deg_integration_logfc_heatmap.png',
-                    'heatmap', 'logFC 矩阵热图', formats=('png', 'svg'), dpi=300,
-                ))
 
         # 5. 比较间 logFC 相关性热图
         self.progress(87, "生成比较间相关性热图...")
@@ -406,32 +417,27 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
             sig_in_any = ((padj_matrix < pval_threshold) & (abs(logfc_matrix) >= log2fc_thresh)).any(axis=1)
             sig_logfc = logfc_matrix.loc[sig_in_any]
             corr_mat = sig_logfc.corr(method='pearson') if len(sig_logfc) > 0 else logfc_matrix.corr(method='pearson')
-            fig_corr = heatmap_figure(
-                corr_mat.values, x_labels=comp_names, y_labels=comp_names,
-                title='比较间 logFC 相关性', x_label='Comparison',
-                y_label='Comparison', colorbar_label='Pearson r', vmin=-1, vmax=1,
+            _render_heatmap(
+                corr_mat.values, comp_names, comp_names,
+                'deg_integration_corr', '比较间相关性',
+                title='Comparison log2FC correlation', colorbar_label='Pearson r',
+                vmin=-1, vmax=1, symmetric=True, height_mm=92.0,
             )
-            result_files.extend(self.save_matplotlib_figure(
-                fig_corr, plots_dir, 'deg_integration_corr.png',
-                'heatmap', '比较间相关性', formats=('png', 'svg'), dpi=300,
-            ))
 
         # 6. Top 一致性基因热图
         self.progress(90, "生成 Top 一致性基因热图...")
         if len(consistency_df) > 0:
             top_n = min(consistency_n, 30)
             top_consistent = consistency_df.head(top_n)
-            fig_top = bar_figure(
-                top_consistent['gene'].tolist(), top_consistent['consistency_score'].values,
-                title=f'Top {top_n} 一致性差异基因', x_label='Gene',
-                y_label='Consistency Score',
-                colors=['#B64342' if s > 0 else '#0F4D92'
-                        for s in top_consistent['consistency_score']],
-            )
-            result_files.extend(self.save_matplotlib_figure(
-                fig_top, plots_dir, 'deg_integration_top_consistent.png',
-                'bar', 'Top 一致性基因', formats=('png', 'svg'), dpi=300,
-            ))
+            top_spec = director.spec_from_params(
+                'diagnostic', self.params, width='double', title=f'Top {top_n} consistent DEGs',
+            ).with_updates(extra={'kind': 'bar'}, formats=nature_formats, height_mm=78.0)
+            fig_top = director.render(top_spec, {
+                'kind': 'bar', 'labels': top_consistent['gene'].tolist(),
+                'values': top_consistent['consistency_score'].values,
+                'xlabel': 'Gene', 'ylabel': 'Consistency score',
+            })
+            _export_engine(fig_top, 'deg_integration_top_consistent', 'Top 一致性基因', top_spec, category='bar')
 
         # ===== 表达式筛选器 =====
         filter_expression = self.params.get('filter_expression', '').strip()
@@ -547,7 +553,9 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
         # 2. Filter UpSet plot (which atoms the genes satisfy)
         self.progress(93, "生成筛选 UpSet 图...")
         from itertools import combinations as iter_combos
-        from modules.native_figures import bar_figure, heatmap_figure
+        from figure_engine import NatureFigureDirector, export_registered_figure
+        director = NatureFigureDirector()
+        nature_formats = ('svg', 'pdf', 'png')
 
         atom_sets = {}
         for c in comp_names:
@@ -575,15 +583,21 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
         filter_upset_data.sort(key=lambda x: x['count'], reverse=True)
         if filter_upset_data:
             top20 = filter_upset_data[:20]
-            fig_fu = bar_figure(
-                [d['sets'] for d in top20], [d['count'] for d in top20],
-                title='筛选基因交集模式', x_label='比较组合', y_label='基因数',
-                annotations=[f"{d['count']:,}" for d in top20],
+            upset_spec = director.spec_from_params(
+                'upset', self.params, width='double', title='Filtered DEG intersections',
+                top_intersections=20,
+            ).with_updates(formats=nature_formats, height_mm=122.0)
+            fig_fu = director.render(upset_spec, top20)
+            exported, report = export_registered_figure(
+                fig_fu, os.path.join(plots_dir, 'deg_filter_upset'), upset_spec,
+                category='upset', label='筛选基因 Upset 图',
+                qa_path=os.path.join(results_dir, 'deg_filter_upset_nature_readiness.json'),
             )
-            result_files.extend(self.save_matplotlib_figure(
-                fig_fu, plots_dir, 'deg_filter_upset.png', 'bar',
-                '筛选基因 Upset 图', formats=('png', 'svg'), dpi=300,
-            ))
+            result_files.extend(exported)
+            if not report.ready:
+                self.progress(-1, f'筛选基因 UpSet Nature readiness {report.score}/100；请查看 QA 报告。')
+            import matplotlib.pyplot as plt
+            plt.close(fig_fu)
 
         # 3. Filter logFC heatmap
         self.progress(94, "生成筛选基因 logFC 热图...")
@@ -592,15 +606,26 @@ class BulkDEGIntegrationAnalysis(BaseAnalysis):
         show_genes = filtered_genes[:show_n]
         logfc_clip = float(self.params.get('logfc_clip_range', 5.0))
         logfc_sub = logfc_matrix.reindex(show_genes).clip(-logfc_clip, logfc_clip)
-        fig_fheat = heatmap_figure(
-            logfc_sub.values, x_labels=comp_names, y_labels=show_genes,
-            title='筛选基因 logFC 矩阵', x_label='Comparison', y_label='Gene',
-            colorbar_label='log2FC', vmin=-logfc_clip, vmax=logfc_clip,
+        heat_spec = director.spec_from_params(
+            'heatmap', self.params, width='double', title='Filtered DEG log2FC matrix',
+            zscore='none', row_cluster=True, col_cluster=False,
+            max_row_labels=30, max_col_labels=18,
+        ).with_updates(formats=nature_formats, height_mm=120.0, color_limit=logfc_clip)
+        fig_fheat = director.render(heat_spec, {
+            'matrix': logfc_sub.values, 'gene_labels': show_genes,
+            'sample_labels': comp_names, 'colorbar_label': 'log2FC',
+            'symmetric_color': True, 'vmin': -logfc_clip, 'vmax': logfc_clip,
+        })
+        exported, report = export_registered_figure(
+            fig_fheat, os.path.join(plots_dir, 'deg_filter_logfc_heatmap'), heat_spec,
+            category='heatmap', label='筛选基因 logFC 热图',
+            qa_path=os.path.join(results_dir, 'deg_filter_logfc_heatmap_nature_readiness.json'),
         )
-        result_files.extend(self.save_matplotlib_figure(
-            fig_fheat, plots_dir, 'deg_filter_logfc_heatmap.png',
-            'heatmap', '筛选基因 logFC 热图', formats=('png', 'svg'), dpi=300,
-        ))
+        result_files.extend(exported)
+        if not report.ready:
+            self.progress(-1, f'筛选基因 logFC 热图 Nature readiness {report.score}/100；请查看 QA 报告。')
+        import matplotlib.pyplot as plt
+        plt.close(fig_fheat)
 
         # 4. Expression parse tree visualization
         self.progress(95, "生成表达式解析树...")

@@ -97,19 +97,27 @@
                     </div>
                     <div class="viz-panel-body" style="display: none; padding: 12px;">
                         <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; font-size: 12px;">
-                            <label>主题 <select name="_viz_theme" style="width: 100%;"><option value="default">默认</option><option value="nature">Nature 论文</option><option value="dark">暗色</option></select></label>
-                            <label>宽度 <input type="number" name="_viz_width" value="800" min="200" max="2000" style="width: 100%;"></label>
-                            <label>高度 <input type="number" name="_viz_height" value="500" min="200" max="1500" style="width: 100%;"></label>
-                            <label>字号 <input type="number" name="_viz_fontsize" value="12" min="8" max="24" style="width: 100%;"></label>
-                            <label>字体 <select name="_viz_fontfamily" style="width: 100%;"><option>Arial</option><option>Helvetica</option><option>Times New Roman</option><option>SimSun</option></select></label>
+                            <label>绘图模式 <select name="_viz_figure_mode" style="width: 100%;"><option value="standard">Standard（探索）</option><option value="publication">Publication（论文）</option><option value="nature_portfolio" selected>Nature Portfolio（严格）</option></select></label>
+                            <label>投稿宽度 <select name="_viz_width_profile" style="width: 100%;"><option value="single">单栏 89 mm</option><option value="double">双栏 183 mm</option></select></label>
+                            <label>Nature 风格 <select name="_viz_nature_style" style="width: 100%;"><option value="nature">Nature</option><option value="nature_communications">Nature Communications</option><option value="nature_aging">Nature Aging</option></select></label>
+                            <label class="legacy-visual-control">交互主题 <select name="_viz_theme" style="width: 100%;"><option value="default">默认</option><option value="nature" selected>Nature 论文</option><option value="dark">暗色</option></select></label>
+                            <label class="legacy-visual-control">预览宽度(px) <input type="number" name="_viz_width" value="800" min="200" max="2000" style="width: 100%;"></label>
+                            <label class="legacy-visual-control">预览高度(px) <input type="number" name="_viz_height" value="500" min="200" max="1500" style="width: 100%;"></label>
+                            <label class="legacy-visual-control">预览字号 <input type="number" name="_viz_fontsize" value="12" min="8" max="24" style="width: 100%;"></label>
+                            <label class="legacy-visual-control">预览字体 <select name="_viz_fontfamily" style="width: 100%;"><option>Arial</option><option>Helvetica</option><option>Times New Roman</option><option>SimSun</option></select></label>
                             <label>UMAP 点大小 <input type="number" name="_viz_umap_point_size" value="5" min="1" max="20" style="width: 100%;"></label>
                             <label>UMAP 透明度 <input type="number" name="_viz_umap_opacity" value="0.7" min="0.1" max="1" step="0.1" style="width: 100%;"></label>
                             <label>图例字号 <input type="number" name="_viz_legend_fontsize" value="10" min="6" max="20" style="width: 100%;"></label>
-                            <label>导出格式 <div style="display: flex; gap: 10px; padding-top: 4px;">
+                            <label style="align-self: end;"><input type="checkbox" name="_viz_umap_labels"> UMAP 显示类别标签</label>
+                            <label style="align-self: end;"><input type="checkbox" name="_viz_umap_hide_axes" checked> UMAP 隐藏坐标刻度</label>
+                            <label style="grid-column: span 2;">导出格式 <div style="display: flex; flex-wrap: wrap; gap: 10px; padding-top: 4px;">
                                 <label style="font-weight:normal"><input type="checkbox" name="_viz_export_svg" checked> SVG（论文矢量图）</label>
-                                <label style="font-weight:normal"><input type="checkbox" name="_viz_export_png" checked> PNG（300 dpi）</label>
+                                <label style="font-weight:normal"><input type="checkbox" name="_viz_export_pdf" checked> PDF（投稿矢量图）</label>
+                                <label style="font-weight:normal"><input type="checkbox" name="_viz_export_png" checked> PNG（预览/高分辨率）</label>
+                                <label style="font-weight:normal"><input type="checkbox" name="_viz_export_tiff"> TIFF（投稿位图）</label>
                             </div></label>
                         </div>
+                        <div id="nature-mode-note" class="alert alert-light border py-2 px-3 mt-2 mb-0 small">严格模式下，字体、字号、颜色、线宽、点大小和白色背景由 Nature Figure Engine 固定；这里只开放科学参数、投稿宽度和导出格式。</div>
                         <div class="d-flex flex-wrap align-items-center gap-2 mt-3 small">
                             <span class="text-muted">快速图形预设：</span>
                             <button type="button" class="btn btn-outline-secondary btn-sm" onclick="applyVisualizationQuickPreset('paper')">论文图</button>
@@ -265,7 +273,7 @@
                     {% else %}
                     {% if module.name == 'bulk_heatmap' and param.key == 'deg_comparison' %}
                     <select name="{{ param.key }}" class="form-select">
-                        <option value="">-- 使用最新 DEG 结果 --</option>
+                        <option value="">-- 不绑定比较（仅 Top-var 可用）--</option>
                         {% for source in heatmap_deg_sources %}
                         <option value="{{ source.path }}" {% if source.path == param.default %}selected{% endif %}>{{ source.label }}</option>
                         {% endfor %}
@@ -445,22 +453,34 @@ function findParamControl(name) {
 function applyVisualizationQuickPreset(name) {
     const presets = {
         paper: {
+            _viz_figure_mode: 'nature_portfolio', _viz_width_profile: 'single',
+            _viz_nature_style: 'nature',
             _viz_theme: 'nature', _viz_width: 900, _viz_height: 650,
             _viz_fontsize: 11, _viz_fontfamily: 'Helvetica',
             _viz_umap_point_size: 4, _viz_umap_opacity: 0.75,
-            _viz_legend_fontsize: 9, _viz_export_svg: true, _viz_export_png: true,
+            _viz_legend_fontsize: 9, _viz_umap_labels: false, _viz_umap_hide_axes: true,
+            _viz_export_svg: true, _viz_export_pdf: true, _viz_export_png: true,
+            _viz_export_tiff: false,
         },
         compact: {
+            _viz_figure_mode: 'standard', _viz_width_profile: 'single',
+            _viz_nature_style: 'nature',
             _viz_theme: 'default', _viz_width: 700, _viz_height: 460,
             _viz_fontsize: 11, _viz_fontfamily: 'Arial',
             _viz_umap_point_size: 4, _viz_umap_opacity: 0.7,
-            _viz_legend_fontsize: 9, _viz_export_svg: false, _viz_export_png: true,
+            _viz_legend_fontsize: 9, _viz_umap_labels: false, _viz_umap_hide_axes: true,
+            _viz_export_svg: false, _viz_export_pdf: false, _viz_export_png: true,
+            _viz_export_tiff: false,
         },
         presentation: {
+            _viz_figure_mode: 'publication', _viz_width_profile: 'double',
+            _viz_nature_style: 'nature',
             _viz_theme: 'default', _viz_width: 1200, _viz_height: 760,
             _viz_fontsize: 16, _viz_fontfamily: 'Arial',
             _viz_umap_point_size: 7, _viz_umap_opacity: 0.82,
-            _viz_legend_fontsize: 12, _viz_export_svg: true, _viz_export_png: true,
+            _viz_legend_fontsize: 12, _viz_umap_labels: true, _viz_umap_hide_axes: true,
+            _viz_export_svg: true, _viz_export_pdf: true, _viz_export_png: true,
+            _viz_export_tiff: false,
         },
     };
     const values = presets[name];
@@ -471,7 +491,21 @@ function applyVisualizationQuickPreset(name) {
         if (field.type === 'checkbox') field.checked = Boolean(value);
         else field.value = value;
     });
+    updateFigureModeControls();
 }
+
+function updateFigureModeControls() {
+    const mode = document.querySelector('[name="_viz_figure_mode"]')?.value || 'publication';
+    const locked = mode === 'nature_portfolio';
+    document.querySelectorAll('.legacy-visual-control input, .legacy-visual-control select').forEach(field => {
+        field.disabled = locked;
+    });
+    const note = document.getElementById('nature-mode-note');
+    if (note) note.style.display = locked ? '' : 'none';
+}
+
+document.querySelector('[name="_viz_figure_mode"]')?.addEventListener('change', updateFigureModeControls);
+updateFigureModeControls();
 
 function getParamValue(name) {
     const el = findParamControl(name);
@@ -627,10 +661,15 @@ document.querySelector('.param-form').addEventListener('submit', function() {
     }
     const exportFormats = [];
     if (this.querySelector('[name="_viz_export_svg"]')?.checked) exportFormats.push('svg');
+    if (this.querySelector('[name="_viz_export_pdf"]')?.checked) exportFormats.push('pdf');
     if (this.querySelector('[name="_viz_export_png"]')?.checked) exportFormats.push('png');
+    if (this.querySelector('[name="_viz_export_tiff"]')?.checked) exportFormats.push('tiff');
 
     vizHidden.value = JSON.stringify({
         theme: this.querySelector('[name="_viz_theme"]')?.value || 'default',
+        figure_mode: this.querySelector('[name="_viz_figure_mode"]')?.value || 'publication',
+        width_profile: this.querySelector('[name="_viz_width_profile"]')?.value || 'single',
+        nature_style: this.querySelector('[name="_viz_nature_style"]')?.value || 'nature',
         figure_width: parseInt(this.querySelector('[name="_viz_width"]')?.value) || 800,
         figure_height: parseInt(this.querySelector('[name="_viz_height"]')?.value) || 500,
         font_size: parseInt(this.querySelector('[name="_viz_fontsize"]')?.value) || 12,
@@ -638,8 +677,10 @@ document.querySelector('.param-form').addEventListener('submit', function() {
         umap_point_size: parseInt(this.querySelector('[name="_viz_umap_point_size"]')?.value) || 5,
         umap_opacity: parseFloat(this.querySelector('[name="_viz_umap_opacity"]')?.value) || 0.7,
         umap_legend_fontsize: parseInt(this.querySelector('[name="_viz_legend_fontsize"]')?.value) || 10,
+        umap_label_categories: Boolean(this.querySelector('[name="_viz_umap_labels"]')?.checked),
+        umap_hide_axes: this.querySelector('[name="_viz_umap_hide_axes"]')?.checked !== false,
         export_formats: exportFormats,
-        static_formats: exportFormats.filter(format => format === 'png' || format === 'svg'),
+        static_formats: exportFormats,
     });
 
     // 过滤规则配置

@@ -70,6 +70,30 @@ class TestTransformHeatmapData:
         assert result[0, 0] < 100  # 极端值应被截断
 
 
+def test_plotly_umap_uses_shared_style_and_existing_category_colours():
+    import anndata
+    import pandas as pd
+
+    from modules.visualization import umap_scatter
+
+    adata = anndata.AnnData(
+        X=np.ones((4, 2)),
+        obs=pd.DataFrame({'cell_type': ['T', 'B', 'T', 'B']}),
+    )
+    adata.obsm['X_umap'] = np.array([[0, 0], [1, 0], [0, 1], [1, 1]], dtype=float)
+    adata.obs['cell_type'] = adata.obs['cell_type'].astype('category')
+    adata.uns['cell_type_colors'] = ['#123456', '#ABCDEF']
+
+    figure = umap_scatter(
+        adata, 'cell_type',
+        viz_params={'figure_width': 1000, 'figure_height': 700},
+    )
+
+    assert figure['layout']['width'] == 1000
+    assert figure['layout']['height'] == 700
+    assert figure['layout']['xaxis']['showticklabels'] is False
+    assert figure['data'][0]['marker']['color'] == '#123456'
+
 class TestClusterHeatmap:
     """测试 cluster_heatmap 函数。"""
 

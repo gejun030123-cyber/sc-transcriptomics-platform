@@ -44,7 +44,11 @@ def _make_deg_table(project_id, suffix, label):
     path = os.path.join(results_dir, f'bulk_deg_results{suffix}.csv')
     with open(path, 'w', encoding='utf-8') as handle:
         handle.write('gene,log2FC,padj,regulation\nTP53,2.2,0.01,Up\nMYC,-1.8,0.02,Down\n')
-    task = AnalysisTask(project_id=project_id, module_name='bulk_deg', status='completed')
+    task = AnalysisTask(
+        project_id=project_id, module_name='bulk_deg', status='completed',
+        params_json=json.dumps({'groupby': 'condition'}),
+        result_json=json.dumps({'groupby': 'group'}),
+    )
     task.save()
     return ResultFile.create(task_id=task.id, project_id=project_id, file_type='csv',
                              category='table', label=label, file_path=path)
@@ -90,6 +94,23 @@ def test_enrichment_rejects_blank_deg_choice_before_submitting_task(client):
 
     assert response.status_code == 200
     assert '请选择一个 DEG 比较结果'.encode() in response.data
+    assert len(AnalysisTask.get_by_project('enrich_project')) == 1
+
+
+def test_enrichment_rejects_custom_gmt_without_human_geneset_text(client):
+    from models import AnalysisTask
+
+    _make_project('enrich_project')
+    source = _make_deg_table(
+        'enrich_project', '_0', '差异表达基因列表 (Ctrl vs Treat)',
+    )
+    response = client.post('/projects/enrich_project/analyze/bulk_enrichment', data={
+        'method': 'ORA', 'database': 'Custom_GMT',
+        'input_source': source.file_path, 'custom_geneset_text': '',
+    }, follow_redirects=True)
+
+    assert response.status_code == 200
+    assert '必须粘贴 Human GMT'.encode() in response.data
     assert len(AnalysisTask.get_by_project('enrich_project')) == 1
 
 
@@ -142,5 +163,52 @@ def test_heatmap_form_exposes_display_scope_and_group_picker(client):
 
     assert response.status_code == 200
     assert '热图展示样本范围'.encode() in response.data
+    assert '自动（DEG/绑定比较=仅两组，否则全部）'.encode() in response.data
     assert '仅 DEG 两组'.encode() in response.data
+    assert '不绑定比较（仅 Top-var 可用）'.encode() in response.data
     assert b'dynamic-multiselect' in response.data
+
+
+def test_top_var_heatmap_binds_selected_deg_comparison_and_groupby(client, monkeypatch):
+    from config import Config
+
+    _make_project('enrich_project')
+    source = _make_deg_table(
+        'enrich_project', '_0', '差异表达基因列表 (Ctrl vs Treat)',
+    )
+    uploads_dir = Config.uploads_dir('enrich_project')
+    os.makedirs(uploads_dir, exist_ok=True)
+    input_path = os.path.join(uploads_dir, 'expression.csv')
+    with open(input_path, 'w', encoding='utf-8') as handle:
+        handle.write('gene,S1,S2\nTP53,1,2\n')
+
+    submitted = []
+    monkeypatch.setattr(
+        'worker.submit_task',
+        lambda task_id, project_id, module_name, params, project_dir, selected_input:
+            submitted.append(params) or True,
+    )
+    response = client.post('/projects/enrich_project/analyze/bulk_heatmap', data={
+        'input_path': input_path,
+        'gene_import_source': 'top_var',
+        'deg_comparison': source.file_path,
+        'sample_display_mode': 'auto',
+    })
+
+    assert response.status_code == 302
+    assert len(submitted) == 1
+    assert submitted[0]['deg_comparison_label'] == 'Ctrl vs Treat'
+    assert submitted[0]['groupby'] == 'group'
+    assert submitted[0]['sample_display_mode'] == 'auto'
+
+
+def test_deg_heatmap_requires_an_explicit_comparison(client):
+    _make_project('enrich_project')
+
+    response = client.post('/projects/enrich_project/analyze/bulk_heatmap', data={
+        'gene_import_source': 'deg',
+        'deg_comparison': '',
+    }, follow_redirects=True)
+
+    assert response.status_code == 200
+    assert '请明确选择一个 DEG 比较结果'.encode() in response.data

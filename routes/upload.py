@@ -1,5 +1,5 @@
 import os
-from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify
+from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify, send_file
 from werkzeug.utils import secure_filename
 from models import Project
 from config import Config
@@ -104,24 +104,37 @@ def upload(pid):
         flash('项目未找到', 'danger')
         return redirect(url_for('main.index'))
     if request.method == 'POST':
-        if 'file' not in request.files:
-            flash('请选择文件', 'danger')
+        ajax_request = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+
+        def reject(message, status=400):
+            if ajax_request:
+                return jsonify({'error': message}), status
+            flash(message, 'danger')
             return redirect(url_for('upload.upload', pid=pid))
+
+        if 'file' not in request.files:
+            return reject('请选择文件')
         file = request.files['file']
         if file.filename == '':
-            flash('请选择文件', 'danger')
-            return redirect(url_for('upload.upload', pid=pid))
+            return reject('请选择文件')
         fname = secure_filename(file.filename)
+        if not fname:
+            return reject('文件名不合法')
         ext = os.path.splitext(fname)[1].lower()
         if ext not in ALLOWED_EXT and not fname.endswith('.mtx.gz') and not fname.endswith('.tsv.gz'):
-            flash(f'不支持的文件格式: {ext}', 'danger')
-            return redirect(url_for('upload.upload', pid=pid))
+            return reject(f'不支持的文件格式: {ext or "无扩展名"}')
         uploads_dir = Config.uploads_dir(pid)
         os.makedirs(uploads_dir, exist_ok=True)
         fpath = os.path.join(uploads_dir, fname)
         file.save(fpath)
         p.status = 'data_ready'
         p.save()
+        if ajax_request:
+            return jsonify({
+                'ok': True,
+                'filename': fname,
+                'size_bytes': os.path.getsize(fpath),
+            }), 201
         flash(f'文件 "{fname}" 上传成功', 'success')
         return redirect(url_for('projects.detail', pid=pid))
     return render_template('upload.html', project=p)
@@ -234,7 +247,7 @@ def import_sc(pid):
 
 @upload_bp.route('/<pid>/upload/import-10x-batches', methods=['POST'])
 def import_10x_batches(pid):
-    """Upload and merge two zipped 10x batches with an explicit batch label."""
+    """Upload and merge two or more zipped 10x batches with explicit labels."""
     import json as _json
     from models import AnalysisTask
     from worker import submit_task
@@ -250,14 +263,12 @@ def import_10x_batches(pid):
             request.files.get('batch_b_zip') or request.files.get('batch_b'),
         ) if item]
     if len(files) < 2:
-        return jsonify({'error': '请上传两组 ZIP 文件'}), 400
-    if len(files) > 2:
-        return jsonify({'error': '当前接口只支持两组 ZIP 文件'}), 400
+        return jsonify({'error': '请至少上传两组 ZIP 文件'}), 400
 
     names = request.form.getlist('batch_name')
     if not names:
         names = [request.form.get('batch_a_name', ''), request.form.get('batch_b_name', '')]
-    while len(names) < 2:
+    while len(names) < len(files):
         names.append('')
     default_names = []
     for index, file in enumerate(files, start=1):
@@ -303,3 +314,110 @@ def import_10x_batches(pid):
     submit_task(task.id, pid, 'convert_10x', params,
                 Config.project_dir(pid), uploads_dir)
     return jsonify({'task_id': task.id, 'batch_names': default_names})
+
+
+@upload_bp.route('/<pid>/upload/discover-10x-directory', methods=['POST'])
+def discover_10x_directory(pid):
+    """Create an editable manifest template from an approved server data root."""
+    from modules.sc_batch import _available_path, discovered_manifest_frame
+
+    project = Project.get_by_id(pid)
+    if not project:
+        return jsonify({'error': '项目未找到'}), 404
+    source_root = (request.form.get('source_root') or '').strip()
+    try:
+        source_root = Config.validate_sc_batch_source_path(source_root)
+        manifest = discovered_manifest_frame(source_root)
+    except (OSError, ValueError) as exc:
+        return jsonify({'error': str(exc)}), 400
+    if manifest.empty:
+        return jsonify({'error': '该目录下未发现完整的 10x matrix.mtx + barcodes + features/genes 文件'}), 400
+
+    manifest_dir = os.path.join(Config.uploads_dir(pid), 'sc_batch_manifests')
+    path = _available_path(manifest_dir, 'sc_batch_manifest_template', '.csv')
+    manifest.to_csv(path, index=False)
+    return jsonify({
+        'manifest_file': os.path.basename(path),
+        'n_samples': int(len(manifest)),
+        'sample_ids': manifest['sample_id'].tolist(),
+        'download_url': url_for('upload.download_sc_batch_manifest', pid=pid,
+                                filename=os.path.basename(path)),
+        'message': '已生成模板。请填写 condition 和 replicate 后再上传并导入；目录名不会被自动当作分组。',
+    })
+
+
+@upload_bp.route('/<pid>/upload/sc-batch-manifest/<filename>')
+def download_sc_batch_manifest(pid, filename):
+    """Download only a platform-generated manifest from the project upload area."""
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目未找到'}), 404
+    if secure_filename(filename) != filename:
+        return jsonify({'error': '文件名不合法'}), 400
+    path = os.path.join(Config.uploads_dir(pid), 'sc_batch_manifests', filename)
+    valid, error = Config._validate_path(path, pid)
+    if not valid or not os.path.isfile(path):
+        return jsonify({'error': error or '模板不存在'}), 404
+    return send_file(path, as_attachment=True, download_name=filename)
+
+
+@upload_bp.route('/<pid>/upload/import-10x-manifest', methods=['POST'])
+def import_10x_manifest(pid):
+    """Submit a manifest-driven, arbitrary-size 10x import task."""
+    import json as _json
+    from models import AnalysisTask
+    from worker import submit_task
+    from modules.sc_batch import _available_path, read_sample_manifest
+
+    project = Project.get_by_id(pid)
+    if not project:
+        return jsonify({'error': '项目未找到'}), 404
+    source_root = (request.form.get('source_root') or '').strip()
+    dataset_name = (request.form.get('dataset_name') or 'sc_batch').strip()
+    species = request.form.get('species', '').strip() or None
+    genome = request.form.get('genome', '').strip() or None
+    manifest_dir = os.path.join(Config.uploads_dir(pid), 'sc_batch_manifests')
+    os.makedirs(manifest_dir, exist_ok=True)
+
+    uploaded = request.files.get('manifest_file')
+    if uploaded and uploaded.filename:
+        original = secure_filename(uploaded.filename)
+        ext = os.path.splitext(original)[1].lower()
+        if ext not in {'.csv', '.tsv', '.txt', '.xlsx', '.xls'}:
+            return jsonify({'error': 'manifest 仅支持 CSV、TSV 或 Excel'}), 400
+        manifest_path = _available_path(manifest_dir, os.path.splitext(original)[0] or 'sample_manifest', ext)
+        uploaded.save(manifest_path)
+    else:
+        selected = (request.form.get('manifest_name') or '').strip()
+        if not selected or secure_filename(selected) != selected:
+            return jsonify({'error': '请上传已填写的样本 manifest'}), 400
+        manifest_path = os.path.join(manifest_dir, selected)
+
+    try:
+        root = Config.validate_sc_batch_source_path(source_root)
+        manifest = read_sample_manifest(manifest_path, root)
+    except (OSError, ValueError) as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    params = {
+        'manifest_path': manifest_path,
+        'source_root': root,
+        'dataset_name': dataset_name,
+        'species': species,
+        'genome': genome,
+    }
+    task = AnalysisTask(
+        project_id=pid,
+        module_name='sc_batch_import',
+        status='pending',
+        params_json=_json.dumps(params, ensure_ascii=False),
+    )
+    task.save()
+    project.status = 'processing'
+    project.save()
+    submit_task(task.id, pid, 'sc_batch_import', params,
+                Config.project_dir(pid), manifest_path)
+    return jsonify({
+        'task_id': task.id,
+        'n_samples': int(len(manifest)),
+        'conditions': sorted(manifest['condition'].astype(str).unique().tolist()),
+    })

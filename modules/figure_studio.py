@@ -97,7 +97,15 @@ def normalize_style(payload):
         'annotation_column': _clean_text(payload.get('annotation_column'), 80),
         'corr_colorscale': str(payload.get('corr_colorscale') or 'Blues'),
         'enrichment_top_n': int(_number(payload.get('enrichment_top_n'), 20, 3, 50)),
+        'enrichment_overview_top_n': int(_number(payload.get('enrichment_overview_top_n'), 8, 3, 20)),
+        'enrichment_database_scope': _clean_text(payload.get('enrichment_database_scope'), 1000),
+        'enrichment_pathway_selection': str(payload.get('enrichment_pathway_selection') or 'top'),
+        'enrichment_target_pathways': _clean_text(payload.get('enrichment_target_pathways'), 4000),
+        'enrichment_gene_label_strategy': str(payload.get('enrichment_gene_label_strategy') or 'all'),
+        'enrichment_target_genes': _clean_text(payload.get('enrichment_target_genes'), 4000),
+        'enrichment_max_gene_labels': int(_number(payload.get('enrichment_max_gene_labels'), 30, 0, 80)),
         'enrichment_bp_color': _color(payload.get('enrichment_bp_color'), '#FDBE85'),
+        'enrichment_cc_color': _color(payload.get('enrichment_cc_color'), '#7A6FA8'),
         'enrichment_mf_color': _color(payload.get('enrichment_mf_color'), '#B8A9D1'),
         'enrichment_kegg_color': _color(payload.get('enrichment_kegg_color'), '#7BC77B'),
         'enrichment_other_color': _color(payload.get('enrichment_other_color'), '#9CB8D8'),
@@ -112,6 +120,10 @@ def normalize_style(payload):
         styles['heatmap_sample_scope'] = 'all'
     if styles['corr_colorscale'] not in CORRELATION_COLOR_MAPS:
         styles['corr_colorscale'] = 'Blues'
+    if styles['enrichment_pathway_selection'] not in {'top', 'selected', 'selected_plus_top'}:
+        styles['enrichment_pathway_selection'] = 'top'
+    if styles['enrichment_gene_label_strategy'] not in {'all', 'shared', 'selected', 'none'}:
+        styles['enrichment_gene_label_strategy'] = 'all'
     if styles['x_min'] is not None and styles['x_max'] is not None and styles['x_min'] >= styles['x_max']:
         styles['x_min'] = styles['x_max'] = None
     if styles['y_min'] is not None and styles['y_max'] is not None and styles['y_min'] >= styles['y_max']:
@@ -185,10 +197,79 @@ def _source_mode_for_result(result_file):
             return 'bulk_correlation', companion
     if filename.startswith('enrichment_') and filename.endswith('.png') and task and task.module_name == 'bulk_enrichment':
         output_key = filename.rsplit('.', 1)[0]
+        if output_key.startswith('enrichment_overview_'):
+            integrated = os.path.join(
+                Config.results_dir(result_file.project_id),
+                'enrichment_integrated_results.csv',
+            )
+            if _validate_project_path(integrated, result_file.project_id):
+                return 'bulk_enrichment_overview', integrated
         companion = os.path.join(Config.results_dir(result_file.project_id), f'{output_key}_results.csv')
+        if not _validate_project_path(companion, result_file.project_id):
+            # Extended Nature views use a suffixed image stem (…_chord,
+            # …_cnetplot, …_emapplot), while all views intentionally share
+            # the unsuffixed enrichment result table.  Resolve that table so
+            # the result-page “美化” button opens the semantic redraw controls
+            # instead of silently falling back to style-only editing.
+            for view_suffix in (
+                'dotplot', 'barplot', 'chord', 'cnetplot', 'emapplot',
+                'gsea_running', 'gsea',
+            ):
+                marker = f'_{view_suffix}'
+                if output_key.endswith(marker):
+                    base_key = output_key[:-len(marker)]
+                    candidate = os.path.join(
+                        Config.results_dir(result_file.project_id),
+                        f'{base_key}_results.csv',
+                    )
+                    if _validate_project_path(candidate, result_file.project_id):
+                        companion = candidate
+                    break
         if _validate_project_path(companion, result_file.project_id):
             return 'bulk_enrichment', companion
     return 'style_only', ''
+
+
+def _enrichment_plot_type_from_filename(file_path, data_path=''):
+    """Recover the semantic Nature renderer represented by an enrichment PNG.
+
+    Older analysis runs used an unsuffixed ``enrichment_*.png`` name for a
+    legacy bar renderer, while current runs use that same stem for the primary
+    ORA dotplot and put alternate views behind explicit suffixes.  For an
+    unsuffixed image, inspect the companion table's semantic columns so the
+    Figure Studio button opens the same dotplot the user is looking at.
+    """
+    stem = Path(str(file_path)).stem.lower()
+    if stem.startswith('enrichment_overview_'):
+        return 'enrichment_overview'
+    suffixes = {
+        '_dotplot': 'enrichment_dotplot',
+        '_barplot': 'enrichment_barplot',
+        '_chord': 'enrichment_chord',
+        '_cnetplot': 'enrichment_cnetplot',
+        '_emapplot': 'enrichment_emapplot',
+        '_gsea_running': 'gsea_running',
+        '_gsea': 'gsea',
+    }
+    for suffix, plot_type in suffixes.items():
+        if stem.endswith(suffix):
+            return plot_type
+    if data_path and os.path.isfile(data_path):
+        try:
+            columns = {str(column).strip().lower() for column in pd.read_csv(data_path, nrows=0).columns}
+        except (OSError, pd.errors.EmptyDataError, UnicodeDecodeError):
+            columns = set()
+        # GeneRatio + an explicit overlap/count column are the lossless ORA
+        # dotplot contract.  Older tables without GeneRatio remain on the
+        # legacy compatibility renderer until regenerated by the task.
+        ratio_columns = {'generatio', 'gene ratio'}
+        count_columns = {'count', 'num', 'gene count', 'overlap', 'setsize'}
+        if columns.intersection(ratio_columns) and columns.intersection(count_columns):
+            return 'enrichment_dotplot'
+    # A legacy unsuffixed enrichment PNG may have been rendered by the older
+    # ontology-colour bar renderer; keep that compatibility path distinct from
+    # an explicit Nature ``_dotplot`` output.
+    return 'legacy_enrichment'
 
 
 def resolve_source(project_id, source_kind, source_id):
@@ -205,6 +286,8 @@ def resolve_source(project_id, source_kind, source_id):
             'file_type': source.file_type, 'file_path': source.file_path,
             'edit_mode': edit_mode, 'data_path': data_path,
         }
+        if edit_mode in {'bulk_enrichment', 'bulk_enrichment_overview'}:
+            payload['plot_type'] = _enrichment_plot_type_from_filename(source.file_path, data_path)
         if edit_mode == 'bulk_heatmap':
             payload.update(_heatmap_context(AnalysisTask.get_by_id(source.task_id), data_path))
         return payload
@@ -268,6 +351,8 @@ def list_sources(project_id):
             'file_type': item.file_type, 'edit_mode': mode,
             'preview_url': f'/projects/{project_id}/results/file/{item.id}',
         }
+        if mode in {'bulk_enrichment', 'bulk_enrichment_overview'}:
+            source_payload['plot_type'] = _enrichment_plot_type_from_filename(item.file_path, data_path)
         if mode == 'bulk_heatmap':
             task = AnalysisTask.get_by_id(item.task_id)
             if task:
@@ -541,19 +626,60 @@ def _render_bulk_correlation(data_path, style, label):
     return fig, 'data_redraw'
 
 
-def _render_bulk_enrichment(data_path, style, label):
+def _render_bulk_enrichment(data_path, style, label, plot_type='enrichment_dotplot'):
     from modules.bulk_enrichment import _enrichment_figure
 
     result_df = pd.read_csv(data_path)
     if result_df.empty:
         raise FigureStudioError('富集结果表为空，无法重新绘制。')
     database = str(result_df.get('Database', pd.Series(['GO_BP'])).iloc[0])
+    if plot_type != 'legacy_enrichment':
+        from figure_engine import NatureFigureDirector
+
+        director = NatureFigureDirector()
+        figure_title = style['title'] or label
+        # Nature templates use an English publication font.  Replace UI-only
+        # Chinese labels in the title so a redraw does not produce tofu boxes
+        # when a CJK font is unavailable in the export environment.
+        figure_title = re.sub(r'[\u4e00-\u9fff]+', 'enrichment', str(figure_title))
+        overview = plot_type == 'enrichment_overview'
+        database_scope = tuple(
+            value.strip() for value in str(style.get('enrichment_database_scope', '') or '')
+            .replace(';', ',').replace('\n', ',').split(',') if value.strip()
+        )
+        spec = director.spec_from_params(
+            plot_type,
+            {
+                'top_n': style['enrichment_overview_top_n'] if overview else style['enrichment_top_n'],
+                'database_scope': database_scope,
+                'pathway_selection': style['enrichment_pathway_selection'],
+                'target_pathways': style['enrichment_target_pathways'],
+                'gene_label_strategy': style.get('enrichment_gene_label_strategy', 'all'),
+                'target_genes': style.get('enrichment_target_genes', ''),
+                'max_gene_labels': style.get('enrichment_max_gene_labels', 30),
+            },
+            title=figure_title,
+            width='double' if overview else 'single',
+            formats=('svg', 'png'),
+        )
+        try:
+            return director.render(spec, result_df), 'data_redraw'
+        except (ValueError, TypeError, KeyError) as exc:
+            raise FigureStudioError(str(exc)) from exc
     score_column = next((column for column in ('nes', 'NES') if column in result_df.columns), None)
+    target_requested = bool(str(style.get('enrichment_target_pathways', '') or '').strip()) and style.get('enrichment_pathway_selection') in {'selected', 'selected_plus_top'}
+    plot_data = result_df if target_requested else result_df.head(style['enrichment_top_n'])
     fig = _enrichment_figure(
-        result_df.head(style['enrichment_top_n']), title=style['title'] or label,
+        plot_data, title=style['title'] or label,
         database=database, score_column=score_column,
+        params={
+            'top_n': style['enrichment_top_n'],
+            'pathway_selection': style['enrichment_pathway_selection'],
+            'target_pathways': style['enrichment_target_pathways'],
+        },
         ontology_colors={
             'BP': style['enrichment_bp_color'], 'MF': style['enrichment_mf_color'],
+            'CC': style['enrichment_cc_color'],
             'KEGG': style['enrichment_kegg_color'], 'OTHER': style['enrichment_other_color'],
         },
     )
@@ -645,8 +771,11 @@ def render_source(source, style, png_path=None, svg_path=None):
         )
     elif source['edit_mode'] == 'bulk_correlation':
         fig, mode = _render_bulk_correlation(source['data_path'], style, source['label'])
-    elif source['edit_mode'] == 'bulk_enrichment':
-        fig, mode = _render_bulk_enrichment(source['data_path'], style, source['label'])
+    elif source['edit_mode'] in {'bulk_enrichment', 'bulk_enrichment_overview'}:
+        fig, mode = _render_bulk_enrichment(
+            source['data_path'], style, source['label'],
+            plot_type=source.get('plot_type', 'enrichment_dotplot'),
+        )
     else:
         fig = None
         mode = 'style_only'
@@ -709,7 +838,8 @@ def save_figure_version(project_id, source, style, label=''):
         # Persist the concrete capability (rather than the generic render
         # outcome) so a saved volcano/heatmap version remains editable later.
         edit_mode=(source.get('edit_mode') if source.get('edit_mode') in {
-            'bulk_volcano', 'bulk_heatmap', 'bulk_correlation', 'bulk_enrichment'
+            'bulk_volcano', 'bulk_heatmap', 'bulk_correlation',
+            'bulk_enrichment', 'bulk_enrichment_overview'
         } else mode),
         label=_clean_text(label) or _clean_text(normalized.get('title')) or source['label'],
         style_json=json.dumps(normalized, ensure_ascii=False),

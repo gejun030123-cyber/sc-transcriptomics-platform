@@ -253,28 +253,80 @@ class BulkPCAAnalysis(BaseAnalysis):
                 ),
             )
 
-        fig_pca = _embedding_figure(
-            pc, f'PCA 分析 (n={adata.n_obs})',
-            f'PC1 ({pca_variance[0]*100:.1f}% variance)',
-            f'PC2 ({pca_variance[1]*100:.1f}% variance)',
+        # The primary PCA is rendered through the deterministic publication
+        # template.  Legacy helpers remain below for exploratory PC1/PC3,
+        # t-SNE and UMAP panels so this Phase 1 change stays narrowly scoped.
+        import matplotlib.pyplot as plt
+        from figure_engine import NatureFigureDirector, export_registered_figure
+
+        director = NatureFigureDirector()
+        nature_formats = ('svg', 'pdf', 'png')
+        results_dir = os.path.join(self.project_dir, 'results')
+        os.makedirs(results_dir, exist_ok=True)
+        unique_color_values = list(dict.fromkeys(str(value) for value in color_values))
+        dense_grouping = len(unique_color_values) > 8
+        dense_group_colors = ({group: '#4C78A8' for group in unique_color_values}
+                              if dense_grouping else None)
+
+        def _export_pca(fig, stem, label, spec, *, category='pca'):
+            spec = spec.with_updates(formats=nature_formats)
+            exported, report = export_registered_figure(
+                fig, os.path.join(plots_dir, stem), spec,
+                category=category, label=label,
+                qa_path=os.path.join(results_dir, f'{stem}_nature_readiness.json'),
+            )
+            if not report.ready:
+                self.progress(-1, f'{label} Nature readiness {report.score}/100；请查看 QA 报告。')
+            plt.close(fig)
+            return exported
+        pca_spec = director.spec_from_params(
+            'pca', self.params,
+            title=f'PCA analysis (n={adata.n_obs})',
+            show_legend=not dense_grouping,
         )
-        result_files.extend(self.save_matplotlib_figure(
-            fig_pca, plots_dir, 'bulk_pca.png', 'pca', 'PCA 分析',
-            formats=('png', 'svg'), dpi=300,
-        ))
+        batch_by = str(self.params.get('batch_by', '') or '').strip()
+        batch_values = (
+            adata.obs[batch_by].astype(str).tolist()
+            if batch_by and batch_by in adata.obs.columns else None
+        )
+        if dense_grouping and batch_values is None:
+            batch_values = color_values
+        fig_pca = director.render(pca_spec, {
+            'coordinates': pc[:, :2],
+            'groups': color_values,
+            'batches': batch_values,
+            'group_colors': dense_group_colors,
+            'samples': hover,
+            'explained_variance': pca_variance[:2],
+        })
+        results_dir = os.path.join(self.project_dir, 'results')
+        os.makedirs(results_dir, exist_ok=True)
+        exported, readiness = export_registered_figure(
+            fig_pca, os.path.join(plots_dir, 'bulk_pca'), pca_spec,
+            category='pca', label='PCA 分析',
+            qa_path=os.path.join(results_dir, 'bulk_pca_nature_readiness.json'),
+        )
+        result_files.extend(exported)
+        if not readiness.ready:
+            self.progress(-1, f'PCA Nature readiness {readiness.score}/100；请查看 QA 报告。')
+        plt.close(fig_pca)
 
         # PC3 often carries a biologically meaningful secondary separation when
         # PC1+PC2 explain a moderate fraction of the total transcriptome variance.
         if actual_comps >= 3:
             for first, second, stem in [(0, 2, 'bulk_pca_pc1_pc3'), (1, 2, 'bulk_pca_pc2_pc3')]:
-                fig_alt = _embedding_figure(
-                    pc[:, [first, second]], f'PCA 分析：PC{first + 1} vs PC{second + 1}',
-                    f'PC{first + 1} ({pca_variance[first] * 100:.1f}% variance)',
-                    f'PC{second + 1} ({pca_variance[second] * 100:.1f}% variance)',
-                )
-                result_files.extend(self.save_matplotlib_figure(
-                    fig_alt, plots_dir, stem, 'pca',
-                    f'PCA：PC{first + 1} vs PC{second + 1}', formats=('png', 'svg'), dpi=300,
+                alt_spec = director.spec_from_params(
+                    'pca', self.params, title=f'PCA: PC{first + 1} vs PC{second + 1}',
+                    show_legend=not dense_grouping,
+                ).with_updates(formats=nature_formats, height_mm=82.0)
+                fig_alt = director.render(alt_spec, {
+                    'coordinates': pc[:, [first, second]], 'groups': color_values,
+                    'batches': batch_values, 'group_colors': dense_group_colors,
+                    'samples': hover, 'explained_variance': pca_variance[[first, second]],
+                    'x_label': f'PC{first + 1}', 'y_label': f'PC{second + 1}',
+                })
+                result_files.extend(_export_pca(
+                    fig_alt, stem, f'PCA：PC{first + 1} vs PC{second + 1}', alt_spec,
                 ))
 
         self.progress(65, "生成方差解释图...")
@@ -283,10 +335,14 @@ class BulkPCAAnalysis(BaseAnalysis):
             title='PCA 方差解释比例', x_label='主成分',
             y_label='方差解释比例 (%)', rotation=45,
         )
-        result_files.extend(self.save_matplotlib_figure(
-            fig_var, plots_dir, 'bulk_pca_variance.png', 'pca',
-            '方差解释比例', formats=('png', 'svg'), dpi=300,
-        ))
+        variance_spec = director.spec_from_params(
+            'diagnostic', self.params, width='single', title='PCA variance explained',
+        ).with_updates(extra={'kind': 'variance'}, formats=nature_formats, height_mm=70.0)
+        fig_var_native = director.render(variance_spec, {
+            'kind': 'variance', 'variance': pca_variance,
+            'labels': [f'PC{i + 1}' for i in range(actual_comps)],
+        })
+        result_files.extend(_export_pca(fig_var_native, 'bulk_pca_variance', '方差解释比例', variance_spec))
 
         # PCA 载荷图
         if 'PCs' in adata.varm:
@@ -301,9 +357,15 @@ class BulkPCAAnalysis(BaseAnalysis):
                     colors=[NATURE_PALETTE[3] if v > 0 else NATURE_PALETTE[0] for v in values],
                     rotation=45,
                 )
-                result_files.extend(self.save_matplotlib_figure(
-                    fig_load, plots_dir, f'bulk_pca_loadings_{pc_name.lower()}.png',
-                    'pca', f'{pc_name} 载荷图', formats=('png', 'svg'), dpi=300,
+                load_spec = director.spec_from_params(
+                    'diagnostic', self.params, width='double', title=f'{pc_name} top loadings',
+                ).with_updates(extra={'kind': 'bar'}, formats=nature_formats, height_mm=78.0)
+                fig_load_native = director.render(load_spec, {
+                    'kind': 'bar', 'labels': [adata.var_names[i] for i in top_idx],
+                    'values': values, 'ylabel': 'Loading',
+                })
+                result_files.extend(_export_pca(
+                    fig_load_native, f'bulk_pca_loadings_{pc_name.lower()}', f'{pc_name} 载荷图', load_spec,
                 ))
 
         # 肘部图（方差累积曲线）
@@ -317,10 +379,14 @@ class BulkPCAAnalysis(BaseAnalysis):
         ax_elbow.axhline(80, color='#98A2B3', linestyle='--', linewidth=0.8)
         ax_elbow.text(0.98, 80, '80%', transform=ax_elbow.get_yaxis_transform(),
                       ha='right', va='bottom', fontsize=7, color='#667085')
-        result_files.extend(self.save_matplotlib_figure(
-            fig_elbow, plots_dir, 'bulk_pca_elbow.png', 'pca', '肘部图',
-            formats=('png', 'svg'), dpi=300,
-        ))
+        elbow_spec = director.spec_from_params(
+            'diagnostic', self.params, width='single', title='PCA cumulative variance',
+        ).with_updates(extra={'kind': 'variance'}, formats=nature_formats, height_mm=70.0)
+        fig_elbow_native = director.render(elbow_spec, {
+            'kind': 'variance', 'variance': pca_variance,
+            'labels': [f'PC{i + 1}' for i in range(actual_comps)],
+        })
+        result_files.extend(_export_pca(fig_elbow_native, 'bulk_pca_elbow', '肘部图', elbow_spec))
 
         # 降维方法选择：t-SNE / UMAP / PCA-only
         if dimred_method == 'tsne' and adata.n_obs >= 3:
@@ -330,13 +396,15 @@ class BulkPCAAnalysis(BaseAnalysis):
             tsne = TSNE(n_components=2, random_state=42, perplexity=max(2, perplexity))
             tsne_coords = tsne.fit_transform(adata.obsm['X_pca'])
 
-            fig_tsne = _embedding_figure(
-                tsne_coords, f't-SNE 分析 (n={adata.n_obs})', 't-SNE1', 't-SNE2',
-            )
-            result_files.extend(self.save_matplotlib_figure(
-                fig_tsne, plots_dir, 'bulk_tsne.png', 'tsne', 't-SNE 分析',
-                formats=('png', 'svg'), dpi=300,
-            ))
+            tsne_spec = director.spec_from_params(
+                'pca', self.params, title=f't-SNE (n={adata.n_obs})', show_legend=not dense_grouping,
+            ).with_updates(formats=nature_formats, height_mm=82.0)
+            fig_tsne = director.render(tsne_spec, {
+                'coordinates': tsne_coords, 'groups': color_values, 'batches': batch_values,
+                'group_colors': dense_group_colors, 'samples': hover,
+                'explained_variance': [np.nan, np.nan], 'x_label': 't-SNE1', 'y_label': 't-SNE2',
+            })
+            result_files.extend(_export_pca(fig_tsne, 'bulk_tsne', 't-SNE 分析', tsne_spec, category='tsne'))
 
         elif dimred_method == 'umap' and adata.n_obs >= 10:
             self.progress(75, "运行 UMAP...")
@@ -344,11 +412,15 @@ class BulkPCAAnalysis(BaseAnalysis):
             sc.tl.umap(adata)
             umap_coords = adata.obsm['X_umap']
 
-            fig_umap = _embedding_figure(umap_coords, 'UMAP 分析', 'UMAP1', 'UMAP2')
-            result_files.extend(self.save_matplotlib_figure(
-                fig_umap, plots_dir, 'bulk_umap.png', 'umap', 'UMAP 分析',
-                formats=('png', 'svg'), dpi=300,
-            ))
+            umap_spec = director.spec_from_params(
+                'pca', self.params, title='UMAP', show_legend=not dense_grouping,
+            ).with_updates(formats=nature_formats, height_mm=82.0)
+            fig_umap = director.render(umap_spec, {
+                'coordinates': umap_coords, 'groups': color_values, 'batches': batch_values,
+                'group_colors': dense_group_colors, 'samples': hover,
+                'explained_variance': [np.nan, np.nan], 'x_label': 'UMAP1', 'y_label': 'UMAP2',
+            })
+            result_files.extend(_export_pca(fig_umap, 'bulk_umap', 'UMAP 分析', umap_spec, category='umap'))
 
         self.progress(90, "保存结果...")
         intermediate_dir = os.path.join(self.project_dir, 'intermediate')

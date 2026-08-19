@@ -141,6 +141,12 @@
                     {% if f.svg_variant %}
                     <a href="/projects/{{ project.id }}/results/file/{{ f.svg_variant.id }}" download class="btn btn-outline-secondary btn-sm">下载 SVG</a>
                     {% endif %}
+                    {% if f.pdf_variant %}
+                    <a href="/projects/{{ project.id }}/results/file/{{ f.pdf_variant.id }}" download class="btn btn-outline-secondary btn-sm">下载 PDF</a>
+                    {% endif %}
+                    {% if f.tiff_variant %}
+                    <a href="/projects/{{ project.id }}/results/file/{{ f.tiff_variant.id }}" download class="btn btn-outline-secondary btn-sm">下载 TIFF</a>
+                    {% endif %}
                 </div>
             </div>
             <img src="/projects/{{ project.id }}/results/file/{{ f.id }}" class="img-fluid rounded" alt="{{ f.label }}">

@@ -12,6 +12,8 @@ statsmodels
 patsy
 scikit-learn
 matplotlib
+adjustText
+Pillow
 plotly
 anndata
 

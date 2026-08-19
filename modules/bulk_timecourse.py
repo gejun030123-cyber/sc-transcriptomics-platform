@@ -99,6 +99,9 @@ class BulkTimecourseAnalysis(BaseAnalysis):
         from statsmodels.stats.multitest import multipletests
         from modules.native_figures import heatmap_figure, line_figure
         from modules.figure_style import NATURE_PALETTE, NATURE_TEXT, NATURE_GRID
+        from figure_engine import NatureFigureDirector, export_registered_figure
+        director = NatureFigureDirector()
+        nature_formats = ('svg', 'pdf', 'png')
 
         self.progress(5, "加载数据...")
         from modules.io_utils import read_expression_matrix
@@ -216,6 +219,18 @@ class BulkTimecourseAnalysis(BaseAnalysis):
         plots_dir = os.path.join(self.project_dir, 'plots')
         os.makedirs(plots_dir, exist_ok=True)
 
+        def _export_engine(fig, stem, label, spec, *, category='timecourse'):
+            spec = spec.with_updates(formats=nature_formats)
+            exported, report = export_registered_figure(
+                fig, os.path.join(plots_dir, stem), spec,
+                category=category, label=label,
+                qa_path=os.path.join(results_dir, f'{stem}_nature_readiness.json'),
+            )
+            result_files.extend(exported)
+            if not report.ready:
+                self.progress(-1, f'{label} Nature readiness {report.score}/100；请查看 QA 报告。')
+            plt.close(fig)
+
         # Q-Q plot: observed vs theoretical F quantiles
         self.progress(60, "生成 Q-Q 图...")
         df1 = n_spline_cols
@@ -229,21 +244,14 @@ class BulkTimecourseAnalysis(BaseAnalysis):
             n_pts = len(sorted_obs)
             theoretical_q = np.array([(i + 0.5) / (n_pts + 1) for i in range(n_pts)])
             theoretical_f = f_dist.ppf(theoretical_q, df1, df2)
-            fig_qq, ax_qq = plt.subplots(figsize=(6.8, 5.0), dpi=150)
-            ax_qq.scatter(theoretical_f, sorted_obs, s=12, color=NATURE_PALETTE[0],
-                          alpha=0.68, linewidths=0, rasterized=True)
-            max_val = max(float(theoretical_f.max()), float(sorted_obs.max())) * 1.1
-            ax_qq.plot([0, max_val], [0, max_val], color=NATURE_PALETTE[3],
-                       linestyle='--', linewidth=1.0)
-            ax_qq.set_title('Q-Q Plot (F-statistic)', loc='left', fontsize=10,
-                            fontweight='semibold', color=NATURE_TEXT)
-            ax_qq.set_xlabel('Theoretical F quantiles', fontsize=9)
-            ax_qq.set_ylabel('Observed F statistics', fontsize=9)
-            ax_qq.grid(False)
-            result_files.extend(self.save_matplotlib_figure(
-                fig_qq, plots_dir, 'timecourse_qq.png', 'qq', 'Q-Q 图',
-                formats=('png', 'svg'), dpi=300,
-            ))
+            qq_spec = director.spec_from_params(
+                'diagnostic', self.params, width='single', title='Q-Q plot (F-statistic)',
+            ).with_updates(extra={'kind': 'qq'}, formats=nature_formats, height_mm=68.0)
+            fig_qq = director.render(qq_spec, {
+                'kind': 'qq', 'theoretical': theoretical_f, 'observed': sorted_obs,
+                'xlabel': 'Theoretical F quantiles', 'ylabel': 'Observed F statistics',
+            })
+            _export_engine(fig_qq, 'timecourse_qq', 'Q-Q 图', qq_spec, category='qq')
 
         # Fuzzy c-means trajectory clustering
         cluster_df = None
@@ -306,53 +314,52 @@ class BulkTimecourseAnalysis(BaseAnalysis):
                 cluster_df.to_csv(tc_csv, index=False)
                 result_files.append({'file_path': tc_csv, 'file_type': 'csv', 'category': 'table', 'label': '轨迹聚类结果'})
 
-                # Cluster centers line chart
-                colors = [NATURE_PALETTE[i % len(NATURE_PALETTE)] for i in range(n_clust)]
-                fig_centers, ax_centers = plt.subplots(figsize=(8.0, 5.0), dpi=150)
+                # Cluster centers line chart.  The renderer caps/relocates the
+                # legend so six or more clusters cannot squeeze the panel.
+                center_values = []
+                center_labels = []
                 for ci in range(n_clust):
                     mask_c = cluster_labels == ci
                     if mask_c.sum() == 0:
                         continue
-                    center = traj_z[mask_c, :].mean(axis=0)
-                    ax_centers.plot(time_unique, center, color=colors[ci], linewidth=1.8,
-                                    marker='o', markersize=3.5,
-                                    label=f'C{ci + 1} (n={mask_c.sum()})')
-                ax_centers.set_title('Cluster Centers (z-scored)', loc='left', fontsize=10,
-                                     fontweight='semibold', color=NATURE_TEXT)
-                ax_centers.set_xlabel(time_column, fontsize=9)
-                ax_centers.set_ylabel('Z-score', fontsize=9)
-                ax_centers.grid(axis='y', color=NATURE_GRID, linewidth=0.5, alpha=0.7)
-                ax_centers.legend(frameon=False, fontsize=8)
-                result_files.extend(self.save_matplotlib_figure(
-                    fig_centers, plots_dir, 'timecourse_cluster_centers.png',
-                    'cluster_centers', '聚类中心轨迹', formats=('png', 'svg'), dpi=300,
-                ))
+                    center_values.append(traj_z[mask_c, :].mean(axis=0))
+                    center_labels.append(f'C{ci + 1} (n={mask_c.sum()})')
+                center_spec = director.spec_from_params(
+                    'diagnostic', self.params, width='double', title='Cluster centers (z-scored)',
+                ).with_updates(extra={'kind': 'trajectory'}, formats=nature_formats, height_mm=78.0)
+                fig_centers = director.render(center_spec, {
+                    'kind': 'trajectory', 'time': time_unique, 'centers': center_values,
+                    'labels': center_labels, 'xlabel': time_column, 'ylabel': 'Z-score',
+                })
+                _export_engine(fig_centers, 'timecourse_cluster_centers', '聚类中心轨迹', center_spec,
+                               category='cluster_centers')
 
                 # Gene x Time heatmap ordered by cluster
                 order = np.argsort(cluster_labels)
                 heatmap_z = traj_z[order, :]
                 y_labels_cluster = [f"C{cluster_labels[i] + 1}_{sig_gene_names[i]}" for i in order]
-                # Cap displayed genes at 200 for readability
-                max_heat = 200
+                # A single-column readable heatmap cannot carry 200 row labels;
+                # retain the top 40 rows by cluster membership for the figure and
+                # keep the complete matrix in the CSV output.
+                max_heat = 40 if self.params.get('_figure_width', 'single') == 'single' else 60
                 if len(order) > max_heat:
-                    step = len(order) // max_heat
-                    sel = np.arange(0, len(order), step)[:max_heat]
+                    sel = np.linspace(0, len(order) - 1, max_heat, dtype=int)
                     heatmap_z = heatmap_z[sel, :]
                     y_labels_cluster = [y_labels_cluster[j] for j in sel]
 
                 finite_heat = heatmap_z[np.isfinite(heatmap_z)]
                 max_abs = float(np.nanmax(np.abs(finite_heat))) if finite_heat.size else 1.0
-                fig_heat = heatmap_figure(
-                    heatmap_z, x_labels=[str(t) for t in time_unique],
-                    y_labels=y_labels_cluster,
-                    title='Gene x Time Heatmap (ordered by cluster)',
-                    x_label=time_column, y_label='Gene', colorbar_label='Z-score',
-                    vmin=-max_abs, vmax=max_abs,
-                )
-                result_files.extend(self.save_matplotlib_figure(
-                    fig_heat, plots_dir, 'timecourse_heatmap.png', 'heatmap',
-                    '基因x时间热图', formats=('png', 'svg'), dpi=300,
-                ))
+                heat_spec = director.spec_from_params(
+                    'heatmap', self.params, width='double', title='Gene × time expression',
+                    zscore='none', row_cluster=False, col_cluster=False,
+                    max_row_labels=30, max_col_labels=18,
+                ).with_updates(formats=nature_formats, height_mm=120.0, color_limit=max_abs)
+                fig_heat = director.render(heat_spec, {
+                    'matrix': heatmap_z, 'gene_labels': y_labels_cluster,
+                    'sample_labels': [str(t) for t in time_unique],
+                    'colorbar_label': 'Gene-wise z-score', 'symmetric_color': True,
+                })
+                _export_engine(fig_heat, 'timecourse_heatmap', '基因x时间热图', heat_spec, category='heatmap')
 
         # Pairwise group comparison per timepoint
         pairwise_groups_str = self.params.get('pairwise_groups', '').strip()
@@ -438,18 +445,21 @@ class BulkTimecourseAnalysis(BaseAnalysis):
                     pw_pivot = pw_pivot.reindex(index=gene_subset, columns=time_list, fill_value=1.0)
 
                     neg_log_q = -np.log10(pw_pivot.values + 1e-300)
-                    fig_pw = heatmap_figure(
-                        neg_log_q, x_labels=[str(t) for t in time_list],
-                        y_labels=pw_pivot.index.tolist(),
+                    pw_heat_spec = director.spec_from_params(
+                        'heatmap', self.params, width='double',
                         title=f'Pairwise -log10(q): {pw_a} vs {pw_b}',
-                        x_label=time_column, y_label='Gene', colorbar_label='-log10(q)',
-                        vmin=0, vmax=max(1.0, float(np.nanmax(neg_log_q)) if neg_log_q.size else 1.0),
-                    )
-                    result_files.extend(self.save_matplotlib_figure(
-                        fig_pw, plots_dir, f'timecourse_pairwise_{safe_name}_heatmap.png',
-                        'heatmap', f'配对比较热图 ({pw_a} vs {pw_b})',
-                        formats=('png', 'svg'), dpi=300,
-                    ))
+                        zscore='none', row_cluster=True, col_cluster=False,
+                        max_row_labels=30, max_col_labels=18,
+                    ).with_updates(formats=nature_formats, height_mm=120.0,
+                                   color_limit=max(1.0, float(np.nanmax(neg_log_q)) if neg_log_q.size else 1.0))
+                    fig_pw = director.render(pw_heat_spec, {
+                        'matrix': neg_log_q, 'gene_labels': pw_pivot.index.tolist(),
+                        'sample_labels': [str(t) for t in time_list],
+                        'colorbar_label': '-log10(q)', 'symmetric_color': False,
+                        'vmin': 0, 'vmax': max(1.0, float(np.nanmax(neg_log_q)) if neg_log_q.size else 1.0),
+                    })
+                    _export_engine(fig_pw, f'timecourse_pairwise_{safe_name}_heatmap',
+                                   f'配对比较热图 ({pw_a} vs {pw_b})', pw_heat_spec, category='heatmap')
 
                     # Heatmap: log2FC
                     pw_pivot_fc = pw_df[pw_df['gene'].isin(gene_subset)].pivot_table(
@@ -457,18 +467,21 @@ class BulkTimecourseAnalysis(BaseAnalysis):
                     pw_pivot_fc = pw_pivot_fc.reindex(index=gene_subset, columns=time_list, fill_value=0.0)
 
                     max_fc = float(np.nanmax(np.abs(pw_pivot_fc.values))) if pw_pivot_fc.size else 1.0
-                    fig_pw_fc = heatmap_figure(
-                        pw_pivot_fc.values, x_labels=[str(t) for t in time_list],
-                        y_labels=pw_pivot_fc.index.tolist(),
+                    max_fc = max(1.0, max_fc)
+                    pw_fc_spec = director.spec_from_params(
+                        'heatmap', self.params, width='double',
                         title=f'Pairwise log2FC: {pw_a} vs {pw_b}',
-                        x_label=time_column, y_label='Gene', colorbar_label='log2FC',
-                        vmin=-max(1.0, max_fc), vmax=max(1.0, max_fc),
-                    )
-                    result_files.extend(self.save_matplotlib_figure(
-                        fig_pw_fc, plots_dir, f'timecourse_pairwise_{safe_name}_log2fc.png',
-                        'heatmap', f'配对比较 log2FC ({pw_a} vs {pw_b})',
-                        formats=('png', 'svg'), dpi=300,
-                    ))
+                        zscore='none', row_cluster=True, col_cluster=False,
+                        max_row_labels=30, max_col_labels=18,
+                    ).with_updates(formats=nature_formats, height_mm=120.0, color_limit=max_fc)
+                    fig_pw_fc = director.render(pw_fc_spec, {
+                        'matrix': pw_pivot_fc.values, 'gene_labels': pw_pivot_fc.index.tolist(),
+                        'sample_labels': [str(t) for t in time_list],
+                        'colorbar_label': 'log2FC', 'symmetric_color': True,
+                        'vmin': -max_fc, 'vmax': max_fc,
+                    })
+                    _export_engine(fig_pw_fc, f'timecourse_pairwise_{safe_name}_log2fc',
+                                   f'配对比较 log2FC ({pw_a} vs {pw_b})', pw_fc_spec, category='heatmap')
 
                     n_pairwise_sig = int((pw_df['qvalue'] < fdr_threshold).sum())
                     del pw_df, pairwise_rows

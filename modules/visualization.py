@@ -4,6 +4,9 @@ import numpy as np
 from modules.figure_style import (
     NATURE_PALETTE,
     NATURE_PLOTLY_CONTINUOUS_SCALE,
+    normalize_visualization_params,
+    stable_category_colors,
+    style_plotly_figure,
 )
 
 
@@ -13,22 +16,22 @@ def categorical_color_map(adata, color_key):
     if not hasattr(series, 'cat'):
         series = series.astype('category')
     categories = [str(category) for category in series.cat.categories]
-    colors = [NATURE_PALETTE[index % len(NATURE_PALETTE)]
-              for index in range(len(categories))]
+    existing = adata.uns.get(f'{color_key}_colors', [])
+    color_map = stable_category_colors(categories, existing=existing)
     # Keep AnnData's category-aligned color metadata synchronized so native
     # Scanpy/OmicVerse plots and Plotly figures use the same assignment.
     try:
-        adata.uns[f'{color_key}_colors'] = list(colors)
+        adata.uns[f'{color_key}_colors'] = [color_map[category] for category in categories]
     except Exception:
         pass
-    return dict(zip(categories, colors))
+    return color_map
 
 def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title='',
                  viz_params=None):
     import plotly.graph_objects as go
     import pandas as pd
 
-    vp = viz_params or {}
+    vp = normalize_visualization_params(viz_params)
     point_size = vp.get('umap_point_size', 5)
     opacity = vp.get('umap_opacity', 0.7)
     legend_fontsize = vp.get('umap_legend_fontsize', 10)
@@ -72,7 +75,7 @@ def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title='
         fig.add_trace(go.Scattergl(
             x=coords[:, 0], y=coords[:, 1],
             mode='markers',
-            marker=dict(size=point_size, opacity=opacity, color='#1a237e'),
+            marker=dict(size=point_size, opacity=opacity, color=NATURE_PALETTE[0]),
         ))
     fig.update_layout(
         title=title, xaxis_title='UMAP-1', yaxis_title='UMAP-2',
@@ -80,9 +83,13 @@ def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title='
         margin=dict(l=40, r=40, t=40, b=40),
         legend=dict(font=dict(size=legend_fontsize))
     )
+    if vp.get('umap_hide_axes', True):
+        fig.update_xaxes(showticklabels=False, title_text='')
+        fig.update_yaxes(showticklabels=False, title_text='')
+    style_plotly_figure(fig, vp)
     return json.loads(fig.to_json())
 
-def violin_plot(adata, keys, groupby=None, title=''):
+def violin_plot(adata, keys, groupby=None, title='', viz_params=None):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
     from modules.io_utils import obs_grouping_info
@@ -102,11 +109,18 @@ def violin_plot(adata, keys, groupby=None, title=''):
             grp = adata.obs[groupby]
             if not hasattr(grp.dtype, 'categories'):
                 grp = grp.astype('category')
+            color_map = stable_category_colors(
+                [str(category) for category in grp.cat.categories],
+                existing=adata.uns.get(f'{groupby}_colors', []),
+            )
             for cat in grp.cat.categories:
                 mask = adata.obs[groupby] == cat
                 fig.add_trace(go.Violin(
                     y=adata.obs.loc[mask, key], name=str(cat),
-                    box_visible=True, meanline_visible=True
+                    box_visible=True, meanline_visible=True,
+                    line=dict(color=color_map.get(str(cat), NATURE_PALETTE[0])),
+                    fillcolor=color_map.get(str(cat), NATURE_PALETTE[0]),
+                    opacity=0.82,
                 ), row=1, col=i)
         else:
             fig.add_trace(go.Violin(
@@ -114,9 +128,11 @@ def violin_plot(adata, keys, groupby=None, title=''):
                 box_visible=True, meanline_visible=True
             ), row=1, col=i)
     fig.update_layout(title=title, showlegend=bool(groupby), height=400, width=250*n)
+    style_plotly_figure(fig, normalize_visualization_params(viz_params))
     return json.loads(fig.to_json())
 
-def scatter_plot(x, y, color=None, xlabel='', ylabel='', title='', hover_text=None):
+def scatter_plot(x, y, color=None, xlabel='', ylabel='', title='', hover_text=None,
+                 viz_params=None):
     import plotly.graph_objects as go
     fig = go.Figure()
     marker = dict(size=3, opacity=0.6)
@@ -126,13 +142,16 @@ def scatter_plot(x, y, color=None, xlabel='', ylabel='', title='', hover_text=No
     fig.add_trace(go.Scattergl(x=x, y=y, mode='markers', marker=marker, text=hover_text))
     fig.update_layout(title=title, xaxis_title=xlabel, yaxis_title=ylabel,
                      plot_bgcolor='white', width=700, height=500)
+    style_plotly_figure(fig, normalize_visualization_params(viz_params))
     return json.loads(fig.to_json())
 
-def bar_plot(x, y, xlabel='', ylabel='', title=''):
+def bar_plot(x, y, xlabel='', ylabel='', title='', viz_params=None):
     import plotly.graph_objects as go
-    fig = go.Figure(go.Bar(x=x, y=y, marker_color='#1a237e'))
+    fig = go.Figure(go.Bar(x=x, y=y, marker_color=NATURE_PALETTE[0],
+                           marker_line_width=0))
     fig.update_layout(title=title, xaxis_title=xlabel, yaxis_title=ylabel,
                      plot_bgcolor='white', width=600, height=400)
+    style_plotly_figure(fig, normalize_visualization_params(viz_params))
     return json.loads(fig.to_json())
 
 def compute_gene_variability(data, metric='var'):
@@ -248,12 +267,12 @@ def build_annotation_bar(obs, columns, sample_order=None, palette=None):
 
 
 def save_plotly_json(fig, plots_dir, filename, result_files,
-                     file_type='plotly_json', category='heatmap', label=''):
+                     file_type='plotly_json', category='heatmap', label='',
+                     viz_params=None):
     """保存 Plotly 图表为 JSON 并追加到 result_files 列表。"""
     import os
-    from modules.figure_style import style_plotly_figure
     fpath = os.path.join(plots_dir, filename)
-    style_plotly_figure(fig)
+    style_plotly_figure(fig, normalize_visualization_params(viz_params))
     with open(fpath, 'w') as f:
         f.write(fig.to_json(engine="json"))
     result_files.append({

@@ -183,7 +183,13 @@ class ClusteringAnalysis(BaseAnalysis):
             'n_data_driven': 0, 'n_classic_anchor': 0, 'n_relaxed': 0,
             'parameters': {},
         }
+        compute_marker_preview = bool(self.params.get('compute_marker_preview', True))
         try:
+            if not compute_marker_preview:
+                marker_selection['warnings'].append(
+                    'Marker preview disabled for proportions/expression-only batch run.'
+                )
+                raise StopIteration
             from modules.annotation import (
                 DEFAULT_UNIVERSAL_MARKERS,
                 select_cluster_marker_genes,
@@ -218,6 +224,8 @@ class ClusteringAnalysis(BaseAnalysis):
                     ))
                     import matplotlib.pyplot as plt
                     plt.close('all')
+        except StopIteration:
+            pass
         except Exception as e:
             logger.warning("生成 marker dotplot 失败（注释模块可能不可用）: %s", e)
 

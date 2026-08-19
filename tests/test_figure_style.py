@@ -29,6 +29,43 @@ def test_plotly_save_applies_nature_style(tmp_path):
     assert payload['layout']['yaxis']['showgrid'] is True
 
 
+def test_visualization_params_normalize_publication_controls():
+    from modules.figure_style import normalize_visualization_params
+
+    params = normalize_visualization_params({
+        'theme': 'dark', 'font_size': 100, 'figure_width': 10,
+        'umap_opacity': 2, 'umap_label_categories': 'true',
+        'umap_hide_axes': 'false',
+    })
+
+    assert params['bg_color'] == '#1A1A2E'
+    assert params['font_size'] == 28
+    assert params['figure_width'] == 320
+    assert params['umap_opacity'] == 1.0
+    assert params['umap_label_categories'] is True
+    assert params['umap_hide_axes'] is False
+
+
+def test_native_umap_labels_replace_redundant_legend():
+    import anndata
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    from modules.native_figures import umap_figure
+
+    adata = anndata.AnnData(
+        X=np.ones((4, 2)),
+        obs=pd.DataFrame({'cell_type': ['T', 'B', 'T', 'B']}),
+    )
+    adata.obsm['X_umap'] = np.array([[0, 0], [1, 0], [0, 1], [1, 1]], dtype=float)
+    fig = umap_figure(adata, 'cell_type', label_categories=True)
+
+    assert fig.axes[0].get_legend() is None
+    assert {text.get_text() for text in fig.axes[0].texts} == {'T', 'B'}
+    plt.close(fig)
+
+
 def test_static_renderer_separates_violin_and_groups_bars(tmp_path):
     from modules.reporting.static_rendering import render_plotly_payload
 

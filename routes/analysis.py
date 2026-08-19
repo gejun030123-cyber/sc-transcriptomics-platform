@@ -52,10 +52,24 @@ def _bulk_deg_enrichment_sources(project_id):
         valid, _ = Config._validate_path(result_file.file_path, project_id)
         if not valid or not os.path.isfile(result_file.file_path):
             continue
+        try:
+            task_params = json.loads(task.params_json or '{}')
+        except (TypeError, json.JSONDecodeError):
+            task_params = {}
+        try:
+            task_summary = json.loads(task.result_json or '{}')
+        except (TypeError, json.JSONDecodeError):
+            task_summary = {}
+        source_groupby = str(
+            task_summary.get('groupby') or task_params.get('groupby') or ''
+        ).strip()
+        if source_groupby.lower() in {'无', 'none', 'null'}:
+            source_groupby = ''
         options.append({
             'path': result_file.file_path,
             'label': _comparison_label_for_deg_result(result_file, task),
             'comparison': _comparison_label_for_deg_result(result_file, task),
+            'groupby': source_groupby,
             'task_id': task.id,
         })
     return sorted(options, key=lambda item: (item['label'], item['path']))
@@ -259,12 +273,21 @@ def analyze(pid, module_name):
     if request.method == 'POST':
         params = parse_form_params(schema, request.form)
         if module_name == 'bulk_enrichment':
+            method = str(params.get('method', 'ORA') or 'ORA').upper()
+            database = str(params.get('database', 'GO_BP') or 'GO_BP')
             custom_genes = str(params.get('custom_genes', '')).strip()
+            custom_geneset = str(params.get('custom_geneset_text', '')).strip()
             selected_deg = str(params.get('input_source', '')).strip()
+            if database == 'Custom_GMT' and not custom_geneset:
+                flash('选择 Custom_GMT 时必须粘贴 Human GMT 内容。', 'danger')
+                return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
+            if method == 'GSEA' and custom_genes:
+                flash('GSEA 需要完整排序 DEG 表，不能使用无排序的自定义基因列表。', 'danger')
+                return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
             if not custom_genes and not selected_deg:
                 flash('请选择一个 DEG 比较结果后再进行通路富集；多比较结果不能合并为一次富集。', 'danger')
                 return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
-            if not custom_genes:
+            if selected_deg:
                 selected_source = next(
                     (item for item in _bulk_deg_enrichment_sources(pid)
                      if os.path.abspath(item['path']) == os.path.abspath(selected_deg)),
@@ -273,9 +296,17 @@ def analyze(pid, module_name):
                 if selected_source is None:
                     flash('请选择页面列出的单个 DEG 比较结果。', 'danger')
                     return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
-                params['input_comparison'] = selected_source['comparison']
-        if module_name == 'bulk_heatmap' and params.get('gene_import_source') == 'deg':
+                if custom_genes:
+                    params['input_comparison'] = 'Custom genes'
+                    params['background_comparison'] = selected_source['comparison']
+                else:
+                    params['input_comparison'] = selected_source['comparison']
+        if module_name == 'bulk_heatmap' and params.get('gene_import_source') in {'top_var', 'deg'}:
+            gene_source = params.get('gene_import_source')
             selected_deg = str(params.get('deg_comparison', '')).strip()
+            if gene_source == 'deg' and not selected_deg:
+                flash('使用 DEG 基因来源时，请明确选择一个 DEG 比较结果。', 'danger')
+                return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
             if selected_deg:
                 selected_source = next(
                     (item for item in _bulk_deg_enrichment_sources(pid)
@@ -286,6 +317,8 @@ def analyze(pid, module_name):
                     flash('请选择页面列出的单个 DEG 比较结果。', 'danger')
                     return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
                 params['deg_comparison_label'] = selected_source['comparison']
+                if not str(params.get('groupby', '') or '').strip() and selected_source.get('groupby'):
+                    params['groupby'] = selected_source['groupby']
         # 处理自动检测的分组映射
         auto_mapping = request.form.get('_auto_group_mapping')
         if auto_mapping:

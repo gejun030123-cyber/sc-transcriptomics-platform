@@ -15,27 +15,11 @@
                 <h5>拖拽文件到此处</h5>
                 <p class="text-muted">支持格式：.h5ad, .h5/.hdf5, .loom, .mtx/.tsv (10x Genomics), .csv, .txt, .xlsx, .xls</p>
                 <input type="file" id="file-input" class="d-none" accept=".h5ad,.h5,.hdf5,.loom,.csv,.txt,.gz,.xlsx,.xls,.mtx,.tsv" multiple>
-                <button class="btn btn-primary btn-sm" onclick="document.getElementById('file-input').click()">
+                <button type="button" class="btn btn-primary btn-sm" id="btn-choose-files" onclick="document.getElementById('file-input').click()">
                     选择文件
                 </button>
             </div>
-            <div class="card border-primary-subtle p-3 mt-3">
-                <h6 class="mb-1">两批次 10x ZIP 合并导入</h6>
-                <p class="small text-muted mb-2">
-                    分别选择两个 ZIP；每个 ZIP 内需包含一套 filtered_feature_bc_matrix（matrix.mtx、barcodes.tsv、features/genes.tsv）。
-                    导入后会自动写入 <code>obs["batch"]</code>。
-                </p>
-                <input type="file" id="batch-zip-input" class="form-control form-control-sm mb-2" accept=".zip" multiple>
-                <div class="row g-2 mb-2">
-                    <div class="col-md-6"><input type="text" id="batch-name-1" class="form-control form-control-sm" placeholder="批次 1 名称，如 Control"></div>
-                    <div class="col-md-6"><input type="text" id="batch-name-2" class="form-control form-control-sm" placeholder="批次 2 名称，如 Treatment"></div>
-                </div>
-                <button class="btn btn-outline-primary btn-sm w-100" id="btn-import-batches" onclick="startBatchImport10x()">
-                    合并两个批次并导入 h5ad
-                </button>
-                <div id="batch-import-msg" class="small mt-2 text-muted"></div>
-            </div>
-            <div id="upload-progress" class="mt-3 d-none">
+            <div id="upload-progress" class="mt-3 d-none" aria-live="polite">
                 <div class="d-flex justify-content-between mb-1">
                     <span id="upload-filename"></span>
                     <span id="upload-percent">0%</span>
@@ -44,8 +28,50 @@
                     <div class="progress-bar-inner" id="upload-bar" style="width:0%"></div>
                 </div>
             </div>
-            <div id="upload-result" class="mt-3 d-none">
-                <div class="alert alert-success" id="upload-msg"></div>
+            <div id="upload-result" class="mt-3 d-none" aria-live="assertive">
+                <div class="alert alert-success mb-0" id="upload-msg"></div>
+            </div>
+            <div class="card border-primary-subtle p-3 mt-3">
+                <h6 class="mb-1">多个 10x ZIP 合并导入</h6>
+                <p class="small text-muted mb-2">
+                    至少选择两个 ZIP；每个 ZIP 内需包含一套 filtered_feature_bc_matrix（matrix.mtx、barcodes.tsv、features/genes.tsv）。
+                    导入后会自动写入 <code>obs["batch"]</code>。大型服务器目录数据建议使用下方 manifest 导入。
+                </p>
+                <input type="file" id="batch-zip-input" class="form-control form-control-sm mb-2" accept=".zip" multiple>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-6"><input type="text" id="batch-name-1" class="form-control form-control-sm" placeholder="批次 1 名称，如 Control"></div>
+                    <div class="col-md-6"><input type="text" id="batch-name-2" class="form-control form-control-sm" placeholder="批次 2 名称，如 Treatment"></div>
+                </div>
+                <button type="button" class="btn btn-outline-primary btn-sm w-100" id="btn-import-batches" onclick="startBatchImport10x()">
+                    合并所选批次并导入 h5ad
+                </button>
+                <div id="batch-import-msg" class="small mt-2 text-muted"></div>
+            </div>
+            <div class="card border-success-subtle p-3 mt-3">
+                <h6 class="mb-1">服务器目录批量 10x 导入（推荐用于大量样本）</h6>
+                <p class="small text-muted mb-2">
+                    先递归扫描服务器目录并下载样本 manifest，再填写每个样本的 <code>condition</code> 与 <code>replicate</code> 后导入。
+                    服务器必须由管理员在 <code>.env</code> 配置 <code>SC_BATCH_SOURCE_ROOTS</code>；平台不会从目录名猜测生物学分组。
+                </p>
+                <div class="mb-2">
+                    <label class="form-label small">服务器数据根目录</label>
+                    <input type="text" id="sc-batch-root" class="form-control form-control-sm" placeholder="例如 /home/oelab/data/GJ/H9VBO">
+                </div>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-6">
+                        <label class="form-label small">数据集名称</label>
+                        <input type="text" id="sc-batch-name" class="form-control form-control-sm" value="sc_batch" placeholder="如 H9VBO">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">已填写的样本 manifest</label>
+                        <input type="file" id="sc-batch-manifest" class="form-control form-control-sm" accept=".csv,.tsv,.txt,.xlsx,.xls">
+                    </div>
+                </div>
+                <div class="d-flex gap-2">
+                    <button type="button" class="btn btn-outline-success btn-sm flex-fill" id="btn-discover-sc-batch" onclick="discoverScBatch10x()">1. 扫描并下载 manifest 模板</button>
+                    <button type="button" class="btn btn-success btn-sm flex-fill" id="btn-import-sc-batch" onclick="startManifestBatchImport()">2. 上传 manifest 并合并导入</button>
+                </div>
+                <div id="sc-batch-msg" class="small mt-2 text-muted"></div>
             </div>
             <div id="tenx-status" class="mt-3 d-none">
                 <div class="alert alert-info">
@@ -151,6 +177,15 @@ const zone = document.getElementById('upload-zone');
 const fileInput = document.getElementById('file-input');
 const progressDiv = document.getElementById('upload-progress');
 const resultDiv = document.getElementById('upload-result');
+const chooseFilesButton = document.getElementById('btn-choose-files');
+
+function showUploadResult(level, message) {
+    resultDiv.classList.remove('d-none');
+    const alert = document.getElementById('upload-msg');
+    alert.className = `alert alert-${level} mb-0`;
+    alert.textContent = message;
+    requestAnimationFrame(() => resultDiv.scrollIntoView({behavior: 'smooth', block: 'nearest'}));
+}
 
 zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
 zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
@@ -161,7 +196,36 @@ zone.addEventListener('drop', e => {
     if (files.length) uploadFiles(Array.from(files));
 });
 fileInput.addEventListener('change', () => {
-    if (fileInput.files.length) uploadFiles(Array.from(fileInput.files));
+    const files = Array.from(fileInput.files || []);
+    if (!files.length) return;
+    resultDiv.classList.add('d-none');
+    document.getElementById('upload-bar').style.width = '0%';
+    document.getElementById('upload-percent').textContent = '0%';
+    uploadFiles(files);
+});
+
+document.getElementById('batch-zip-input').addEventListener('change', event => {
+    const files = Array.from(event.target.files || []);
+    const msg = document.getElementById('batch-import-msg');
+    if (!files.length) {
+        msg.textContent = '';
+        return;
+    }
+    msg.className = `small mt-2 ${files.length >= 2 ? 'text-success' : 'text-warning'}`;
+    msg.textContent = files.length >= 2
+        ? `已选择 ${files.length} 个 ZIP：${files.map(file => file.name).join('、')}。请确认批次名称后点击导入。`
+        : `已选择 ${files[0].name}；批次合并至少需要两个 ZIP。`;
+});
+
+document.getElementById('sc-batch-manifest').addEventListener('change', event => {
+    const file = event.target.files && event.target.files[0];
+    const msg = document.getElementById('sc-batch-msg');
+    if (!file) {
+        msg.textContent = '';
+        return;
+    }
+    msg.className = 'small mt-2 text-success';
+    msg.textContent = `已选择 manifest：${file.name}。填写服务器目录后点击“上传 manifest 并合并导入”。`;
 });
 
 let uploadQueue = [];
@@ -170,14 +234,18 @@ let uploadIndex = 0;
 function uploadFiles(files) {
     uploadQueue = files;
     uploadIndex = 0;
+    chooseFilesButton.disabled = true;
+    chooseFilesButton.textContent = '上传中…';
     uploadNext();
 }
 
 function uploadNext() {
     if (uploadIndex >= uploadQueue.length) {
         progressDiv.classList.add('d-none');
-        resultDiv.classList.remove('d-none');
-        document.getElementById('upload-msg').textContent = '所有文件上传完成！';
+        showUploadResult('success', '所有文件上传完成！');
+        fileInput.value = '';
+        chooseFilesButton.disabled = false;
+        chooseFilesButton.textContent = '选择文件';
         check10x();
         checkScImport();
         return;
@@ -198,6 +266,7 @@ function uploadFile(file, onDone) {
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/projects/{{ project.id }}/upload');
+    xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
     xhr.upload.onprogress = e => {
         if (e.lengthComputable) {
             const pct = Math.round(e.loaded / e.total * 100);
@@ -206,20 +275,31 @@ function uploadFile(file, onDone) {
         }
     };
     xhr.onload = () => {
-        if (xhr.status === 200 || xhr.status === 302) {
+        let response = {};
+        try {
+            response = JSON.parse(xhr.responseText || '{}');
+        } catch (error) {
+            response = {};
+        }
+        if (xhr.status >= 200 && xhr.status < 300 && !response.error) {
             onDone();
         } else {
             progressDiv.classList.add('d-none');
-            resultDiv.classList.remove('d-none');
-            document.getElementById('upload-msg').className = 'alert alert-danger';
-            document.getElementById('upload-msg').textContent = '上传失败：' + file.name;
+            showUploadResult(
+                'danger',
+                `上传失败：${file.name}；${response.error || `服务器返回 HTTP ${xhr.status}`}`,
+            );
+            fileInput.value = '';
+            chooseFilesButton.disabled = false;
+            chooseFilesButton.textContent = '重新选择';
         }
     };
     xhr.onerror = () => {
         progressDiv.classList.add('d-none');
-        resultDiv.classList.remove('d-none');
-        document.getElementById('upload-msg').className = 'alert alert-danger';
-        document.getElementById('upload-msg').textContent = '网络错误：' + file.name;
+        showUploadResult('danger', '网络错误：' + file.name);
+        fileInput.value = '';
+        chooseFilesButton.disabled = false;
+        chooseFilesButton.textContent = '重新选择';
     };
     xhr.send(formData);
 }
@@ -319,9 +399,9 @@ function startBatchImport10x() {
     const files = Array.from(input.files || []);
     const msg = document.getElementById('batch-import-msg');
     const btn = document.getElementById('btn-import-batches');
-    if (files.length !== 2) {
+    if (files.length < 2) {
         msg.className = 'small mt-2 text-danger';
-        msg.textContent = '请同时选择两个 ZIP 文件。';
+        msg.textContent = '请至少选择两个 ZIP 文件。';
         return;
     }
     const formData = new FormData();
@@ -336,7 +416,7 @@ function startBatchImport10x() {
     btn.disabled = true;
     btn.textContent = '提交中...';
     msg.className = 'small mt-2 text-muted';
-    msg.textContent = '正在上传两个 ZIP...';
+    msg.textContent = `正在上传 ${files.length} 个 ZIP...`;
     fetch('/projects/{{ project.id }}/upload/import-10x-batches', {
         method: 'POST',
         body: formData,
@@ -347,10 +427,75 @@ function startBatchImport10x() {
         pollScImportTask(data.task_id);
     }).catch(error => {
         btn.disabled = false;
-        btn.textContent = '合并两个批次并导入 h5ad';
+        btn.textContent = '合并所选批次并导入 h5ad';
         msg.className = 'small mt-2 text-danger';
         msg.textContent = '导入失败：' + error.message;
     });
+}
+
+function discoverScBatch10x() {
+    const root = document.getElementById('sc-batch-root').value.trim();
+    const btn = document.getElementById('btn-discover-sc-batch');
+    const msg = document.getElementById('sc-batch-msg');
+    if (!root) {
+        msg.className = 'small mt-2 text-danger';
+        msg.textContent = '请填写服务器数据根目录。';
+        return;
+    }
+    const formData = new FormData();
+    formData.append('source_root', root);
+    btn.disabled = true;
+    btn.textContent = '扫描中...';
+    fetch('/projects/{{ project.id }}/upload/discover-10x-directory', {method: 'POST', body: formData})
+        .then(r => r.json()).then(data => {
+            if (data.error) throw new Error(data.error);
+            msg.className = 'small mt-2 text-success';
+            const samples = (data.sample_ids || []).join('、');
+            msg.innerHTML = `发现 ${data.n_samples} 个 10x 样本（${samples}）。<a href="${data.download_url}" download>下载 manifest 模板</a>，填写 condition 和 replicate 后上传到右侧文件框。`;
+        }).catch(error => {
+            msg.className = 'small mt-2 text-danger';
+            msg.textContent = '扫描失败：' + error.message;
+        }).finally(() => {
+            btn.disabled = false;
+            btn.textContent = '1. 扫描并下载 manifest 模板';
+        });
+}
+
+function startManifestBatchImport() {
+    const root = document.getElementById('sc-batch-root').value.trim();
+    const manifestInput = document.getElementById('sc-batch-manifest');
+    const manifest = manifestInput.files && manifestInput.files[0];
+    const btn = document.getElementById('btn-import-sc-batch');
+    const msg = document.getElementById('sc-batch-msg');
+    if (!root || !manifest) {
+        msg.className = 'small mt-2 text-danger';
+        msg.textContent = '请填写服务器目录并选择已填写的 manifest 文件。';
+        return;
+    }
+    const formData = new FormData();
+    formData.append('source_root', root);
+    formData.append('dataset_name', document.getElementById('sc-batch-name').value.trim() || 'sc_batch');
+    formData.append('manifest_file', manifest);
+    const species = document.getElementById('tenx-species').value;
+    const genome = document.getElementById('tenx-genome').value;
+    if (species) formData.append('species', species);
+    if (genome) formData.append('genome', genome);
+    btn.disabled = true;
+    btn.textContent = '正在验证并提交...';
+    fetch('/projects/{{ project.id }}/upload/import-10x-manifest', {method: 'POST', body: formData})
+        .then(r => r.json()).then(data => {
+            if (data.error) throw new Error(data.error);
+            msg.className = 'small mt-2 text-success';
+            msg.textContent = `已提交 ${data.n_samples} 个样本，条件：${(data.conditions || []).join('、')}。正在读取并合并...`;
+            document.getElementById('sc-import-progress').classList.remove('d-none');
+            pollScImportTask(data.task_id);
+        }).catch(error => {
+            msg.className = 'small mt-2 text-danger';
+            msg.textContent = '提交失败：' + error.message;
+        }).finally(() => {
+            btn.disabled = false;
+            btn.textContent = '2. 上传 manifest 并合并导入';
+        });
 }
 
 function pollScImportTask(taskId) {
@@ -380,7 +525,7 @@ function pollScImportTask(taskId) {
                     const batchBtn = document.getElementById('btn-import-batches');
                     if (batchBtn) {
                         batchBtn.disabled = false;
-                        batchBtn.textContent = '合并两个批次并导入 h5ad';
+                        batchBtn.textContent = '合并所选批次并导入 h5ad';
                     }
                     checkScImport();
                 } else if (data.status === 'failed') {
@@ -395,7 +540,7 @@ function pollScImportTask(taskId) {
                     const batchBtn = document.getElementById('btn-import-batches');
                     if (batchBtn) {
                         batchBtn.disabled = false;
-                        batchBtn.textContent = '合并两个批次并导入 h5ad';
+                        batchBtn.textContent = '合并所选批次并导入 h5ad';
                     }
                 }
             });

@@ -67,7 +67,7 @@ def task_detail(pid, task_id):
             f._file_size = 0
     # Plotly JSON is a legacy implementation detail and is never exposed.
     plotly_files = []
-    image_files = [f for f in files if f.file_type in ('png', 'svg', 'jpg', 'jpeg')]
+    image_files = [f for f in files if f.file_type in ('png', 'svg', 'pdf', 'tiff', 'jpg', 'jpeg')]
     # A Matplotlib figure is emitted as both 300 dpi PNG and SVG.  Show PNG once
     # in the browser (predictable cross-browser rendering), while preserving the
     # SVG companion as a publication-ready download.
@@ -84,6 +84,20 @@ def task_detail(pid, task_id):
              if candidate.category == image.category
              and candidate.label == image.label
              and candidate.file_type == 'svg'),
+            None,
+        )
+        image.pdf_variant = next(
+            (candidate for candidate in files
+             if candidate.category == image.category
+             and candidate.label == image.label
+             and candidate.file_type == 'pdf'),
+            None,
+        )
+        image.tiff_variant = next(
+            (candidate for candidate in files
+             if candidate.category == image.category
+             and candidate.label == image.label
+             and candidate.file_type == 'tiff'),
             None,
         )
     csv_files = [f for f in files if f.file_type == 'csv']
@@ -224,7 +238,7 @@ def plots_archive(pid):
 
         for task in tasks:
             for rf in files_by_task.get(task.id, []):
-                if rf.file_type not in {'png', 'svg', 'jpg', 'jpeg'} or not _validate_path(rf.file_path, pid):
+                if rf.file_type not in {'png', 'svg', 'pdf', 'tiff', 'jpg', 'jpeg'} or not _validate_path(rf.file_path, pid):
                     continue
                 safe_label = re.sub(r'[^a-zA-Z0-9._-]+', '_', rf.label or rf.category or 'plot').strip('_') or 'plot'
                 extension = os.path.splitext(rf.file_path)[1].lower() or f'.{rf.file_type}'

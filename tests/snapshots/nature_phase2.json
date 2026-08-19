@@ -1,0 +1,11 @@
+{
+  "ma_89mm": {
+    "dhash": "0c000c00100118031006700570007415720036011400180018150aab08ba0138",
+    "pixel_sha256": "0a6b5ed73f72f0753d2f9ba72f4cc19bea86f726bac3b1aa378cbc5837459166",
+    "canvas_px": [2102, 1866],
+    "axes": 1,
+    "texts": 37,
+    "collections": 3,
+    "lines": 3
+  }
+}

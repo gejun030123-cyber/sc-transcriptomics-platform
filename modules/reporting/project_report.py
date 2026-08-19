@@ -202,7 +202,7 @@ def write_project_report(project, project_dir, tasks, files_by_task, module_disp
                 lines.append(
                     f"- {_status_cn(check.get('status'))}：{check.get('name')} {value} - {check.get('message')}"
                 )
-        plot_files = [f for f in files if f.file_type in {"png", "svg"}]
+        plot_files = [f for f in files if f.file_type in {"png", "svg", "pdf", "tiff"}]
         table_files = [f for f in files if f.file_type == "csv"]
         if plot_files or table_files:
             lines.append("")

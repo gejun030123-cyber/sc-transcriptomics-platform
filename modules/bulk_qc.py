@@ -185,39 +185,55 @@ class BulkQCAnalysis(BaseAnalysis):
         self.progress(60, "生成质控图表...")
         plots_dir = os.path.join(self.project_dir, 'plots')
         os.makedirs(plots_dir, exist_ok=True)
+        from figure_engine import NatureFigureDirector, export_registered_figure
+        director = NatureFigureDirector()
+        nature_formats = ('svg', 'pdf', 'png')
 
-        fig, axes = plt.subplots(3, 2, figsize=(10.0, 11.0), dpi=150)
-        sample_idx = list(range(n_before))
-        colors = ['#4caf50' if m else '#e53935' for m in mask]
+        def _export_diagnostic(fig, stem, label, *, width='single', height_mm=None,
+                               category='qc', plot_type='diagnostic'):
+            spec = director.spec_from_params(
+                plot_type, self.params, width=width, title=label,
+            ).with_updates(formats=nature_formats, height_mm=height_mm)
+            exported, report = export_registered_figure(
+                fig, os.path.join(plots_dir, stem), spec,
+                category=category, label=label,
+                qa_path=os.path.join(results_dir, f'{stem}_nature_readiness.json'),
+            )
+            if not report.ready:
+                self.progress(-1, f'{label} Nature readiness {report.score}/100；请查看 QA 报告。')
+            plt.close(fig)
+            return exported
+
         overview = [
-            (lib_sizes, '文库大小分布', 'Library size'),
-            (n_genes_detected, '检测基因数', 'Detected genes'),
-            (mt_pct, '线粒体基因比例', 'MT%'),
-            (ribo_pct, '核糖体基因比例', 'Ribo%'),
-            (gini_values, 'Gini 系数', 'Gini'),
+            {'values': lib_sizes, 'title': 'Library size', 'ylabel': 'Library size'},
+            {'values': n_genes_detected, 'title': 'Detected genes', 'ylabel': 'Detected genes'},
+            {'values': mt_pct, 'title': 'Mitochondrial fraction', 'ylabel': 'MT%'},
+            {'values': ribo_pct, 'title': 'Ribosomal fraction', 'ylabel': 'Ribo%'},
+            {'values': gini_values, 'title': 'Gini coefficient', 'ylabel': 'Gini'},
         ]
-        for ax, (values, subtitle, ylabel), color in zip(
-                axes.ravel()[:5], overview,
-                [NATURE_PALETTE[0], NATURE_PALETTE[1], NATURE_PALETTE[3],
-                 NATURE_PALETTE[4], NATURE_PALETTE[5]]):
-            ax.bar(sample_idx, values, color=color, alpha=0.88,
-                   edgecolor='white', linewidth=0.25)
-            ax.set_title(subtitle, loc='left', fontsize=9, color=NATURE_TEXT)
-            ax.set_ylabel(ylabel, fontsize=8)
-            ax.tick_params(labelsize=7)
-            ax.grid(axis='y', color=NATURE_GRID, linewidth=0.5, alpha=0.7)
-        ax = axes.ravel()[5]
-        ax.scatter(lib_sizes, n_genes_detected, c=colors, s=28, alpha=0.82,
-                   linewidths=0)
-        ax.set_title('文库大小 vs 检测基因数', loc='left', fontsize=9, color=NATURE_TEXT)
-        ax.set_xlabel('Library size', fontsize=8)
-        ax.set_ylabel('Detected genes', fontsize=8)
-        ax.grid(False)
-        fig.suptitle('Bulk RNA-seq 质控总览', x=0.05, ha='left', fontsize=12,
-                     fontweight='semibold', color=NATURE_TEXT)
-        result_files.extend(self.save_matplotlib_figure(
-            fig, plots_dir, 'bulk_qc_overview.png', 'qc', '质控总览',
-            formats=('png', 'svg'), dpi=300,
+        invariant = []
+        for item in overview:
+            finite_values = np.asarray(item['values'], dtype=float)
+            finite_values = finite_values[np.isfinite(finite_values)]
+            if finite_values.size == 0 or np.nanmax(finite_values) - np.nanmin(finite_values) <= 1e-12:
+                invariant.append(item['title'])
+        result_files.extend(_export_diagnostic(
+            director.render(
+                director.spec_from_params('diagnostic', self.params, width='double',
+                                          title='Bulk RNA-seq QC overview').with_updates(
+                                              extra={'kind': 'qc_overview'},
+                                              formats=nature_formats, height_mm=130.0),
+                {
+                    'kind': 'qc_overview',
+                    'sample_labels': sample_names,
+                    'metrics': overview,
+                    'library_size': lib_sizes,
+                    'detected_genes': n_genes_detected,
+                    'pass_colors': [('#4C78A8' if m else '#77808C') for m in mask],
+                    'omitted_metrics': ', '.join(invariant),
+                },
+            ),
+            'bulk_qc_overview', '质控总览', width='double', height_mm=130.0,
         ))
 
         # 保存原始 counts 副本
@@ -240,15 +256,27 @@ class BulkQCAnalysis(BaseAnalysis):
         # 分组条与样本排序均基于过滤后的样本；相关性原始矩阵不改动。
         filtered_groups = [groups[sample_names.index(s)] for s in sample_labels_corr]
         unique_groups = sorted(set(filtered_groups))
-        fig_corr, corr_metadata = correlation_heatmap_figure(
-            corr_matrix, sample_labels_corr, title='样本相关性热图 (Pearson)',
-            method='Pearson', group_labels=filtered_groups,
-            colorscale='Blues', cluster=True, mask_diagonal=True,
+        from figure_engine import NatureFigureDirector, export_registered_figure
+        director = NatureFigureDirector()
+        corr_spec = director.spec_from_params(
+            'correlation', self.params, width='double',
+            title='样本相关性热图 (Pearson)', correlation_method='pearson',
         )
-        result_files.extend(self.save_matplotlib_figure(
-            fig_corr, plots_dir, 'bulk_qc_corr.png', 'heatmap',
-            '样本相关性热图', formats=('png', 'svg'), dpi=300,
-        ))
+        fig_corr = director.render(corr_spec, {
+            'correlation_matrix': corr_matrix,
+            'sample_labels': sample_labels_corr,
+            'groups': filtered_groups,
+        })
+        corr_metadata = fig_corr._nature_correlation_metadata
+        exported, corr_readiness = export_registered_figure(
+            fig_corr, os.path.join(plots_dir, 'bulk_qc_corr'), corr_spec,
+            category='heatmap', label='样本相关性热图',
+            qa_path=os.path.join(results_dir, 'bulk_qc_corr_nature_readiness.json'),
+        )
+        result_files.extend(exported)
+        if not corr_readiness.ready:
+            self.progress(-1, f'Correlation Nature readiness {corr_readiness.score}/100；请查看 QA 报告。')
+        plt.close(fig_corr)
         corr_pairs = correlation_pairwise_table(
             corr_matrix, sample_labels_corr, filtered_groups, method='pearson')
         corr_pairs_csv = os.path.join(results_dir, 'bulk_qc_correlation_pairs.csv')
@@ -264,14 +292,17 @@ class BulkQCAnalysis(BaseAnalysis):
         ])
 
         if n_before > n_after:
-            fig_r = bar_figure(
-                ['过滤前', '过滤后'], [n_before, n_after], title='样本过滤结果',
-                x_label='Stage', y_label='样本数',
-                colors=[NATURE_PALETTE[3], NATURE_PALETTE[0]], rotation=0,
+            fig_r = director.render(
+                director.spec_from_params('diagnostic', self.params, width='single',
+                                          title='Sample filtering').with_updates(
+                                              extra={'kind': 'normalization_library'},
+                                              formats=nature_formats, height_mm=60.0),
+                {'kind': 'normalization_library', 'sample_labels': ['Before', 'After'],
+                 'raw_values': [n_before, n_before], 'normalized_values': [n_after, n_after],
+                 'raw_ylabel': 'Samples', 'normalized_ylabel': 'Samples'},
             )
-            result_files.extend(self.save_matplotlib_figure(
-                fig_r, plots_dir, 'bulk_qc_filter.png', 'qc', '样本过滤结果',
-                formats=('png', 'svg'), dpi=300,
+            result_files.extend(_export_diagnostic(
+                fig_r, 'bulk_qc_filter', '样本过滤结果', width='single', height_mm=60.0,
             ))
 
         self.progress(75, "PCA 离群检测...")
@@ -290,48 +321,29 @@ class BulkQCAnalysis(BaseAnalysis):
             if detect_outliers:
                 outlier_samples = _detect_outliers_mahal(pc, filtered_sample_names)
 
-            # Reuse the display PCA canvas: sample labels are intentionally
-            # omitted here because naming every replicate masks compact groups.
-            from modules.bulk_pca import _pca_embedding_figure
             pca_variance_qc = adata_normed.uns.get('pca', {}).get('variance_ratio', [])
-            pc1_var = float(pca_variance_qc[0]) * 100 if len(pca_variance_qc) > 0 else None
-            pc2_var = float(pca_variance_qc[1]) * 100 if len(pca_variance_qc) > 1 else None
-            axis_suffix = (
-                f' ({pc1_var:.1f}% variance)' if pc1_var is not None else ''
-            )
-            fig_pca = _pca_embedding_figure(
-                pc[:, :2], filtered_groups_pca, filtered_sample_names,
-                title='质控后样本 PCA',
-                x_label=f'PC1{axis_suffix}',
-                y_label=(f'PC2 ({pc2_var:.1f}% variance)' if pc2_var is not None else 'PC2'),
-                group_label='Sample group', show_labels=False,
-                subtitle='样本重复以点表示；名称已隐藏以避免遮挡',
-            )
-            ax_pca = fig_pca.axes[0]
-            # 离群点高亮
-            if outlier_samples:
-                out_idx = [filtered_sample_names.index(s) for s in outlier_samples if s in filtered_sample_names]
-                if out_idx:
-                    ax_pca.scatter(pc[out_idx, 0], pc[out_idx, 1], s=80, color='#B64342',
-                                   marker='x', linewidths=1.6, label='离群样本')
-                    # Rebuild the externally anchored legend to include the
-                    # outlier marker without moving it back into the data area.
-                    old_legend = ax_pca.get_legend()
-                    if old_legend is not None:
-                        old_legend.remove()
-                    handles, legend_labels = ax_pca.get_legend_handles_labels()
-                    legend = ax_pca.legend(
-                        handles, legend_labels, title='Sample group',
-                        loc='center left', bbox_to_anchor=(1.01, 0.5),
-                        frameon=False, fontsize=7.5, title_fontsize=8,
-                        handletextpad=0.5, borderaxespad=0,
-                    )
-                    for handle in legend.legend_handles:
-                        if hasattr(handle, 'set_sizes'):
-                            handle.set_sizes([34])
-            result_files.extend(self.save_matplotlib_figure(
-                fig_pca, plots_dir, 'bulk_qc_pca.png', 'pca', '样本 PCA',
-                formats=('png', 'svg'), dpi=300,
+            pca_spec = director.spec_from_params(
+                'pca', self.params, width='single', title='QC-filtered sample PCA',
+                show_legend=len(unique_groups_pca) <= 8,
+            ).with_updates(formats=nature_formats, height_mm=82.0,
+                           outlier_labels=tuple(outlier_samples))
+            # Many QC projects are auto-grouped by sample ID, producing one
+            # category per replicate.  Preserve that information with marker
+            # shape while using one stable publication colour; this avoids a
+            # misleading rainbow legend and color-vision collisions.
+            pca_group_colors = ({group: NATURE_PALETTE[0] for group in unique_groups_pca}
+                                if len(unique_groups_pca) > 8 else None)
+            fig_pca = director.render(pca_spec, {
+                'coordinates': pc[:, :2],
+                'groups': filtered_groups_pca,
+                'batches': filtered_groups_pca if len(unique_groups_pca) > 8 else None,
+                'group_colors': pca_group_colors,
+                'samples': filtered_sample_names,
+                'explained_variance': pca_variance_qc[:2],
+            })
+            result_files.extend(_export_diagnostic(
+                fig_pca, 'bulk_qc_pca', '样本 PCA', width='single', height_mm=82.0, category='pca',
+                plot_type='pca',
             ))
 
         # PCA 方差解释 elbow 图（使用 scanpy 存储的 variance_ratio）
@@ -342,27 +354,16 @@ class BulkQCAnalysis(BaseAnalysis):
         if pca_variance is not None and len(pca_variance) > 0:
             n_pcs = len(pca_variance)
             pc_labels = [f'PC{i+1}' for i in range(n_pcs)]
-            cumulative = np.cumsum(pca_variance).tolist()
-            fig_elbow, ax_elbow = plt.subplots(figsize=(7.5, 5.0), dpi=150)
-            x_pc = np.arange(n_pcs)
-            ax_elbow.bar(x_pc, pca_variance, color=NATURE_PALETTE[0], alpha=0.88,
-                         label='方差比例')
-            ax2 = ax_elbow.twinx()
-            ax2.plot(x_pc, cumulative, color=NATURE_PALETTE[3], linewidth=1.8,
-                     marker='o', markersize=3.5, label='累积比例')
-            ax_elbow.set_xticks(x_pc, pc_labels, rotation=45)
-            ax_elbow.set_xlabel('主成分', fontsize=9)
-            ax_elbow.set_ylabel('方差比例', fontsize=9)
-            ax2.set_ylabel('累积比例', fontsize=9)
-            ax_elbow.set_title('PCA 方差解释比例', loc='left', fontsize=10,
-                               fontweight='semibold', color=NATURE_TEXT)
-            ax_elbow.grid(axis='y', color=NATURE_GRID, linewidth=0.5, alpha=0.7)
-            handles, labels = ax_elbow.get_legend_handles_labels()
-            h2, l2 = ax2.get_legend_handles_labels()
-            ax_elbow.legend(handles + h2, labels + l2, frameon=False, fontsize=8)
-            result_files.extend(self.save_matplotlib_figure(
-                fig_elbow, plots_dir, 'bulk_qc_pca_elbow.png', 'pca',
-                'PCA 方差解释', formats=('png', 'svg'), dpi=300,
+            fig_elbow = director.render(
+                director.spec_from_params('diagnostic', self.params, width='single',
+                                          title='PCA variance explained').with_updates(
+                                              extra={'kind': 'variance'},
+                                              formats=nature_formats, height_mm=70.0),
+                {'kind': 'variance', 'variance': pca_variance, 'labels': pc_labels},
+            )
+            result_files.extend(_export_diagnostic(
+                fig_elbow, 'bulk_qc_pca_elbow', 'PCA 方差解释', width='single', height_mm=70.0,
+                category='pca',
             ))
 
         # 组内 vs 组间距离箱线图
@@ -387,31 +388,31 @@ class BulkQCAnalysis(BaseAnalysis):
                 title_suffix = f' (p={pval:.2e})'
             except Exception:
                 title_suffix = ''
-            fig_dist, ax_dist = plt.subplots(figsize=(6.5, 4.8), dpi=150)
             box_data = [values for values in (intra_dists, inter_dists) if values]
             box_labels = [label for label, values in zip(['组内距离', '组间距离'],
                                                           (intra_dists, inter_dists)) if values]
-            boxes = ax_dist.boxplot(box_data, tick_labels=box_labels, patch_artist=True,
-                                    showfliers=False)
-            for patch, color in zip(boxes['boxes'], [NATURE_PALETTE[0], NATURE_PALETTE[3]]):
-                patch.set_facecolor(color)
-                patch.set_alpha(0.62)
-                patch.set_edgecolor(color)
-            ax_dist.set_title(f'组内 vs 组间距离{title_suffix}', loc='left', fontsize=10,
-                              fontweight='semibold', color=NATURE_TEXT)
-            ax_dist.set_ylabel('1 - Pearson r', fontsize=9)
-            ax_dist.grid(axis='y', color=NATURE_GRID, linewidth=0.5, alpha=0.7)
-            result_files.extend(self.save_matplotlib_figure(
-                fig_dist, plots_dir, 'bulk_qc_group_distance.png', 'qc',
-                '组内/组间距离', formats=('png', 'svg'), dpi=300,
+            fig_dist = director.render(
+                director.spec_from_params('diagnostic', self.params, width='single',
+                                          title=f'Within vs between-group distance{title_suffix}').with_updates(
+                                              extra={'kind': 'boxplot'},
+                                              formats=nature_formats, height_mm=68.0),
+                {'kind': 'boxplot', 'groups': box_labels, 'values': box_data,
+                 'ylabel': '1 - Pearson r'},
+            )
+            result_files.extend(_export_diagnostic(
+                fig_dist, 'bulk_qc_group_distance', '组内/组间距离', width='single', height_mm=68.0,
             ))
 
         # QC 指标散点矩阵 (Pairs Plot)
         obs_filtered = adata_filtered.obs
         pairs_groups = [groups[sample_names.index(s)] for s in obs_filtered.index.tolist()]
         unique_pg = sorted(set(pairs_groups))
-        pg_color_map = {g: NATURE_PALETTE[i % len(NATURE_PALETTE)]
-                        for i, g in enumerate(unique_pg)}
+        pg_color_map = ({g: NATURE_PALETTE[0] for g in unique_pg}
+                        if len(unique_pg) > 3 else
+                        {g: NATURE_PALETTE[i % len(NATURE_PALETTE)]
+                         for i, g in enumerate(unique_pg)})
+        from figure_engine.style import get_style
+        pg_marker_map = get_style('nature').batch_markers(unique_pg)
         pg_colors = [pg_color_map[g] for g in pairs_groups]
         pair_values = [
             obs_filtered['total_counts'].values,
@@ -420,28 +421,17 @@ class BulkQCAnalysis(BaseAnalysis):
             obs_filtered['pct_counts_ribo'].values if 'pct_counts_ribo' in obs_filtered.columns else np.zeros(n_after),
         ]
         pair_labels = ['Library Size', 'N Genes', 'MT%', 'Ribo%']
-        fig_pairs, pair_axes = plt.subplots(4, 4, figsize=(9.0, 9.0), dpi=150)
-        for row in range(4):
-            for col in range(4):
-                ax_pair = pair_axes[row, col]
-                if row == col:
-                    ax_pair.hist(pair_values[row], bins=25, color=NATURE_PALETTE[0],
-                                 alpha=0.78, edgecolor='white', linewidth=0.2)
-                elif row > col:
-                    ax_pair.scatter(pair_values[col], pair_values[row], c=pg_colors,
-                                    s=12, alpha=0.72, linewidths=0)
-                else:
-                    ax_pair.set_visible(False)
-                if row == 3:
-                    ax_pair.set_xlabel(pair_labels[col], fontsize=7)
-                if col == 0 and row > col:
-                    ax_pair.set_ylabel(pair_labels[row], fontsize=7)
-                ax_pair.tick_params(labelsize=6)
-        fig_pairs.suptitle('QC 指标散点矩阵', x=0.05, ha='left', fontsize=11,
-                           fontweight='semibold', color=NATURE_TEXT)
-        result_files.extend(self.save_matplotlib_figure(
-            fig_pairs, plots_dir, 'bulk_qc_pairs_plot.png', 'qc',
-            'QC 指标散点矩阵', formats=('png', 'svg'), dpi=300,
+        fig_pairs = director.render(
+            director.spec_from_params('diagnostic', self.params, width='double',
+                                      title='QC metric pairs').with_updates(
+                                          extra={'kind': 'pairs'}, formats=nature_formats,
+                                          height_mm=112.0),
+            {'kind': 'pairs', 'labels': pair_labels, 'values': pair_values,
+             'groups': pairs_groups, 'group_colors': pg_color_map,
+             'group_markers': pg_marker_map},
+        )
+        result_files.extend(_export_diagnostic(
+            fig_pairs, 'bulk_qc_pairs_plot', 'QC 指标散点矩阵', width='double', height_mm=112.0,
         ))
 
         # 各组 QC 指标小提琴图
@@ -457,28 +447,25 @@ class BulkQCAnalysis(BaseAnalysis):
                     'N Genes': float(obs_filtered.loc[s, 'n_genes_by_counts']),
                 })
             violin_df = pd.DataFrame(violin_data)
-            fig_violin, violin_axes = plt.subplots(2, 2, figsize=(9.0, 7.5), dpi=150)
-            metrics = [('MT%', 1, 1), ('Ribo%', 1, 2), ('Library Size', 2, 1), ('N Genes', 2, 2)]
-            for metric, row, col in metrics:
-                ax_v = violin_axes[row - 1, col - 1]
+            violin_metrics = []
+            for metric in ('MT%', 'Ribo%', 'Library Size', 'N Genes'):
                 vals_by_group = [violin_df[violin_df['group'] == g][metric].values
-                                  for g in unique_groups]
-                parts = ax_v.violinplot(vals_by_group, positions=np.arange(len(unique_groups)),
-                                        showmeans=True, showextrema=False)
-                for body, index in zip(parts['bodies'], range(len(unique_groups))):
-                    body.set_facecolor(NATURE_PALETTE[index % len(NATURE_PALETTE)])
-                    body.set_edgecolor(NATURE_PALETTE[index % len(NATURE_PALETTE)])
-                    body.set_alpha(0.62)
-                ax_v.set_title(metric, loc='left', fontsize=9, color=NATURE_TEXT)
-                ax_v.set_xticks(np.arange(len(unique_groups)), unique_groups, rotation=35,
-                                ha='right', fontsize=7)
-                ax_v.grid(axis='y', color=NATURE_GRID, linewidth=0.5, alpha=0.7)
-            fig_violin.suptitle('各组 QC 指标分布', x=0.05, ha='left', fontsize=11,
-                                fontweight='semibold', color=NATURE_TEXT)
-            result_files.extend(self.save_matplotlib_figure(
-                fig_violin, plots_dir, 'bulk_qc_violin_by_group.png', 'qc',
-                '各组 QC 指标分布', formats=('png', 'svg'), dpi=300,
-            ))
+                                 for g in unique_groups]
+                if any((lambda finite: finite.size > 0 and
+                        np.nanmax(finite) - np.nanmin(finite) > 1e-12)
+                       (np.asarray(v, dtype=float)[np.isfinite(v)]) for v in vals_by_group):
+                    violin_metrics.append({'label': metric, 'values': vals_by_group})
+            if violin_metrics:
+                fig_violin = director.render(
+                    director.spec_from_params('diagnostic', self.params, width='double',
+                                              title='QC metrics by group').with_updates(
+                                                  extra={'kind': 'violin'}, formats=nature_formats,
+                                                  height_mm=90.0),
+                    {'kind': 'violin', 'groups': unique_groups, 'metrics': violin_metrics},
+                )
+                result_files.extend(_export_diagnostic(
+                    fig_violin, 'bulk_qc_violin_by_group', '各组 QC 指标分布', width='double', height_mm=90.0,
+                ))
 
         # 管家基因稳定性热图
         if found_hk:
@@ -494,15 +481,27 @@ class BulkQCAnalysis(BaseAnalysis):
                 cv = float(np.std(vals) / (np.mean(vals) + 1e-10))
                 hk_cv[g] = cv
             cv_labels = [f'{g} (CV={hk_cv[g]:.2f})' for g in hk_genes]
-            fig_hk = heatmap_figure(
-                hk_data.T, x_labels=hk_samples, y_labels=cv_labels,
-                title='管家基因表达稳定性', x_label='Sample', y_label='Gene',
-                colorbar_label='ln(CPM+1)',
-                vmin=float(np.nanmin(hk_data)), vmax=float(np.nanmax(hk_data)),
-            )
-            result_files.extend(self.save_matplotlib_figure(
-                fig_hk, plots_dir, 'bulk_qc_housekeeping.png', 'heatmap',
-                '管家基因稳定性', formats=('png', 'svg'), dpi=300,
+            hk_spec = director.spec_from_params(
+                'heatmap', self.params, width='double', title='Housekeeping gene stability',
+                zscore='row', row_cluster=True, col_cluster=True,
+            ).with_updates(formats=nature_formats, height_mm=100.0, max_row_labels=20,
+                           max_col_labels=18)
+            fig_hk = director.render(hk_spec, {
+                'matrix': hk_data.T,
+                'gene_labels': cv_labels,
+                'sample_labels': hk_samples,
+                # Auto-grouping can create one legend entry per sample.  A
+                # long annotation legend is not informative and collides with
+                # the heatmap/colorbar at publication size, so only retain it
+                # when it remains compact.
+                'annotations': ({'Group': [groups[sample_names.index(s)] for s in hk_samples]}
+                                if len(set(groups[sample_names.index(s)] for s in hk_samples)) <= 6
+                                else {}),
+                'colorbar_label': 'Gene-wise z-score',
+            })
+            result_files.extend(_export_diagnostic(
+                fig_hk, 'bulk_qc_housekeeping', '管家基因稳定性', width='double', height_mm=100.0,
+                category='heatmap', plot_type='heatmap',
             ))
 
         self.progress(90, "保存输出...")

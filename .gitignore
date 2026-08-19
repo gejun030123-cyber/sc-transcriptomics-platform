@@ -2,6 +2,10 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 instance/
 *.db
 *.sqlite3
@@ -17,6 +21,16 @@ cache/
 
 # Generated analysis outputs
 bulk_reference_output*/
+artifacts/
+
+# Generated root-level validation and handoff reports
+*_RESULTS_*.md
+*_METHOD_COMPARISON_*.md
+*_HANDOFF_*.md
+*_RUN_STATE.md
+
+# Local installers and archives
+*.deb
 
 # Local configuration
 .claude/

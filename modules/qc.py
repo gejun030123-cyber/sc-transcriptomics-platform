@@ -51,7 +51,12 @@ class QCAnalysis(BaseAnalysis):
         ).fillna(0)
 
         # ── 3. 细胞周期评分 ─────────────────────────────────────────────
-        self.progress(25, "Scoring cell cycle phases...")
+        score_cell_cycle = bool(self.params.get('score_cell_cycle', True))
+        self.progress(
+            25,
+            "Scoring cell cycle phases..." if score_cell_cycle
+            else "Skipping optional cell-cycle scoring...",
+        )
         # 筛选实际存在于数据中的基因（区分 Ensembl ID 和基因名）
         var_names_set = set(adata.var_names.astype(str))
         s_in = [g for g in S_GENES if g in var_names_set]
@@ -69,7 +74,7 @@ class QCAnalysis(BaseAnalysis):
             if len(g2m_in_ensembl) > len(g2m_in):
                 g2m_in = g2m_in_ensembl
 
-        if len(s_in) >= 5 and len(g2m_in) >= 5:
+        if score_cell_cycle and len(s_in) >= 5 and len(g2m_in) >= 5:
             # 需要先有 log1p normalized 数据用于打分
             adata_cc = adata.copy()
             if 'log1p_total_counts' not in adata_cc.obs.columns:
@@ -110,9 +115,12 @@ class QCAnalysis(BaseAnalysis):
         batch_adaptive = self.params.get('batch_adaptive_qc', False)
         mad_multiplier = float(self.params.get('mad_multiplier', 3.0))
 
+        # OmicVerse keeps the historical argument spelling ``tresh``.
+        # Passing ``thresh`` is silently accepted via **kwargs but ignored,
+        # which would fall back to the library defaults (notably 15% MT).
         adata = ov.pp.qc(
             adata,
-            thresh={
+            tresh={
                 'mito_perc': mito_perc,
                 'nUMIs': nUMIs_min,
                 'detected_genes': ngenes_min,

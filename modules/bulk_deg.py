@@ -297,7 +297,7 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
                            method, fc_threshold, pval_threshold, top_n, gene_id_to_name,
                            plots_dir, results_dir, suffix='', viz_params=None,
                            cooks_filter=True, independent_filter=True, padj_method='fdr_bh',
-                           base_mean_filter=0):
+                           base_mean_filter=0, figure_params=None):
     """Run DEG for one comparison pair. Returns (deg_df, result_files, n_up, n_down)."""
     import omicverse as ov
     import matplotlib.pyplot as plt
@@ -437,35 +437,71 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
                          'label': f'Top {top_n} 差异基因 ({group1} vs {group2})'})
 
     import matplotlib.pyplot as plt
-    fig_vol, ax_vol = plt.subplots(figsize=(7.5, 5.0), dpi=150)
-    _draw_bulk_volcano(
-        ax_vol, deg_df_full, pval_threshold=pval_threshold,
-        fc_threshold=fc_threshold, title=f'火山图 ({group1} vs {group2})',
-        top_n=top_n, show_legend=True,
-    )
-    fig_vol.tight_layout(pad=1.1)
-    result_files.extend(_save_native_figure(
-        fig_vol, plots_dir, f'bulk_deg_volcano{file_suffix}', 'volcano',
-        f'火山图 ({group1} vs {group2})', viz,
-    ))
+    from figure_engine import NatureFigureDirector, export_registered_figure
 
-    # MA plot
-    colors = np.asarray([
-        VOLCANO_COLORS.get(reg, VOLCANO_COLORS['NS'])
-        for reg in regulation
-    ], dtype=object)
-    avg_expr = (mean1 + mean2) / 2
-    fig_ma = scatter_figure(
-        np.log2(avg_expr + 1), log2fc,
-        title=f'MA 图 ({group1} vs {group2})',
-        x_label='log2(Average Expression)', y_label='log2(Fold Change)',
-        colors=colors, size=10, alpha=0.72,
+    director = NatureFigureDirector()
+    director_params = dict(figure_params or {'_visualization': viz})
+    label_genes = director_params.get(
+        'volcano_label_genes', director_params.get('plot_genes', ()))
+    volcano_spec = director.spec_from_params(
+        'volcano', director_params,
+        title=f'Differential expression ({group1} vs {group2})',
+        fc_threshold=float(np.log2(max(fc_threshold, np.finfo(float).tiny))),
+        fdr_threshold=float(pval_threshold),
+        label_n=min(int(top_n), 8),
+        label_genes=label_genes,
+        show_legend=False,
     )
-    fig_ma.axes[0].axhline(0, color='#98A2B3', linewidth=0.7)
-    result_files.extend(_save_native_figure(
-        fig_ma, plots_dir, f'bulk_deg_ma{file_suffix}', 'ma',
-        f'MA 图 ({group1} vs {group2})', viz,
-    ))
+    # Keep the historical module contract (PNG/SVG) when no export preference
+    # is supplied by a caller; an explicit static_formats/export_formats list
+    # can opt into the full SVG/PDF/PNG publication bundle.
+    requested_formats = (director_params.get('_visualization', {}) or {}).get(
+        'static_formats', (director_params.get('_visualization', {}) or {}).get('export_formats'))
+    if not requested_formats:
+        volcano_spec = volcano_spec.with_updates(formats=('svg', 'png'))
+    fig_vol = director.render(volcano_spec, deg_df_full)
+    qa_path = os.path.join(
+        results_dir, f'bulk_deg_volcano{file_suffix}_nature_readiness.json')
+    exported, readiness = export_registered_figure(
+        fig_vol, os.path.join(plots_dir, f'bulk_deg_volcano{file_suffix}'),
+        volcano_spec, category='volcano',
+        label=f'火山图 ({group1} vs {group2})', qa_path=qa_path,
+    )
+    result_files.extend(exported)
+    if not readiness.ready:
+        result_files.append({
+            'file_path': '', 'file_type': 'info', 'category': 'info',
+            'label': f'Volcano Nature readiness {readiness.score}/100；请查看 QA 报告。',
+        })
+    plt.close(fig_vol)
+
+    # MA plot — the same scientific thresholds and palette as Volcano.
+    avg_expr = (mean1 + mean2) / 2
+    ma_data = deg_df_full.copy()
+    ma_data['mean_expression'] = avg_expr
+    ma_spec = director.spec_from_params(
+        'ma', director_params,
+        title=f'MA 图 ({group1} vs {group2})',
+        fc_threshold=float(np.log2(max(fc_threshold, np.finfo(float).tiny))),
+        fdr_threshold=float(pval_threshold),
+        label_n=min(int(top_n), 6),
+        label_genes=label_genes,
+        show_legend=False,
+    )
+    fig_ma = director.render(ma_spec, ma_data)
+    ma_exported, ma_readiness = export_registered_figure(
+        fig_ma, os.path.join(plots_dir, f'bulk_deg_ma{file_suffix}'),
+        ma_spec, category='ma', label=f'MA 图 ({group1} vs {group2})',
+        qa_path=os.path.join(
+            results_dir, f'bulk_deg_ma{file_suffix}_nature_readiness.json'),
+    )
+    result_files.extend(ma_exported)
+    if not ma_readiness.ready:
+        result_files.append({
+            'file_path': '', 'file_type': 'info', 'category': 'info',
+            'label': f'MA Nature readiness {ma_readiness.score}/100；请查看 QA 报告。',
+        })
+    plt.close(fig_ma)
 
     # 返回完整 deg_df 用于箱线图，过滤后 deg_df 用于下游分析
     return deg_df_full, result_files, n_up, n_down
@@ -753,7 +789,8 @@ class BulkDEGAnalysis(BaseAnalysis):
                     gene_id_to_name, plots_dir, results_dir, suffix=str(idx),
                     viz_params=self.params.get('_visualization', {}),
                     cooks_filter=cooks_filter, independent_filter=independent_filter,
-                    padj_method=padj_method, base_mean_filter=base_mean_filter)
+                    padj_method=padj_method, base_mean_filter=base_mean_filter,
+                    figure_params=self.params)
                 deg_df['comparison'] = f'{g1}-vs-{g2}'
                 all_deg_dfs.append(deg_df)
                 valid_comparisons.append((g1, g2))
@@ -790,45 +827,45 @@ class BulkDEGAnalysis(BaseAnalysis):
                     shared_up = len(set.intersection(*up_sets)) if len(up_sets) >= 2 else 0
                     shared_down = len(set.intersection(*down_sets)) if len(down_sets) >= 2 else 0
 
-                    # Volcano 并排展示（静态 Matplotlib 面板）
+                    # Multi-comparison Volcano uses the Composer so each panel
+                    # is the same fixed NatureVolcano template and the legend is
+                    # shared instead of repeated inside every small axis.
                     import matplotlib.pyplot as plt
-                    from modules.figure_style import NATURE_TEXT
+                    from figure_engine import NatureFigureComposer, NatureFigureDirector, export_registered_figure
                     n_comp = len(comparison_names)
-                    fig_multi, axes_multi = plt.subplots(
-                        1, n_comp, figsize=(max(7.5, 4.1 * n_comp), 4.8),
-                        dpi=150, squeeze=False,
-                    )
-                    all_padj = np.concatenate([
-                        pd.to_numeric(df['padj'], errors='coerce').to_numpy(dtype=float)
-                        for df in all_deg_dfs
-                    ])
-                    all_log2fc = np.concatenate([
-                        pd.to_numeric(df['log2FC'], errors='coerce').to_numpy(dtype=float)
-                        for df in all_deg_dfs
-                    ])
-                    multi_y_limit = _volcano_y_limit(all_padj, pval_threshold)
-                    finite_multi_x = np.abs(all_log2fc[np.isfinite(all_log2fc)])
-                    multi_x_limit = max(
-                        2.5, np.log2(max(fc_threshold, np.finfo(float).tiny)) * 1.8,
-                        float(np.nanmax(finite_multi_x)) * 1.08 if finite_multi_x.size else 2.5,
-                    )
-                    multi_x_limit = float(np.ceil(multi_x_limit * 2.0) / 2.0)
+                    ncols_multi = min(3, n_comp)
+                    nrows_multi = int(np.ceil(n_comp / ncols_multi))
+                    director_multi = NatureFigureDirector()
+                    outer_spec = director_multi.spec_from_params(
+                        'diagnostic', self.params, width='double', title='Multi-comparison Volcano',
+                    ).with_updates(plot_type='composite', formats=('svg', 'pdf', 'png'),
+                                   height_mm=82.0 if nrows_multi == 1 else 145.0)
+                    panels = []
                     for m_idx, (comp_name, deg_df) in enumerate(zip(comparison_names, all_deg_dfs)):
-                        ax_multi = axes_multi[0, m_idx]
-                        _draw_bulk_volcano(
-                            ax_multi, deg_df, pval_threshold=pval_threshold,
-                            fc_threshold=fc_threshold, title=comp_name, top_n=0,
-                            show_legend=(m_idx == 0), y_limit=multi_y_limit,
-                            x_limit=multi_x_limit,
+                        panel_spec = director_multi.spec_from_params(
+                            'volcano', self.params, width='single',
+                            title=str(comp_name), fc_threshold=np.log2(max(fc_threshold, 1e-12)),
+                            fdr_threshold=pval_threshold, label_n=0, show_legend=False,
                         )
-                        if m_idx > 0:
-                            ax_multi.set_ylabel('')
-                    fig_multi.suptitle('多组比较 Volcano 图', x=0.05, ha='left',
-                                       fontsize=11, fontweight='semibold', color=NATURE_TEXT)
-                    result_files.extend(_save_native_figure(
-                        fig_multi, plots_dir, 'bulk_deg_volcano_multi', 'volcano',
-                        '多组比较 Volcano', self.params.get('_visualization', {}),
-                    ))
+                        from figure_engine.composer import FigurePanel
+                        panels.append(FigurePanel(
+                            plot_type='volcano', data=deg_df, spec=panel_spec,
+                            label=chr(ord('a') + m_idx), row=m_idx // ncols_multi,
+                            column=m_idx % ncols_multi,
+                        ))
+                    fig_multi = NatureFigureComposer(director_multi).compose(
+                        panels, outer_spec, nrows=nrows_multi, ncols=ncols_multi,
+                        shared_legend=False,
+                    )
+                    export_multi, report_multi = export_registered_figure(
+                        fig_multi, os.path.join(plots_dir, 'bulk_deg_volcano_multi'), outer_spec,
+                        category='volcano', label='多组比较 Volcano',
+                        qa_path=os.path.join(results_dir, 'bulk_deg_volcano_multi_nature_readiness.json'),
+                    )
+                    result_files.extend(export_multi)
+                    if not report_multi.ready:
+                        self.progress(-1, f'多组比较 Volcano Nature readiness {report_multi.score}/100；请查看 QA 报告。')
+                    plt.close(fig_multi)
                 else:
                     shared_up = 0
                     shared_down = 0
@@ -902,7 +939,8 @@ class BulkDEGAnalysis(BaseAnalysis):
                 gene_id_to_name, plots_dir, results_dir,
                 viz_params=self.params.get('_visualization', {}),
                 cooks_filter=cooks_filter, independent_filter=independent_filter,
-                padj_method=padj_method, base_mean_filter=base_mean_filter)
+                padj_method=padj_method, base_mean_filter=base_mean_filter,
+                figure_params=self.params)
             result_files.extend(files)
 
             # 箱线图
@@ -948,6 +986,12 @@ class BulkDEGAnalysis(BaseAnalysis):
                        gene_id_to_name, counts, adata, plots_dir, result_files):
         import matplotlib.pyplot as plt
         from modules.figure_style import NATURE_PALETTE, NATURE_TEXT, NATURE_GRID
+        from figure_engine import NatureFigureDirector, export_registered_figure
+
+        director = NatureFigureDirector()
+        results_dir = os.path.join(self.project_dir, 'results')
+        os.makedirs(results_dir, exist_ok=True)
+        nature_formats = ('svg', 'pdf', 'png')
 
         boxplot_n = min(int(self.params.get('boxplot_n', 5)), 20)
         # 预构建索引映射（O(1) 查找）
@@ -987,25 +1031,22 @@ class BulkDEGAnalysis(BaseAnalysis):
             for grp_name, samples in [(group1, group1_samples), (group2, group2_samples)]:
                 sample_indices = [obs_idx[s] for s in samples if s in obs_idx]
                 groups_values.append(counts[sample_indices, var_idx[pg_id]])
-            fig_box, ax_box = plt.subplots(figsize=(5.5, 4.5), dpi=150)
-            boxes = ax_box.boxplot(groups_values, tick_labels=[str(group1), str(group2)],
-                                   patch_artist=True, showfliers=False)
-            for patch, color in zip(boxes['boxes'], [NATURE_PALETTE[0], NATURE_PALETTE[3]]):
-                patch.set_facecolor(color)
-                patch.set_alpha(0.62)
-                patch.set_edgecolor(color)
-            for idx, vals in enumerate(groups_values, 1):
-                jitter = np.linspace(-0.08, 0.08, len(vals)) if len(vals) else []
-                ax_box.scatter(np.full(len(vals), idx) + jitter, vals, s=14,
-                               color='#667085', alpha=0.55, linewidths=0)
-            ax_box.set_title(f'{pg} 表达', loc='left', fontsize=10,
-                             fontweight='semibold', color=NATURE_TEXT)
-            ax_box.set_ylabel('Expression', fontsize=9)
-            ax_box.grid(axis='y', color=NATURE_GRID, linewidth=0.5, alpha=0.7)
-            result_files.extend(_save_native_figure(
-                fig_box, plots_dir, f'bulk_deg_box_{pg}', 'boxplot',
-                f'{pg} Boxplot', self.params.get('_visualization', {}),
-            ))
+            box_spec = director.spec_from_params(
+                'diagnostic', self.params, width='single', title=f'{pg} expression',
+            ).with_updates(extra={'kind': 'boxplot'}, formats=nature_formats, height_mm=68.0)
+            fig_box = director.render(box_spec, {
+                'kind': 'boxplot', 'groups': [str(group1), str(group2)],
+                'values': groups_values, 'ylabel': 'Expression',
+            })
+            exported, report = export_registered_figure(
+                fig_box, os.path.join(plots_dir, f'bulk_deg_box_{pg}'), box_spec,
+                category='boxplot', label=f'{pg} Boxplot',
+                qa_path=os.path.join(results_dir, f'bulk_deg_box_{pg}_nature_readiness.json'),
+            )
+            result_files.extend(exported)
+            if not report.ready:
+                self.progress(-1, f'{pg} 箱线图 Nature readiness {report.score}/100；请查看 QA 报告。')
+            plt.close(fig_box)
         if unmatched_genes:
             import logging
             logging.getLogger(__name__).warning(f"[bulk_deg] 以下基因未找到，已跳过箱线图: {', '.join(unmatched_genes)}")

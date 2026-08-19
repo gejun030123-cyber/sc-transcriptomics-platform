@@ -75,6 +75,12 @@ class Config:
     MIN_FREE_RAM_GB = float(os.environ.get('MIN_FREE_RAM_GB', '4'))
     CUDA_DEVICES = os.environ.get('CUDA_DEVICES', '0,1')
 
+    # Server-resident 10x data are intentionally opt-in.  A web request may
+    # only refer to a directory beneath one of these administrator configured
+    # roots; arbitrary absolute paths and symlinks remain disallowed.  Example:
+    # SC_BATCH_SOURCE_ROOTS=/home/oelab/data/GJ:/mnt/sc_data
+    SC_BATCH_SOURCE_ROOTS = os.environ.get('SC_BATCH_SOURCE_ROOTS', '')
+
     # AI 对话配置（支持 OpenAI compatible 和 Anthropic messages compatible API）
     AI_API_KEY = os.environ.get('AI_API_KEY', '')
     AI_API_URL = os.environ.get('AI_API_URL', 'https://token-plan-cn.xiaomimimo.com/anthropic')
@@ -169,6 +175,59 @@ class Config:
         if not real_path.startswith(proj_dir + os.sep) and real_path != proj_dir:
             return False, f"路径不在项目目录内: {path}"
         return True, None
+
+    @classmethod
+    def sc_batch_source_roots(cls):
+        """Return canonical administrator-approved roots for batch 10x input.
+
+        Read the environment on each call so a long-running development server
+        can be configured without importing arbitrary filesystem paths into the
+        application at module import time.  Empty by default is the safe mode.
+        """
+        raw = os.environ.get('SC_BATCH_SOURCE_ROOTS', cls.SC_BATCH_SOURCE_ROOTS)
+        roots = []
+        for item in str(raw or '').split(os.pathsep):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                root = os.path.realpath(item)
+            except (OSError, ValueError):
+                continue
+            if os.path.isdir(root) and root not in roots:
+                roots.append(root)
+        return tuple(roots)
+
+    @classmethod
+    def validate_sc_batch_source_path(cls, path, *, require_directory=True):
+        """Validate a server-side batch source against ``SC_BATCH_SOURCE_ROOTS``.
+
+        This is deliberately separate from ``_validate_path``: batch input is
+        read-only and can live on a mounted data volume, while all platform
+        outputs still remain beneath the project directory.
+        """
+        if not path:
+            raise ValueError('缺少服务器数据目录')
+        roots = cls.sc_batch_source_roots()
+        if not roots:
+            raise ValueError(
+                '服务器目录批量导入尚未启用；管理员需在 .env 中设置 '
+                'SC_BATCH_SOURCE_ROOTS（例如 /home/oelab/data/GJ）'
+            )
+        try:
+            supplied = os.path.abspath(str(path))
+            resolved = os.path.realpath(supplied)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f'服务器目录解析失败: {exc}') from exc
+        if os.path.islink(supplied):
+            raise ValueError('服务器批量导入不接受符号链接路径')
+        allowed = any(resolved == root or resolved.startswith(root + os.sep)
+                      for root in roots)
+        if not allowed:
+            raise ValueError('服务器目录不在允许的 SC_BATCH_SOURCE_ROOTS 下')
+        if require_directory and not os.path.isdir(resolved):
+            raise ValueError(f'服务器目录不存在或不是目录: {path}')
+        return resolved
 
 
 # Apply the non-root temporary directory before Scanpy, Matplotlib, or worker

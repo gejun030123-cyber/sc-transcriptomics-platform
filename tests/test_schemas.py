@@ -15,8 +15,8 @@ class TestModuleMetadata:
     """测试模块元数据定义。"""
 
     def test_sc_module_count(self):
-        """单细胞模块有 14 个。"""
-        assert len(SC_MODULE_LIST) == 14
+        """单细胞模块有 18 个。"""
+        assert len(SC_MODULE_LIST) == 18
 
     def test_bulk_module_count(self):
         """Bulk 模块有 8 个。"""
@@ -202,6 +202,21 @@ class TestParseFormParams:
             'method': 'bbknn',
             'bbknn_neighbors_within_batch': 4.0,
         }
+
+    def test_bulk_heatmap_defaults_to_auto_scope_and_exposes_comparison_for_top_var(self):
+        schema = PARAM_SCHEMAS['bulk_heatmap']
+        by_key = {item['key']: item for item in schema}
+
+        assert by_key['sample_display_mode']['default'] == 'auto'
+        assert by_key['deg_comparison']['show_if'] == {
+            'gene_import_source': ['top_var', 'deg'],
+        }
+        params = parse_form_params(schema, {
+            'gene_import_source': 'top_var',
+            'deg_comparison': '/project/results/bulk_deg_results_0.csv',
+        })
+        assert params['sample_display_mode'] == 'auto'
+        assert params['deg_comparison'].endswith('bulk_deg_results_0.csv')
 
     def test_organoid_type_is_active_only_for_organoid_panel(self):
         """类器官类型只在选择 Organoid 面板时传入后端。"""

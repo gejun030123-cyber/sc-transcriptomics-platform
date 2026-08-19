@@ -152,6 +152,122 @@ def test_enrichment_version_uses_selected_ontology_colours(test_project):
     assert '#123456' in open(version.svg_path, encoding='utf-8').read().lower()
 
 
+def test_enrichment_chord_source_keeps_semantic_renderer_and_target_selection(test_project):
+    from config import Config
+    from models import AnalysisTask, ResultFile
+    from modules.figure_studio import render_preview_data_uri, resolve_source, save_figure_version
+
+    results_dir = Config.results_dir(test_project)
+    os.makedirs(results_dir, exist_ok=True)
+    plot_path = os.path.join(results_dir, 'enrichment_ora_go_bp_nh4cl_chord.png')
+    _write_png(plot_path)
+    table_path = os.path.join(results_dir, 'enrichment_ora_go_bp_nh4cl_results.csv')
+    with open(table_path, 'w', encoding='utf-8') as handle:
+        handle.write(
+            'Database,Method,Direction,Term,Adjusted P-value,Overlap,Genes\n'
+            'GO_BP,ORA,All,Extracellular matrix organization (GO:0005581),0.001,4/120,COL1A1;MMP2\n'
+            'GO_BP,ORA,All,Cell migration (GO:0016477),0.008,3/120,SPP1;MMP2\n'
+        )
+    task = AnalysisTask(project_id=test_project, module_name='bulk_enrichment', status='completed')
+    task.save()
+    result = ResultFile.create(task_id=task.id, project_id=test_project, file_type='png',
+                               category='enrichment', label='GO BP ORA · chord', file_path=plot_path)
+
+    source = resolve_source(test_project, 'result_file', result.id)
+    assert source['edit_mode'] == 'bulk_enrichment'
+    assert source['plot_type'] == 'enrichment_chord'
+    preview = render_preview_data_uri(source, {
+        'enrichment_pathway_selection': 'selected',
+        'enrichment_target_pathways': 'GO:0005581',
+        'enrichment_gene_label_strategy': 'all',
+    })
+    assert preview['edit_mode'] == 'data_redraw'
+    version = save_figure_version(test_project, source, {
+        'enrichment_pathway_selection': 'selected',
+        'enrichment_target_pathways': 'GO:0005581',
+    }, 'selected chord pathway')
+    svg_text = open(version.svg_path, encoding='utf-8').read()
+    assert 'Extracellular' in svg_text
+    assert 'Cell migration' not in svg_text
+
+
+def test_enrichment_dotplot_source_stays_dotplot_in_figure_studio(test_project):
+    """The dotplot preview must not silently fall back to the legacy barplot."""
+    from config import Config
+    from models import AnalysisTask, ResultFile
+    from modules.figure_studio import render_preview_data_uri, resolve_source, save_figure_version
+
+    results_dir = Config.results_dir(test_project)
+    os.makedirs(results_dir, exist_ok=True)
+    # Current analysis runs use the unsuffixed primary image stem; its
+    # GeneRatio/Count table is what lets Figure Studio distinguish it from
+    # legacy Overlap-only barplots.
+    plot_path = os.path.join(results_dir, 'enrichment_ora_go_bp.png')
+    _write_png(plot_path)
+    table_path = os.path.join(results_dir, 'enrichment_ora_go_bp_results.csv')
+    with open(table_path, 'w', encoding='utf-8') as handle:
+        handle.write(
+            'Database,Method,Direction,Term,Adjusted P-value,GeneRatio,Count,Genes\n'
+            'GO_BP,ORA,All,Extracellular matrix organization (GO:0005581),0.001,0.05,12,COL1A1;MMP2\n'
+            'GO_BP,ORA,All,Cell migration (GO:0016477),0.008,0.03,8,SPP1;MMP2\n'
+        )
+    task = AnalysisTask(project_id=test_project, module_name='bulk_enrichment', status='completed')
+    task.save()
+    result = ResultFile.create(task_id=task.id, project_id=test_project, file_type='png',
+                               category='enrichment', label='GO BP ORA · dotplot', file_path=plot_path)
+
+    source = resolve_source(test_project, 'result_file', result.id)
+    assert source['edit_mode'] == 'bulk_enrichment'
+    assert source['plot_type'] == 'enrichment_dotplot'
+    preview = render_preview_data_uri(source, {
+        'enrichment_pathway_selection': 'selected',
+        'enrichment_target_pathways': 'GO:0005581',
+    })
+    assert preview['edit_mode'] == 'data_redraw'
+    version = save_figure_version(test_project, source, {
+        'enrichment_pathway_selection': 'selected',
+        'enrichment_target_pathways': 'GO:0005581',
+    }, 'selected dotplot pathway')
+    svg_text = open(version.svg_path, encoding='utf-8').read()
+    assert 'Gene ratio' in svg_text
+    assert 'Cell migration' not in svg_text
+    assert '-log10(adjusted P-value)' not in svg_text
+
+
+def test_enrichment_overview_source_uses_integrated_table_and_database_scope(test_project):
+    from config import Config
+    from models import AnalysisTask, ResultFile
+    from modules.figure_studio import render_preview_data_uri, resolve_source
+
+    results_dir = Config.results_dir(test_project)
+    plots_dir = Config.plots_dir(test_project)
+    os.makedirs(results_dir, exist_ok=True)
+    os.makedirs(plots_dir, exist_ok=True)
+    plot_path = os.path.join(plots_dir, 'enrichment_overview_ora_demo_all.png')
+    _write_png(plot_path)
+    table_path = os.path.join(results_dir, 'enrichment_integrated_results.csv')
+    with open(table_path, 'w', encoding='utf-8') as handle:
+        handle.write(
+            'Comparison,Database,Method,Direction,Term,Enrichment FDR,GeneRatio,num,Genes\n'
+            'demo,GO_BP,ORA,All,Matrix organization (GO:0001),0.001,0.05,12,A;B\n'
+            'demo,KEGG,ORA,All,ECM interaction (KEGG:hsa0007),0.004,0.03,8,C;D\n'
+        )
+    task = AnalysisTask(project_id=test_project, module_name='bulk_enrichment', status='completed')
+    task.save()
+    result = ResultFile.create(task_id=task.id, project_id=test_project, file_type='png',
+                               category='enrichment_overview', label='多数据库富集概览', file_path=plot_path)
+
+    source = resolve_source(test_project, 'result_file', result.id)
+    assert source['edit_mode'] == 'bulk_enrichment_overview'
+    assert source['plot_type'] == 'enrichment_overview'
+    preview = render_preview_data_uri(source, {
+        'enrichment_database_scope': 'KEGG',
+        'enrichment_pathway_selection': 'selected',
+        'enrichment_target_pathways': 'KEGG:hsa0007',
+    })
+    assert preview['edit_mode'] == 'data_redraw'
+
+
 def test_correlation_version_supports_colormap_editing(test_project):
     from config import Config
     from models import AnalysisTask, ResultFile

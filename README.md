@@ -25,7 +25,7 @@
 
 ### 单细胞转录组分析
 
-平台提供 14 个单细胞模块。核心顺序为：
+平台提供 14 个核心单细胞分析模块，并补充批量导入、细胞级 DEG、GO 富集、pseudobulk DEG 和标准 CSV 结果包等交付模块。核心顺序为：
 
 ```text
 qc -> normalize -> hvg -> dimred -> batch_correct -> clustering
@@ -131,7 +131,20 @@ resolution 0.8 的单核细胞群太混，帮我设计几个候选参数。
 - `.csv`、`.txt`、`.tsv`：表达矩阵或样本表。
 - `.xlsx`、`.xls`：Bulk 表达矩阵。
 - `.mtx.gz` / 10x 文件组合：上传 `barcodes.tsv(.gz)`、`features.tsv(.gz)` 或 `genes.tsv(.gz)`、`matrix.mtx(.gz)` 后可转换为 `.h5ad`。
-- 两批次 10x ZIP：上传两个分别包含 `filtered_feature_bc_matrix` 的 ZIP，平台会解压、添加 `obs["batch"]`，并合并为一个标准 `.h5ad`。
+- 多批次 10x ZIP：上传两个或更多分别包含 `filtered_feature_bc_matrix` 的 ZIP，平台会解压、添加 `obs["batch"]`，并合并为一个标准 `.h5ad`。
+- 服务器目录批量 10x：管理员配置 `SC_BATCH_SOURCE_ROOTS` 后，可从网页递归扫描大量 10x 目录、下载并填写样本 manifest（`sample_id,matrix_dir,condition,replicate,batch`），再合并为标准 `.h5ad`。目录名不会被自动当作生物学分组。
+
+批量单细胞 CSV 导出在完成常规分析后提供：`sc_csv_export` 导出细胞元数据、样本设计、样本级 pseudobulk counts/log2(CPM+1)、样本×聚类比例和比较注册表。若只需要交付前两类结果，选择 `proportions_expression`，结果包仅创建 `01_group_proportions` 与 `02_gene_expression`，不会产生 DEG、GO 或比较注册表。当前只有一份对照和一份实验样本时，使用 `sc_cell_deg`：默认每个 `A-vs-B` 同时输出 `all_cells`（全部细胞）和 `per_cluster`（各 Leiden 簇）的完整单细胞级 `log2FC` 与 `p.adjust` CSV，供火山图和热图使用；随后运行 `sc_cell_go`。它默认使用服务器本地 GMT/TXT 基因集，不上传 DEG，且可分别执行 BP、CC、MF；按簇 GO 在同一文件内以 `cluster` 列区分。两者均明确标记为探索性细胞级结果。`sc_pseudobulk_deg` 保留给以后具有独立生物学重复的样本级分析。
+
+使用同一个“结果包文件夹”（默认 `sc_batch_results`）时，所有输出会整理为：
+
+```text
+results/sc_batch_results/
+  01_group_proportions/      # 样本设计、细胞元数据、样本×Leiden 簇比例
+  02_gene_expression/        # pseudobulk raw counts、log2(CPM+1)
+  03_differential_expression/# 每个 comparison 的 DEG、比较注册表
+  04_go_enrichment/          # GO 结果；未运行/不可运行时含状态表
+```
 
 项目目录结构遵循：
 
@@ -147,31 +160,29 @@ data/projects/<project_id>/
 
 ## 安装与启动
 
-项目提供 `requirements.txt` 作为非锁定依赖清单，但没有 `pyproject.toml` 或锁定版本文件。建议在独立 conda/venv 环境中安装依赖，并根据需要补充可选包。
+建议使用 Python 3.10+ 和独立虚拟环境。`requirements.txt` 是非锁定依赖清单，包含核心运行包和注释、通讯、批次整合、AI 等扩展功能所需的可选包；生产部署应在验证环境后生成自己的锁定文件。
 
 ```bash
 git clone https://github.com/gejun030123-cyber/sc-transcriptomics-platform.git
 cd sc-transcriptomics-platform
 
-pip install flask flask-cors scanpy anndata omicverse plotly psutil scipy statsmodels patsy scikit-learn matplotlib pandas numpy
-pip install gseapy pydeseq2 inmoose
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+python app.py
 ```
 
 可选依赖：
 
 - `celltypist`：启用本地人类 CellTypist 参考交叉验证；类器官注释不把外部模型作为默认真值，冲突结果保留人工复核。
 - `liana`：启用细胞通讯分析；未安装时该任务会明确返回 `unavailable` 和安装提示，不会伪装成成功。
-- `gseapy`：仅用于子簇通路富集和 Bulk 富集的兼容旧路径；未安装时核心聚类、差异分析和当前 OmicVerse/本地基因集富集路径仍可使用。
+- `gseapy`：用于本地 GMT/TXT 过度富集分析，以及子簇/Bulk 的兼容富集路径；未安装时核心聚类和差异分析仍可使用。
 - `harmonypy`、`bbknn`、`scanorama`、`scvi-tools`、`torch`：启用 Harmony、BBKNN、Scanorama、SysVI/scVI 批次整合路径；未安装时对应方法不可用。
 - `kneed`：启用 Kneedle 自动 PC 选择。
 - `plotly`：仅用于兼容历史分析模块的内部数据结构；网页、报告和下载结果均不再输出 Plotly 交互图。
 - `openai` 或 `anthropic`：启用对应 AI API 客户端。
-
-启动服务：
-
-```bash
-python app.py
-```
 
 默认访问地址：
 
@@ -236,13 +247,14 @@ AI_API_TOKEN=""
 ### 单细胞网页流程
 
 1. 创建项目。
-2. 上传 `.h5ad`、10x `.h5`、10x 三文件、`.loom` 或 `.zarr` 数据，并在上传页导入为标准 `.h5ad`。
+2. 上传 `.h5ad`、10x `.h5`、10x 三文件、`.loom` 或 `.zarr` 数据，并在上传页导入为标准 `.h5ad`。大量服务器 10x 样本使用“服务器目录批量 10x 导入”：先扫描、填写 manifest，再合并导入。
 3. 执行 `qc`、`normalize`、`hvg`、`dimred`。
 4. 执行 `clustering` 并查看多分辨率 UMAP、Sankey 和带标签 cluster UMAP。
 5. 执行 `qc_reassess` 检查低质量簇。
 6. 执行 `annotation`，选择 `PBMC`、`Immune`、`Blood`、`TME` 或自定义 marker。
 7. 执行 `deg`，检查 marker heatmap、火山图和完整 DEG CSV。
 8. 根据项目需要继续 `trajectory`、`proportion`、`cell_communication`。
+9. 若需交给下游结果平台，依次运行 `sc_cell_deg`（每个条件比较独立的单细胞级 DEG CSV）、`sc_cell_go`（每个比较一份 GO CSV）和最后的 `sc_csv_export`（统一 CSV 数据包）；有生物学重复时可另选 `sc_pseudobulk_deg`。
 
 ### Bulk 网页流程
 
@@ -277,7 +289,9 @@ AI_API_TOKEN=""
 | `/api/projects/<pid>/adata-info` | `GET` | 获取当前 AnnData 信息 |
 | `/api/result-file/<file_id>` | `GET` | 下载 PNG、SVG、CSV 或其他结果文件 |
 | `/projects/<pid>/figure-studio` | `GET` | 打开非破坏性图形工作台 |
-| `/projects/<pid>/upload/import-10x-batches` | `POST` | 接收两个 `batch_zip` 和两个 `batch_name`，合并为带 `batch` 列的 h5ad |
+| `/projects/<pid>/upload/import-10x-batches` | `POST` | 接收两个或更多 `batch_zip`，合并为带 `batch` 列的 h5ad |
+| `/projects/<pid>/upload/discover-10x-directory` | `POST` | 在允许的服务器目录内扫描 10x 矩阵并生成 manifest 模板 |
+| `/projects/<pid>/upload/import-10x-manifest` | `POST` | 校验已填写的 sample manifest 后异步合并任意多个 10x 样本 |
 | `/api/projects/<pid>/pipeline-runs` | `POST/GET` | 创建或列出批量 pipeline run |
 | `/api/pipeline-runs/<run_id>/status` | `GET` | 查看 pipeline run 状态 |
 | `/api/projects/<pid>/current-context` | `GET` | 查看当前分析基线 |
@@ -380,6 +394,15 @@ modules/
   bulk_qc.py ...            # Bulk 分析模块
   convert_10x.py            # 10x 转换模块
 
+figure_engine/              # 确定性的 Nature Figure Engine
+  director.py               # 科学参数 -> FigureSpec -> 固定模板
+  composer.py               # SubFigure 多 panel、panel label、共享图例
+  validator.py              # 90 分投稿门禁、重叠/裁切/导出 QA
+  accessibility.py          # 色觉模拟与色板可分辨性检查
+  style/                    # Nature/Nature Communications/Nature Aging
+  templates/                # PCA、Volcano、Heatmap、GSEA/ORA、MA、Correlation、
+                            # GSVA/ssGSEA、UpSet、WGCNA
+
 templates/                  # Jinja2 页面模板
 tests/                      # 单元、集成、语义和 Agent 测试
 scripts/                    # 参考流程和工具脚本
@@ -387,6 +410,17 @@ docs/                       # 设计、计划和审批文档
 genesets/                   # 通路基因集资源
 data/                       # 本地项目数据，默认不纳入 git
 ```
+
+## 仓库与本地数据边界
+
+Git 仓库只保存源代码、模板、测试和维护文档。以下内容只属于本地运行环境，默认由 `.gitignore` 排除：
+
+- `data/`、`instance/`、`cache/`：用户数据、SQLite 数据库、中间矩阵和运行缓存。
+- `bulk_reference_output*/`、`artifacts/`：参考流程、图形验证和导出产物，可由脚本重新生成。
+- `.env`：本地密钥和部署参数，禁止提交。
+- Python/pytest 缓存、覆盖率输出、安装包以及根目录下自动生成的运行报告。
+
+需要分享分析结果时，请从项目结果页导出，或使用 `sc_csv_export` 等交付模块生成独立结果包，不要把大型 `.h5ad`、原始矩阵或含样本信息的运行目录直接提交到 Git。
 
 ## 配置项
 
@@ -399,6 +433,7 @@ data/                       # 本地项目数据，默认不纳入 git
 | `MAX_WORKERS` | `2` | 后台分析任务并发数 |
 | `MIN_FREE_RAM_GB` | `4` | 资源保护阈值 |
 | `CUDA_DEVICES` | `0,1` | GPU 设备配置 |
+| `SC_BATCH_SOURCE_ROOTS` | 空（关闭） | 可供网页只读批量导入的服务器数据根目录；Linux 多个根用 `:` 分隔，例如 `/home/oelab/data/GJ:/mnt/sc_data` |
 | `AI_API_KEY` | 空 | AI API key |
 | `AI_API_URL` | 默认兼容 Anthropic 的 URL | AI API endpoint；DeepSeek 可用 `https://api.deepseek.com/anthropic` |
 | `AI_MODEL` | `mimo-v2.5-pro` | AI 模型名；DeepSeek 常用 `deepseek-chat` |
@@ -411,7 +446,3 @@ data/                       # 本地项目数据，默认不纳入 git
 - marker 评分用于辅助判断“最接近某细胞类型的 cluster”，不是人工注释或实验验证的替代。
 - LIANA、scVI、SysVI、DESeq2/edgeR/limma 等路径依赖对应包和环境；缺失时平台会在依赖接口或任务 summary 中说明具体不可用能力和下一步安装提示。
 - 大型分析输出建议保留在 `data/` 或外部结果目录，不建议直接提交到 git。
-
-## License
-
-MIT

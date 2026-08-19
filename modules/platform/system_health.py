@@ -58,6 +58,11 @@ MODULE_DEPENDENCIES = {
     "sc_timecourse": ["anndata", "pandas", "scipy"],
     "proportion": ["anndata", "pandas", "scipy"],
     "cell_communication": ["scanpy", "liana"],
+    "sc_batch_import": ["anndata", "pandas", "scanpy"],
+    "sc_cell_deg": ["scanpy", "pandas"],
+    "sc_cell_go": ["pandas", "gseapy"],
+    "sc_pseudobulk_deg": ["anndata", "pandas", "scipy", "statsmodels"],
+    "sc_csv_export": ["anndata", "pandas"],
     "bulk_qc": ["anndata", "pandas"],
     "bulk_normalize": ["numpy", "pandas"],
     "bulk_pca": ["anndata", "pandas", "scikit-learn"],
@@ -84,6 +89,9 @@ MODULE_OPTIONAL_DEPENDENCIES = {
     "annotation": [("celltypist", "CellTypist 参考交叉验证")],
     "bulk_deg": [("inmoose", "DESeq2/edgeR/limma 兼容统计方法")],
     "bulk_enrichment": [("gseapy", "兼容旧版 Enrichr 富集路径")],
+    "sc_pseudobulk_deg": [
+        ("pydeseq2", "DESeq2 pseudobulk 统计；缺失时回退 Welch log2CPM"),
+    ],
 }
 
 

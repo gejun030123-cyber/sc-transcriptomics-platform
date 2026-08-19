@@ -14,7 +14,8 @@ from modules.figure_style import (
     NATURE_TEXT,
     nature_continuous_cmap,
     nature_rcparams,
-    NATURE_CJK_FONT_PATH,
+    register_nature_cjk_font,
+    stable_category_colors,
 )
 
 # Apply the shared font contract before any native canvas is constructed.  This
@@ -22,9 +23,7 @@ from modules.figure_style import (
 # BaseAnalysis.save_matplotlib_figure has a chance to normalize the figure.
 try:
     import matplotlib as _mpl
-    from matplotlib import font_manager as _font_manager
-    if __import__('os').path.isfile(NATURE_CJK_FONT_PATH):
-        _font_manager.fontManager.addfont(NATURE_CJK_FONT_PATH)
+    register_nature_cjk_font()
     _mpl.rcParams.update(nature_rcparams())
 except Exception:
     pass
@@ -101,7 +100,7 @@ def apply_sample_tick_labels(ax, labels, axis='x', max_labels=18, positions=None
 
 def plot_umap_axis(ax, adata, color_key, title='', basis='X_umap',
                    point_size=7, opacity=0.78, show_legend=True,
-                   label_categories=False):
+                   label_categories=False, hide_axes=True):
     """Draw one Nature-style UMAP panel on an existing axis."""
     coords = np.asarray(adata.obsm[basis])[:, :2]
     values = adata.obs[color_key] if color_key in adata.obs.columns else None
@@ -124,13 +123,17 @@ def plot_umap_axis(ax, adata, color_key, title='', basis='X_umap',
         colorbar.set_label(str(color_key), fontsize=8, labelpad=5)
     else:
         categorical = _as_categories(values)
+        color_map = stable_category_colors(
+            [str(category) for category in categorical.cat.categories],
+            existing=adata.uns.get(f'{color_key}_colors', []),
+        )
         for index, category in enumerate(categorical.cat.categories):
             mask = np.asarray(categorical == category)
             if not mask.any():
                 continue
             ax.scatter(
                 coords[mask, 0], coords[mask, 1], s=point_size,
-                color=NATURE_PALETTE[index % len(NATURE_PALETTE)],
+                color=color_map.get(str(category), NATURE_PALETTE[index % len(NATURE_PALETTE)]),
                 alpha=opacity, linewidths=0, rasterized=True,
                 label=str(category),
             )
@@ -144,7 +147,7 @@ def plot_umap_axis(ax, adata, color_key, title='', basis='X_umap',
                           'edgecolor': '#D0D5DD', 'alpha': 0.82, 'linewidth': 0.5},
                     zorder=5,
                 )
-        if show_legend and len(categorical.cat.categories):
+        if show_legend and len(categorical.cat.categories) and not label_categories:
             legend = ax.legend(
                 loc='center left', bbox_to_anchor=(1.01, 0.5), frameon=False,
                 fontsize=7, markerscale=1.15, borderaxespad=0,
@@ -158,28 +161,32 @@ def plot_umap_axis(ax, adata, color_key, title='', basis='X_umap',
     ax.set_ylabel('UMAP 2', fontsize=9, color=NATURE_TEXT)
     ax.margins(0.035)
     _style_axis(ax)
+    if hide_axes:
+        ax.set_xticks([])
+        ax.set_yticks([])
     return ax
 
 
 def umap_figure(adata, color_key, title='', basis='X_umap',
-                point_size=7, opacity=0.78, label_categories=False):
+                point_size=7, opacity=0.78, label_categories=False,
+                hide_axes=True):
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(8, 5.5), dpi=150)
     plot_umap_axis(
         ax, adata, color_key, title=title, basis=basis,
         point_size=point_size, opacity=opacity,
-        label_categories=label_categories,
+        label_categories=label_categories, hide_axes=hide_axes,
     )
     import pandas as pd
     is_numeric = pd.api.types.is_numeric_dtype(adata.obs[color_key])
-    fig.subplots_adjust(left=0.10, right=0.80 if not is_numeric else 0.93,
+    fig.subplots_adjust(left=0.10, right=0.80 if not is_numeric and not label_categories else 0.93,
         bottom=0.11, top=0.88)
     return fig
 
 
 def umap_panel_figure(adata, color_keys, titles=None, basis='X_umap',
-                      point_size=5, opacity=0.72, ncols=3):
+                      point_size=5, opacity=0.72, ncols=3, hide_axes=True):
     import matplotlib.pyplot as plt
 
     color_keys = [key for key in color_keys if key in adata.obs.columns]
@@ -198,7 +205,7 @@ def umap_panel_figure(adata, color_keys, titles=None, basis='X_umap',
             axes_flat[index], adata, key,
             title=titles[index] if index < len(titles) else str(key),
             basis=basis, point_size=point_size, opacity=opacity,
-            show_legend=False,
+            show_legend=False, hide_axes=hide_axes,
         )
     for ax in axes_flat[len(color_keys):]:
         ax.set_visible(False)

@@ -288,7 +288,7 @@ def enrichment_result(task_id, pid=None):
     if task.project_id != pid:
         return jsonify({'error': 'Task 不属于该项目'}), 403
     files = ResultFile.get_by_task(task_id)
-    enrichment_files = [f for f in files if f.category == 'enrichment' and f.file_type in {'png', 'svg'}]
+    enrichment_files = [f for f in files if f.category == 'enrichment' and f.file_type in {'png', 'svg', 'pdf', 'tiff'}]
     result = []
     for f in enrichment_files:
         if f.project_id != task.project_id or not _validate_project_file_path(f.file_path, f.project_id):
@@ -825,7 +825,7 @@ def create_pipeline_run(pid):
         for key, val in params.items():
             if key not in ('qc', 'normalize', 'hvg', 'dimred', 'batch_correct',
                           'clustering', 'subcluster', 'qc_reassess', 'annotation', 'deg',
-                          'trajectory', 'sc_timecourse', 'proportion', 'cell_communication',
+                          'sc_cell_deg', 'sc_cell_go', 'sc_pseudobulk_deg', 'trajectory', 'sc_timecourse', 'proportion', 'cell_communication', 'sc_csv_export',
                           'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca',
                           'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
                           'bulk_deg_integration', 'convert_10x'):

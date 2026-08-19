@@ -15,6 +15,11 @@
     .versions a { font-size:.8rem; }
     .form-label { font-size:.78rem; margin-bottom:3px; color:#475467; }
     .compact-input { font-size:.84rem; }
+    .enrichment-term-picker { max-height:230px; overflow-y:auto; background:#fcfcfd; }
+    .enrichment-term-row { display:flex; align-items:flex-start; gap:7px; padding:5px 6px; border-bottom:1px solid #eaecf0; font-size:.76rem; }
+    .enrichment-term-row:last-child { border-bottom:0; }
+    .enrichment-term-meta { color:#667085; font-size:.7rem; }
+    .enrichment-selected { min-height:26px; }
     @media (max-width: 1080px) { .studio-layout { grid-template-columns:1fr; } .preview-wrap { min-height:360px; } }
 </style>
 {% endblock %}
@@ -154,14 +159,20 @@
         </div>
 
         <div id="enrichment-controls" class="control-section data-only special-controls" style="display:none">
-            <h6>通路富集配色</h6>
-            <p class="hint mb-2">颜色表示通路数据库/本体类别，不表示显著性；横条长度仍表示显著性或 GSEA 分数。</p>
-            <div class="row g-2"><div class="col-7"><label for="enrichment-top-n" class="form-label">展示通路数</label><input id="enrichment-top-n" type="number" min="3" max="50" value="20" class="form-control compact-input style-field"></div></div>
+            <h6>通路富集重绘</h6>
+            <p class="hint mb-2">颜色表示通路数据库/本体类别，不表示显著性；可指定目标通路，完整结果表不受影响。</p>
+            <div class="row g-2"><div class="col-4"><label for="enrichment-top-n" class="form-label">详情图通路数</label><input id="enrichment-top-n" type="number" min="3" max="50" value="20" class="form-control compact-input style-field"></div><div class="col-4"><label for="enrichment-overview-top-n" class="form-label">概览每库数</label><input id="enrichment-overview-top-n" type="number" min="3" max="20" value="8" class="form-control compact-input style-field"></div><div class="col-4"><label for="enrichment-pathway-selection" class="form-label">通路选择</label><select id="enrichment-pathway-selection" class="form-select compact-input style-field"><option value="top">自动 Top</option><option value="selected">仅目标通路</option><option value="selected_plus_top">目标通路 + Top</option></select></div></div>
+            <div class="mt-2"><label for="enrichment-database-scope" class="form-label">数据库范围</label><select id="enrichment-database-scope" class="form-select compact-input style-field"><option value="">全部数据库</option></select><div class="hint mt-1">概览图可筛选数据库；详情图通常只有一个数据库。</div></div>
+            <div class="mt-2"><label for="enrichment-term-search" class="form-label">搜索并选择目标通路</label><input id="enrichment-term-search" class="form-control compact-input" placeholder="输入 term 名称或 GO/KEGG ID"><div id="enrichment-term-picker" class="border rounded mt-1 enrichment-term-picker"><span class="text-muted small p-2 d-block">选择富集图后加载通路。</span></div></div>
+            <div class="mt-2"><label for="enrichment-target-pathways" class="form-label">已选通路（可编辑）</label><textarea id="enrichment-target-pathways" class="form-control compact-input style-field" rows="2" placeholder="从上方勾选，或输入通路名称、GO/KEGG ID"></textarea></div>
+            <div class="row g-2 mt-1"><div class="col-5"><label for="enrichment-gene-label-strategy" class="form-label">基因标签</label><select id="enrichment-gene-label-strategy" class="form-select compact-input style-field"><option value="all">全部</option><option value="shared">共享基因</option><option value="selected">指定基因</option><option value="none">不显示</option></select></div><div class="col-7"><label for="enrichment-max-gene-labels" class="form-label">最大基因标签数</label><input id="enrichment-max-gene-labels" type="number" min="0" max="80" value="30" class="form-control compact-input style-field"></div></div>
+            <div class="mt-2"><label for="enrichment-target-genes" class="form-label">目标基因（可选）</label><textarea id="enrichment-target-genes" class="form-control compact-input style-field" rows="2" placeholder="基因符号；逗号或换行分隔"></textarea></div>
             <div class="row g-2 mt-1">
-                <div class="col-3"><label for="enrichment-bp-color" class="form-label">BP</label><input id="enrichment-bp-color" type="color" value="#fdbe85" class="form-control form-control-color style-field"></div>
-                <div class="col-3"><label for="enrichment-mf-color" class="form-label">MF</label><input id="enrichment-mf-color" type="color" value="#b8a9d1" class="form-control form-control-color style-field"></div>
-                <div class="col-3"><label for="enrichment-kegg-color" class="form-label">KEGG</label><input id="enrichment-kegg-color" type="color" value="#7bc77b" class="form-control form-control-color style-field"></div>
-                <div class="col-3"><label for="enrichment-other-color" class="form-label">其他</label><input id="enrichment-other-color" type="color" value="#9cb8d8" class="form-control form-control-color style-field"></div>
+                <div class="col"><label for="enrichment-bp-color" class="form-label">BP</label><input id="enrichment-bp-color" type="color" value="#fdbe85" class="form-control form-control-color style-field"></div>
+                <div class="col"><label for="enrichment-cc-color" class="form-label">CC</label><input id="enrichment-cc-color" type="color" value="#7a6fa8" class="form-control form-control-color style-field"></div>
+                <div class="col"><label for="enrichment-mf-color" class="form-label">MF</label><input id="enrichment-mf-color" type="color" value="#b8a9d1" class="form-control form-control-color style-field"></div>
+                <div class="col"><label for="enrichment-kegg-color" class="form-label">KEGG</label><input id="enrichment-kegg-color" type="color" value="#7bc77b" class="form-control form-control-color style-field"></div>
+                <div class="col"><label for="enrichment-other-color" class="form-label">其他</label><input id="enrichment-other-color" type="color" value="#9cb8d8" class="form-control form-control-color style-field"></div>
             </div>
         </div>
 
@@ -189,6 +200,7 @@
     const previewStatus = document.getElementById('preview-status');
     let previewTimer = null;
     let previewRequest = 0;
+    let enrichmentTerms = [];
 
     const defaults = {
         title: '', x_label: '', y_label: '', font_family: 'Arial', font_size: 11,
@@ -196,7 +208,7 @@
         x_min: '', x_max: '', y_min: '', y_max: '', pvalue_threshold: 0.05, fc_threshold: 1.5,
         up_color: '#b64342', down_color: '#0f4d92', ns_color: '#c7cdd6', label_genes: '',
         heatmap_cmap: 'RdBu_r', heatmap_top_n: 50, heatmap_sample_labels: 'auto', heatmap_sample_scope: 'all', heatmap_selected_samples: '', heatmap_group_column: '', heatmap_selected_groups: '', row_cluster: true, col_cluster: true, annotation_column: '',
-        corr_colorscale: 'Blues', enrichment_top_n: 20, enrichment_bp_color: '#fdbe85', enrichment_mf_color: '#b8a9d1', enrichment_kegg_color: '#7bc77b', enrichment_other_color: '#9cb8d8'
+        corr_colorscale: 'Blues', enrichment_top_n: 20, enrichment_overview_top_n: 8, enrichment_database_scope: '', enrichment_pathway_selection: 'top', enrichment_target_pathways: '', enrichment_gene_label_strategy: 'all', enrichment_target_genes: '', enrichment_max_gene_labels: 30, enrichment_bp_color: '#fdbe85', enrichment_cc_color: '#7a6fa8', enrichment_mf_color: '#b8a9d1', enrichment_kegg_color: '#7bc77b', enrichment_other_color: '#9cb8d8'
     };
     const fieldMap = {
         title: 'title', x_label: 'x-label', y_label: 'y-label', font_family: 'font-family', font_size: 'font-size',
@@ -205,7 +217,7 @@
         fc_threshold: 'fc-threshold', up_color: 'up-color', down_color: 'down-color', ns_color: 'ns-color',
         label_genes: 'label-genes', heatmap_cmap: 'heatmap-cmap', heatmap_top_n: 'heatmap-top-n', heatmap_sample_labels: 'heatmap-sample-labels', heatmap_sample_scope: 'heatmap-sample-scope', heatmap_group_column: 'heatmap-group-column',
         row_cluster: 'row-cluster', col_cluster: 'col-cluster', annotation_column: 'annotation-column',
-        corr_colorscale: 'corr-colorscale', enrichment_top_n: 'enrichment-top-n', enrichment_bp_color: 'enrichment-bp-color', enrichment_mf_color: 'enrichment-mf-color', enrichment_kegg_color: 'enrichment-kegg-color', enrichment_other_color: 'enrichment-other-color'
+        corr_colorscale: 'corr-colorscale', enrichment_top_n: 'enrichment-top-n', enrichment_overview_top_n: 'enrichment-overview-top-n', enrichment_database_scope: 'enrichment-database-scope', enrichment_pathway_selection: 'enrichment-pathway-selection', enrichment_target_pathways: 'enrichment-target-pathways', enrichment_gene_label_strategy: 'enrichment-gene-label-strategy', enrichment_target_genes: 'enrichment-target-genes', enrichment_max_gene_labels: 'enrichment-max-gene-labels', enrichment_bp_color: 'enrichment-bp-color', enrichment_cc_color: 'enrichment-cc-color', enrichment_mf_color: 'enrichment-mf-color', enrichment_kegg_color: 'enrichment-kegg-color', enrichment_other_color: 'enrichment-other-color'
     };
 
     function currentSource() {
@@ -287,11 +299,75 @@
         }
         populateHeatmapGroupPicker(source, style || {});
     }
+    function enrichmentTargetSet() {
+        return new Set(String(document.getElementById('enrichment-target-pathways').value || '')
+            .split(/[\n,;]/).map(value => value.trim()).filter(Boolean));
+    }
+    function renderEnrichmentTermRows() {
+        const picker = document.getElementById('enrichment-term-picker');
+        const search = String(document.getElementById('enrichment-term-search').value || '').trim().toLowerCase();
+        const database = document.getElementById('enrichment-database-scope').value;
+        const selected = enrichmentTargetSet();
+        picker.replaceChildren();
+        const rows = enrichmentTerms.filter(item =>
+            (!database || item.database === database) &&
+            (!search || `${item.term} ${item.term_id} ${item.database}`.toLowerCase().includes(search))
+        ).slice(0, 120);
+        if (!rows.length) {
+            const hint = document.createElement('span'); hint.className = 'text-muted small p-2 d-block';
+            hint.textContent = enrichmentTerms.length ? '没有匹配的通路。' : '当前来源没有可选择的通路。'; picker.appendChild(hint); return;
+        }
+        rows.forEach(item => {
+            const label = document.createElement('label'); label.className = 'enrichment-term-row';
+            const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.className = 'form-check-input mt-1';
+            checkbox.checked = selected.has(item.term) || (item.term_id && selected.has(item.term_id));
+            checkbox.addEventListener('change', () => {
+                const values = enrichmentTargetSet();
+                if (checkbox.checked) values.add(item.term_id || item.term);
+                else { values.delete(item.term); if (item.term_id) values.delete(item.term_id); }
+                document.getElementById('enrichment-target-pathways').value = Array.from(values).join('\n');
+                schedulePreview(); renderEnrichmentTermRows();
+            });
+            const body = document.createElement('span'); body.className = 'flex-grow-1';
+            body.textContent = item.term;
+            const meta = document.createElement('div'); meta.className = 'enrichment-term-meta';
+            const fdr = item.fdr == null ? 'FDR n/a' : `FDR ${Number(item.fdr).toExponential(2)}`;
+            const ratio = item.gene_ratio == null ? '' : ` · ratio ${Number(item.gene_ratio).toFixed(3)}`;
+            meta.textContent = `${item.database}${item.term_id ? ` · ${item.term_id}` : ''} · ${fdr}${ratio}`;
+            body.appendChild(meta); label.appendChild(checkbox); label.appendChild(body); picker.appendChild(label);
+        });
+        if (enrichmentTerms.length > rows.length) {
+            const hint = document.createElement('div'); hint.className = 'text-muted small p-2';
+            hint.textContent = `显示 ${rows.length} 条；可继续搜索缩小范围。`; picker.appendChild(hint);
+        }
+    }
+    async function populateEnrichmentPicker(source, style) {
+        enrichmentTerms = [];
+        const picker = document.getElementById('enrichment-term-picker');
+        const scope = document.getElementById('enrichment-database-scope');
+        scope.replaceChildren(new Option('全部数据库', ''));
+        if (!source || !['bulk_enrichment', 'bulk_enrichment_overview'].includes(source.edit_mode)) {
+            const hint = document.createElement('span'); hint.className = 'text-muted small p-2 d-block'; hint.textContent = '选择富集图后加载通路。'; picker.replaceChildren(hint); return;
+        }
+        picker.innerHTML = '<span class="text-muted small p-2 d-block">正在加载通路…</span>';
+        try {
+            const query = new URLSearchParams({source_kind: source.kind, source_id: source.id});
+            const response = await fetch(`/projects/${projectId}/figure-studio/enrichment-terms?${query}`);
+            const data = await response.json(); if (!response.ok) throw new Error(data.error || '通路加载失败');
+            enrichmentTerms = data.terms || [];
+            (data.databases || []).forEach(database => scope.add(new Option(database, database)));
+            const requestedScope = String((style || {}).enrichment_database_scope || '').split(',')[0].trim();
+            if (requestedScope && Array.from(scope.options).some(option => option.value === requestedScope)) scope.value = requestedScope;
+            renderEnrichmentTermRows();
+        } catch (error) {
+            picker.innerHTML = `<span class="text-danger small p-2 d-block">${error.message}</span>`;
+        }
+    }
     function showMode(source) {
         const isVolcano = source && source.edit_mode === 'bulk_volcano';
         const isHeatmap = source && source.edit_mode === 'bulk_heatmap';
         const isCorrelation = source && source.edit_mode === 'bulk_correlation';
-        const isEnrichment = source && source.edit_mode === 'bulk_enrichment';
+        const isEnrichment = source && ['bulk_enrichment', 'bulk_enrichment_overview'].includes(source.edit_mode);
         const isData = isVolcano || isHeatmap || isCorrelation || isEnrichment;
         document.querySelectorAll('.data-only').forEach(node => {
             if (['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(node.tagName)) node.disabled = !isData;
@@ -315,7 +391,9 @@
             note.textContent = '数据重绘模式：可调整相关性热图配色和外观；相关系数、样本排序与原图数据保持一致。';
         } else if (isEnrichment) {
             note.className = 'mode-note data';
-            note.textContent = '数据重绘模式：可调整通路类别颜色和展示数量；不改变富集统计结果。';
+            note.textContent = source.edit_mode === 'bulk_enrichment_overview'
+                ? '多数据库概览重绘：可筛选数据库、搜索目标通路并突出显示；不改变富集统计结果。'
+                : '数据重绘模式：可搜索目标通路、调整展示数量和网络标签；不改变富集统计结果。';
         } else {
             note.className = 'mode-note warning';
             note.textContent = '外观编辑模式：不重绘坐标轴、图例或数据层；只添加标题、字体、背景和说明文字。';
@@ -327,7 +405,7 @@
             const option = new Option('暂无平台图；可上传 PNG/JPG/SVG', ''); option.disabled = true; option.selected = true; select.add(option); return;
         }
         sources.forEach(source => {
-            const type = source.edit_mode === 'bulk_volcano' ? '可重绘火山图' : source.edit_mode === 'bulk_heatmap' ? '可重绘热图' : source.edit_mode === 'bulk_correlation' ? '可重绘相关性热图' : source.edit_mode === 'bulk_enrichment' ? '可重绘富集图' : '外观编辑';
+            const type = source.edit_mode === 'bulk_volcano' ? '可重绘火山图' : source.edit_mode === 'bulk_heatmap' ? '可重绘热图' : source.edit_mode === 'bulk_correlation' ? '可重绘相关性热图' : ['bulk_enrichment', 'bulk_enrichment_overview'].includes(source.edit_mode) ? '可重绘富集图' : '外观编辑';
             const option = new Option(`${source.label}（${type}）`, `${source.kind}:${source.id}`);
             if (source.kind === selectedInitial.kind && source.id === selectedInitial.id) option.selected = true;
             select.add(option);
@@ -362,6 +440,7 @@
         const sourceStyle = source && source.style;
         applyStyle(sourceStyle);
         populateHeatmapPickers(source, sourceStyle || {});
+        populateEnrichmentPicker(source, sourceStyle || {});
         document.getElementById('version-label').value = source ? source.label.replace(/^已保存：/, '') : '';
         showMode(source); schedulePreview();
     }
@@ -408,6 +487,11 @@
     document.getElementById('heatmap-clear-samples').addEventListener('click', () => {
         document.querySelectorAll('#heatmap-sample-picker input').forEach(input => { input.checked = false; }); schedulePreview();
     });
+    document.getElementById('enrichment-term-search').addEventListener('input', renderEnrichmentTermRows);
+    document.getElementById('enrichment-database-scope').addEventListener('change', () => {
+        renderEnrichmentTermRows(); schedulePreview();
+    });
+    document.getElementById('enrichment-target-pathways').addEventListener('input', renderEnrichmentTermRows);
     select.addEventListener('change', chooseSource);
     document.getElementById('refresh-preview').addEventListener('click', renderPreview);
     document.getElementById('image-upload').addEventListener('change', uploadImage);

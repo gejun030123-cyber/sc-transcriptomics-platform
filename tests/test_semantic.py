@@ -1170,13 +1170,31 @@ class TestModuleSummaryValidation:
 
         mod = BulkHeatmapAnalysis(
             project_dir=str(tmp_path),
-            params={'heatmap_type': 'top_var', 'top_n': 10},
+            params={
+                'gene_import_source': 'top_var', 'top_n': 10,
+                'deg_comparison_label': 'Treat vs Ctrl',
+                'groupby': deg_result['summary']['groupby'],
+                'sample_display_mode': 'auto',
+            },
             progress_callback=lambda p, m: None,
         )
         result = mod.run(deg_result['output_adata'])
         json.dumps(result['summary'], ensure_ascii=False)
         self._check_json_serializable(result['summary'])
         assert len(result['result_files']) > 0
+        assert result['summary']['gene_selection']['sample_names'] == \
+            result['summary']['sample_display']['selected_samples']
+        assert result['summary']['sample_display']['effective_mode'] == 'deg_groups'
+        assert 'Treat vs Ctrl' in result['summary']['heatmap_title']
+        audit_files = [
+            item for item in result['result_files']
+            if item['label'] == '热图基因选择与样品范围审计'
+        ]
+        assert len(audit_files) == 1
+        with open(audit_files[0]['file_path'], encoding='utf-8') as handle:
+            audit = json.load(handle)
+        assert audit['gene_selection']['sample_names'] == \
+            audit['heatmap_display']['selected_samples']
 
     # ── Bulk 模块: bulk_timecourse ──
 

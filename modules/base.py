@@ -4,14 +4,16 @@ from modules.figure_style import (
     NATURE_BG,
     NATURE_FONT_FAMILY,
     NATURE_PALETTE,
+    normalize_visualization_params,
     nature_continuous_cmap,
+    stable_category_colors,
 )
 
 # Result files are persisted in the database and exposed by the result routes.
 # Keep the file-type contract in one place so modules, tests and API consumers
 # agree on optional spreadsheet exports as well as image/table artifacts.
 VALID_RESULT_FILE_TYPES = frozenset({
-    'csv', 'xlsx', 'plotly_json', 'png', 'svg', 'jpg', 'jpeg',
+    'csv', 'xlsx', 'plotly_json', 'png', 'svg', 'pdf', 'tiff', 'jpg', 'jpeg',
     'info', 'json', 'txt', 'h5ad',
 })
 
@@ -100,7 +102,7 @@ class BaseAnalysis(ABC):
 
     def get_plotly_layout(self, title='', **overrides):
         """根据 self.params['_visualization'] 生成统一的 Plotly layout dict。"""
-        viz = self.params.get('_visualization', {})
+        viz = normalize_visualization_params(self.params.get('_visualization', {}))
         theme_name = viz.get('theme', 'default')
         theme = VISUALIZATION_THEMES.get(theme_name, VISUALIZATION_THEMES['default'])
         layout = {
@@ -119,15 +121,17 @@ class BaseAnalysis(ABC):
 
     def get_viz_params(self):
         """返回传递给 umap_scatter 的可视化参数 dict。"""
-        viz = self.params.get('_visualization', {})
+        viz = normalize_visualization_params(self.params.get('_visualization', {}))
         return {
             'umap_point_size': viz.get('umap_point_size', 5),
             'umap_opacity': viz.get('umap_opacity', 0.7),
             'umap_legend_fontsize': viz.get('umap_legend_fontsize', 10),
+            'umap_label_categories': viz.get('umap_label_categories', False),
+            'umap_hide_axes': viz.get('umap_hide_axes', True),
         }
 
     def export_static_fig(self, fig, plots_dir, filename, export_formats=None):
-        """将 Plotly figure 导出为静态图片（SVG/PNG）。依赖 kaleido。"""
+        """将 Plotly figure 导出为静态图片（SVG/PNG/PDF/TIFF）。依赖 kaleido。"""
         if not export_formats:
             return []
         import os
@@ -135,11 +139,19 @@ class BaseAnalysis(ABC):
         style_plotly_figure(fig, self.params.get('_visualization', {}))
         exported = []
         for fmt in export_formats:
-            if fmt in ('svg', 'png'):
+            if fmt in ('svg', 'png', 'pdf', 'tiff'):
                 try:
                     import plotly.io as pio
                     out_path = os.path.join(plots_dir, filename.replace('.json', f'.{fmt}'))
-                    pio.write_image(fig, out_path, format=fmt, engine='kaleido')
+                    if fmt == 'tiff':
+                        from PIL import Image
+                        png_bytes = pio.to_image(fig, format='png', engine='kaleido', scale=2)
+                        import io
+                        with Image.open(io.BytesIO(png_bytes)) as image:
+                            image.convert('RGB').save(out_path, format='TIFF',
+                                                      compression='tiff_lzw', dpi=(300, 300))
+                    else:
+                        pio.write_image(fig, out_path, format=fmt, engine='kaleido')
                     exported.append(out_path)
                 except ImportError:
                     self.progress(-1, "kaleido 未安装，跳过静态图片导出")
@@ -158,12 +170,16 @@ class BaseAnalysis(ABC):
         import os
         from modules.figure_style import apply_matplotlib_style, _font_for_text
 
-        viz = self.params.get('_visualization', {})
-        if formats is None:
+        raw_viz = self.params.get('_visualization', {})
+        viz = normalize_visualization_params(raw_viz)
+        if raw_viz.get('static_formats') or raw_viz.get('export_formats'):
+            formats = viz.get('static_formats', ('png', 'svg'))
+        elif formats is None:
             formats = viz.get(
                 'static_formats', ('png', 'svg')
             )
-        formats = [fmt.lower() for fmt in formats if fmt.lower() in ('png', 'svg')]
+        formats = [fmt.lower() for fmt in formats
+                   if fmt.lower() in ('png', 'svg', 'pdf', 'tiff')]
         if not formats:
             return []
 
@@ -175,30 +191,37 @@ class BaseAnalysis(ABC):
             # multi-resolution UMAP grid or a long cluster composition panel).
             # Callers can preserve that aspect explicitly; otherwise the
             # requested visualization dimensions are applied to the canvas.
-            if ('figure_width' in viz or 'figure_height' in viz) and not preserve_aspect:
+            if ('figure_width' in raw_viz or 'figure_height' in raw_viz) and not preserve_aspect:
                 current_width, current_height = fig.get_size_inches()
                 width = max(6.5, float(viz.get('figure_width', current_width * 100)) / 100)
                 height = max(4.8, float(viz.get('figure_height', current_height * 100)) / 100)
                 fig.set_size_inches(width, height, forward=True)
             font_size = max(9, float(viz.get('font_size', 12)))
             font_family = viz.get('font_family', NATURE_FONT_FAMILY)
+            is_dark = str(viz.get('bg_color', 'white')).lower() in {
+                '#1a1a2e', '#111827', '#0f172a'
+            }
+            text_color = '#F8FAFC' if is_dark else '#1f2937'
+            axis_color = '#CBD5E1' if is_dark else '#374151'
+            spine_color = '#64748B' if is_dark else '#c7cdd6'
             apply_matplotlib_style(fig, viz)
             for axis in getattr(fig, 'axes', []):
                 axis.set_facecolor(viz.get('bg_color', 'white'))
                 axis.tick_params(labelsize=max(8, font_size - 2), width=0.7,
-                                 colors='#374151')
+                                 colors=axis_color)
                 axis.xaxis.label.set_size(font_size)
                 axis.yaxis.label.set_size(font_size)
-                axis.xaxis.label.set_color('#1f2937')
-                axis.yaxis.label.set_color('#1f2937')
+                axis.xaxis.label.set_color(text_color)
+                axis.yaxis.label.set_color(text_color)
                 title = axis.title
                 title.set_fontsize(font_size + 1)
                 title.set_fontweight('semibold')
-                title.set_color('#111827')
+                title.set_color(text_color)
                 title.set_fontfamily(_font_for_text(title.get_text(), font_family))
-                for spine in axis.spines.values():
+                for spine_name, spine in axis.spines.items():
                     spine.set_linewidth(0.65)
-                    spine.set_color('#c7cdd6')
+                    spine.set_color(spine_color)
+                    spine.set_visible(spine_name in ('left', 'bottom'))
                 legend = axis.get_legend()
                 if legend is not None:
                     legend.set_frame_on(False)
@@ -234,10 +257,12 @@ class BaseAnalysis(ABC):
             output_path = os.path.join(plots_dir, f'{stem}.{fmt}')
             save_kwargs = {
                 'format': fmt, 'bbox_inches': 'tight', 'pad_inches': 0.15,
-                'facecolor': 'white',
+                'facecolor': viz.get('bg_color', 'white'),
             }
-            if fmt == 'png':
+            if fmt in {'png', 'tiff'}:
                 save_kwargs['dpi'] = dpi
+            if fmt == 'tiff':
+                save_kwargs['pil_kwargs'] = {'compression': 'tiff_lzw'}
             fig.savefig(output_path, **save_kwargs)
             result_files.append({
                 'file_path': output_path,
@@ -268,13 +293,17 @@ class BaseAnalysis(ABC):
         import matplotlib.pyplot as plt
 
         coords = np.asarray(adata.obsm[basis])[:, :2]
-        viz = self.params.get('_visualization', {})
+        viz = normalize_visualization_params(self.params.get('_visualization', {}))
         n_obs = max(1, int(coords.shape[0]))
         point_size = float(viz.get('umap_point_size', 5))
         marker_size = max(7, min(30, point_size * math.sqrt(10000 / n_obs)))
         opacity = float(viz.get('umap_opacity', 0.78))
         font_size = max(9, float(viz.get('font_size', 12)))
         font_family = viz.get('font_family', 'Arial')
+        bg_color = viz.get('bg_color', 'white')
+        is_dark = str(bg_color).lower() in {'#1a1a2e', '#111827', '#0f172a'}
+        text_color = '#F8FAFC' if is_dark else '#172033'
+        axis_color = '#CBD5E1' if is_dark else '#4b5563'
         fig, ax = plt.subplots(figsize=(9, 6.8), dpi=150)
 
         values = adata.obs[color_key] if color_key in adata.obs.columns else None
@@ -297,10 +326,10 @@ class BaseAnalysis(ABC):
                                labelpad=6)
         else:
             categorical = values.astype('category')
-            color_map = {
-                str(category): NATURE_PALETTE[index % len(NATURE_PALETTE)]
-                for index, category in enumerate(categorical.cat.categories)
-            }
+            color_map = stable_category_colors(
+                [str(category) for category in categorical.cat.categories],
+                existing=adata.uns.get(f'{color_key}_colors', []),
+            )
             for category in categorical.cat.categories:
                 mask = np.asarray(categorical == category)
                 if not mask.any():
@@ -312,7 +341,7 @@ class BaseAnalysis(ABC):
                     label=str(category),
                 )
             n_categories = len(categorical.cat.categories)
-            if n_categories:
+            if n_categories and not viz.get('umap_label_categories', False):
                 legend = ax.legend(
                     loc='center left', bbox_to_anchor=(1.01, 0.5),
                     frameon=False, fontsize=max(8, font_size - 2),
@@ -320,20 +349,48 @@ class BaseAnalysis(ABC):
                     ncol=2 if n_categories > 16 else 1,
                 )
                 legend.set_title(str(color_key), prop={'size': font_size - 1})
+            elif n_categories:
+                # Labels are useful for cluster UMAPs, while avoiding a tall
+                # legend leaves the embedding readable in manuscript panels.
+                for category in categorical.cat.categories:
+                    mask = np.asarray(categorical == category)
+                    if not mask.any():
+                        continue
+                    ax.text(
+                        float(np.median(coords[mask, 0])),
+                        float(np.median(coords[mask, 1])),
+                        str(category), ha='center', va='center',
+                        fontsize=max(8, font_size - 2), color=text_color,
+                        fontfamily=font_family,
+                        bbox={'boxstyle': 'round,pad=0.18', 'facecolor': 'white',
+                              'edgecolor': '#D0D5DD', 'alpha': 0.86, 'linewidth': 0.5},
+                        zorder=5,
+                    )
 
         ax.set_title(title, fontsize=font_size + 2, fontweight='semibold',
-                     color='#172033', pad=12, family=font_family)
-        ax.set_xlabel('UMAP 1', fontsize=font_size, color='#374151', family=font_family)
-        ax.set_ylabel('UMAP 2', fontsize=font_size, color='#374151', family=font_family)
-        ax.tick_params(labelsize=max(8, font_size - 2), colors='#4b5563', width=0.6)
-        ax.set_facecolor('white')
+                     color=text_color, pad=12, family=font_family)
+        ax.set_xlabel('UMAP 1', fontsize=font_size, color=text_color, family=font_family)
+        ax.set_ylabel('UMAP 2', fontsize=font_size, color=text_color, family=font_family)
+        ax.tick_params(labelsize=max(8, font_size - 2), colors=axis_color, width=0.6)
+        ax.set_facecolor(bg_color)
         ax.grid(False)
         for spine in ax.spines.values():
             spine.set_visible(False)
+        if viz.get('umap_hide_axes', True):
+            ax.set_xticks([])
+            ax.set_yticks([])
         ax.margins(0.035)
-        fig.patch.set_facecolor('white')
-        fig.subplots_adjust(left=0.09, right=0.82 if values is not None and not is_numeric else 0.94,
-                            bottom=0.1, top=0.88)
+        fig.patch.set_facecolor(bg_color)
+        has_external_legend = (
+            values is not None and not is_numeric
+            and not viz.get('umap_label_categories', False)
+        )
+        fig.subplots_adjust(
+            left=0.09,
+            right=0.82 if has_external_legend else 0.94,
+            bottom=0.1,
+            top=0.88,
+        )
         return fig
 
     def export_results(self, adata, output_dir, export_format='h5ad',

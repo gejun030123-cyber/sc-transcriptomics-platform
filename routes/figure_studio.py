@@ -1,8 +1,10 @@
 """Routes for non-destructive figure selection, preview and versioning."""
 
 from pathlib import Path
+import re
 from uuid import uuid4
 
+import pandas as pd
 from flask import Blueprint, flash, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
 
@@ -59,6 +61,80 @@ def sources(pid):
     if not _project_or_redirect(pid):
         return jsonify({'error': '项目未找到。'}), 404
     return jsonify({'sources': list_sources(pid)})
+
+
+@figure_studio_bp.route('/<pid>/figure-studio/enrichment-terms')
+def enrichment_terms(pid):
+    """Return a bounded, searchable pathway picker for a data-backed source."""
+    if not _project_or_redirect(pid):
+        return jsonify({'error': '项目未找到。'}), 404
+    try:
+        source = resolve_source(
+            pid, request.args.get('source_kind', ''), request.args.get('source_id', ''),
+        )
+        if source.get('edit_mode') not in {'bulk_enrichment', 'bulk_enrichment_overview'}:
+            return jsonify({'error': '当前图形没有可选择的富集通路。'}), 400
+        table = pd.read_csv(source['data_path'])
+        database_column = next((column for column in ('Database', 'database', 'Gene_set', 'gene_set') if column in table.columns), None)
+        term_column = next((column for column in ('Term', 'Description', 'pathway', 'term') if column in table.columns), None)
+        fdr_column = next((column for column in ('Enrichment FDR', 'Adjusted P-value', 'Adjusted p-value', 'FDR', 'fdr', 'padj') if column in table.columns), None)
+        ratio_column = next((column for column in ('GeneRatio', 'fraction', 'Overlap') if column in table.columns), None)
+        count_column = next((column for column in ('Count', 'num', 'Gene Count', 'Overlap', 'setSize', 'size') if column in table.columns), None)
+        if not term_column:
+            return jsonify({'error': '结果表缺少通路名称字段。'}), 400
+
+        def term_id(value):
+            match = re.search(r'\b(?:GO|KEGG|REACTOME|WP|WIKIPATHWAYS)\s*:[A-Za-z0-9_.-]+\b', str(value), re.I)
+            return match.group(0) if match else ''
+
+        def ratio(value):
+            if isinstance(value, str) and '/' in value:
+                left, right = value.split('/', 1)
+                try:
+                    return float(left) / float(right)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def count(value):
+            if isinstance(value, str) and '/' in value:
+                value = value.split('/', 1)[0]
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        rows = []
+        for _, row in table.iterrows():
+            raw_term = str(row.get(term_column, '') or '').strip()
+            if not raw_term:
+                continue
+            raw_fdr = row.get(fdr_column) if fdr_column else None
+            try:
+                fdr = float(raw_fdr)
+            except (TypeError, ValueError):
+                fdr = None
+            rows.append({
+                'database': str(row.get(database_column, '') or 'Other'),
+                'term': raw_term,
+                'term_id': term_id(raw_term),
+                'fdr': fdr,
+                'gene_ratio': ratio(row.get(ratio_column)) if ratio_column else None,
+                'count': count(row.get(count_column)) if count_column else None,
+            })
+        rows.sort(key=lambda item: (item['fdr'] is None, item['fdr'] if item['fdr'] is not None else 1.0, item['database'], item['term']))
+        databases = list(dict.fromkeys(item['database'] for item in rows))
+        return jsonify({
+            'source': {'kind': source['kind'], 'id': source['id'], 'plot_type': source.get('plot_type', '')},
+            'databases': databases, 'terms': rows[:2000],
+        })
+    except FigureStudioError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except (OSError, pd.errors.EmptyDataError, pd.errors.ParserError, ValueError):
+        return jsonify({'error': '读取富集结果表失败。'}), 400
 
 
 @figure_studio_bp.route('/<pid>/figure-studio/upload', methods=['POST'])

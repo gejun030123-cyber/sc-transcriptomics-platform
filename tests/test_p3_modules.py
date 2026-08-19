@@ -453,7 +453,7 @@ class TestClipRangeParsing:
 
 
 class TestHeatmapSampleSelection:
-    """展示范围应只过滤绘图样本，不改变 DEG 的统计来源。"""
+    """Top-var 选基因与热图展示必须共享同一个样品范围。"""
 
     @pytest.fixture
     def obs(self):
@@ -496,6 +496,48 @@ class TestHeatmapSampleSelection:
             _select_heatmap_display_samples(
                 obs, sample_display_mode='selected_samples', selected_samples='s2,missing',
             )
+
+    @pytest.mark.parametrize(
+        ('requested', 'source', 'comparison', 'expected'),
+        [
+            ('auto', 'top_var', '', 'all'),
+            ('auto', 'top_var', 'treat vs ctrl', 'deg_groups'),
+            ('auto', 'deg', 'treat vs ctrl', 'deg_groups'),
+            ('all', 'deg', 'treat vs ctrl', 'all'),
+        ],
+    )
+    def test_auto_scope_resolution_preserves_explicit_overrides(
+            self, requested, source, comparison, expected):
+        from modules.bulk_heatmap import _resolve_heatmap_sample_mode
+
+        requested_mode, effective_mode = _resolve_heatmap_sample_mode(
+            requested, source, comparison,
+        )
+
+        assert requested_mode == requested
+        assert effective_mode == expected
+
+    def test_top_variable_genes_are_ranked_only_in_selected_samples(self):
+        from modules.bulk_heatmap import _select_top_variable_gene_indices
+
+        # gene_global only varies in the excluded third group; gene_contrast
+        # varies inside the selected ctrl/treat comparison.
+        matrix = np.array([
+            [0.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 10.0],
+            [0.0, 11.0],
+            [100.0, 5.0],
+            [-100.0, 5.0],
+        ])
+
+        top_idx, scores = _select_top_variable_gene_indices(
+            matrix, [0, 1, 2, 3], metric='var', top_n=1,
+        )
+
+        assert top_idx == [1]
+        assert scores[0] == 0.0
+        assert scores[1] > 0.0
 
 
 def test_deg_integration_deduplicates_gene_symbols():
@@ -619,7 +661,7 @@ def test_enrichment_integration_builds_one_overview_for_same_comparison(tmp_path
 
     assert len(integrated) == 4
     assert set(integrated['Comparison']) == {'Ctrl vs Treat'}
-    assert {item['file_type'] for item in overview_files} == {'png', 'svg'}
+    assert {item['file_type'] for item in overview_files} == {'png', 'svg', 'pdf'}
     assert all(os.path.isfile(item['file_path']) for item in overview_files)
 
 

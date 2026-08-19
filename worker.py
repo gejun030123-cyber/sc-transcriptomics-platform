@@ -295,9 +295,9 @@ def _run_pipeline_run(run_id, project_id, modules, params_by_module, project_dir
                 return
 
             summary = result.get('summary', {})
+            summary_json = json.dumps(summary, ensure_ascii=False, default=str)
             error_message = _result_error(result)
             if error_message:
-                summary_json = json.dumps(summary, ensure_ascii=False, default=str)
                 task.mark_failed(f"模块 {module_name}：{error_message}", summary_json)
                 progress_log_entry['status'] = 'failed'
                 progress_log_entry['error'] = error_message

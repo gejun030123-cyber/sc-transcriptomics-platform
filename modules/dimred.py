@@ -7,6 +7,7 @@ class DimredAnalysis(BaseAnalysis):
     INPUT_REQUIRES = []
 
     def run(self, input_path):
+        import copy
         import os
         import scanpy as sc
         import omicverse as ov
@@ -20,6 +21,7 @@ class DimredAnalysis(BaseAnalysis):
         n_comps = int(self.params.get('n_comps', 50))
         use_mde = self.params.get('use_mde', False)
         auto_n_comps = self.params.get('auto_n_comps', 'none')
+        pca_hvg_only = bool(self.params.get('pca_hvg_only', False))
 
         # UMAP parameters
         umap_n_neighbors = int(self.params.get('umap_n_neighbors', 15))
@@ -32,16 +34,48 @@ class DimredAnalysis(BaseAnalysis):
         tsne_perplexity = float(self.params.get('tsne_perplexity', 30))
         tsne_learning_rate = float(self.params.get('tsne_learning_rate', 1000))
 
-        self.progress(20, "Scaling data...")
-        ov.pp.scale(adata, max_value=10)
+        pca_n_genes = int(adata.n_vars)
+        hvg_mask = None
+        if pca_hvg_only and 'highly_variable' in adata.var.columns:
+            hvg_mask = np.asarray(adata.var['highly_variable'].fillna(False), dtype=bool)
+            if int(hvg_mask.sum()) < 2:
+                hvg_mask = None
+                self.progress(-1, "HVG 数量不足，PCA 回退到全基因矩阵")
 
-        self.progress(35, f"Running PCA ({n_comps} components)...")
-        try:
-            sc.pp.pca(adata, n_comps=n_comps, layer='scaled')
-        except TypeError:
-            if 'scaled' in adata.layers:
-                adata.X = adata.layers['scaled']
-            sc.pp.pca(adata, n_comps=n_comps)
+        if hvg_mask is not None:
+            pca_n_genes = int(hvg_mask.sum())
+            self.progress(20, f"Scaling {pca_n_genes} HVGs for memory-safe PCA...")
+            pca_adata = adata[:, hvg_mask].copy()
+            ov.pp.scale(pca_adata, max_value=10)
+            self.progress(35, f"Running PCA ({n_comps} components, HVG-only)...")
+            try:
+                sc.pp.pca(pca_adata, n_comps=n_comps, layer='scaled')
+            except TypeError:
+                if 'scaled' in pca_adata.layers:
+                    pca_adata.X = pca_adata.layers['scaled']
+                sc.pp.pca(pca_adata, n_comps=n_comps)
+            adata.obsm['X_pca'] = np.asarray(pca_adata.obsm['X_pca'])
+            adata.uns['pca'] = copy.deepcopy(pca_adata.uns['pca'])
+            if 'PCs' in pca_adata.varm:
+                full_loadings = np.zeros(
+                    (adata.n_vars, pca_adata.varm['PCs'].shape[1]), dtype=np.float32,
+                )
+                full_loadings[hvg_mask, :] = np.asarray(
+                    pca_adata.varm['PCs'], dtype=np.float32,
+                )
+                adata.varm['PCs'] = full_loadings
+            del pca_adata
+        else:
+            self.progress(20, "Scaling data...")
+            ov.pp.scale(adata, max_value=10)
+
+            self.progress(35, f"Running PCA ({n_comps} components)...")
+            try:
+                sc.pp.pca(adata, n_comps=n_comps, layer='scaled')
+            except TypeError:
+                if 'scaled' in adata.layers:
+                    adata.X = adata.layers['scaled']
+                sc.pp.pca(adata, n_comps=n_comps)
 
         # Auto-select number of PCs
         if auto_n_comps != 'none' and 'pca' in adata.uns:
@@ -210,5 +244,7 @@ class DimredAnalysis(BaseAnalysis):
                 'pca_variance_ratio_top5': round(float(adata.uns['pca']['variance_ratio'][:5].sum()), 3) if 'pca' in adata.uns else None,
                 'embedding_method': embedding_method,
                 'tsne_enabled': enable_tsne,
+                'pca_hvg_only': bool(hvg_mask is not None),
+                'pca_n_genes': pca_n_genes,
             }
         }

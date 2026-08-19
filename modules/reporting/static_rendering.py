@@ -23,6 +23,7 @@ from modules.figure_style import (
     nature_continuous_cmap,
     NATURE_TEXT,
     apply_matplotlib_style,
+    register_nature_cjk_font,
 )
 
 PALETTE = list(NATURE_PALETTE)
@@ -124,14 +125,7 @@ def render_plotly_payload(payload: dict, output_stem: str, label: str = ""):
     import matplotlib.pyplot as plt
     import numpy as np
 
-    try:
-        from matplotlib import font_manager
-
-        cjk_font = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
-        if os.path.isfile(cjk_font):
-            font_manager.fontManager.addfont(cjk_font)
-    except Exception:
-        pass
+    register_nature_cjk_font()
     from matplotlib import rcParams
 
     rcParams.update({
