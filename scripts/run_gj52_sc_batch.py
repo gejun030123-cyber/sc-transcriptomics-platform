@@ -180,6 +180,8 @@ def build_merged_input():
     import scanpy as sc
 
     out_path = os.path.join(Config.uploads_dir(PROJECT_ID), "gj52_organoid_tissue_raw.h5ad")
+    sc.settings.cachedir = Config.CACHE_DIR
+    os.makedirs(sc.settings.cachedir, exist_ok=True)
     adatas = []
     raw_stats = []
     for item in SOURCE_DIRS:

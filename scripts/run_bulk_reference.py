@@ -35,6 +35,7 @@ from datetime import datetime
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
+from config import Config
 from modules import MODULE_REGISTRY
 from modules.schemas import PARAM_SCHEMAS
 
@@ -194,7 +195,14 @@ def main():
     parser.add_argument('--group2', default='', help='对照组名称')
     parser.add_argument('--comparisons', default='', help='多组比较，格式：A-vs-B;C-vs-D')
     parser.add_argument('--time-column', default='', help='时间列名（有则跑 bulk_timecourse）')
-    parser.add_argument('--output-dir', default='./bulk_reference_output', help='输出根目录')
+    parser.add_argument(
+        '--output-dir',
+        default=os.environ.get(
+            'BULK_REFERENCE_OUTPUT_DIR',
+            os.path.join(Config.DATA_DIR, 'bulk_reference_output'),
+        ),
+        help='输出根目录（默认写入 DATA_DIR，可用 BULK_REFERENCE_OUTPUT_DIR 覆盖）',
+    )
     parser.add_argument('--method', default='t-test', help='DEG 统计方法（默认 t-test）')
     parser.add_argument('--normalize-method', default='deseq2', help='归一化方法（默认 deseq2）')
     parser.add_argument('--fc-threshold', type=float, default=2.0, help='DEG Fold Change 阈值（默认 2.0）')

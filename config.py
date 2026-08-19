@@ -66,6 +66,9 @@ class Config:
     MPLCONFIG_DIR = os.path.abspath(os.environ.get(
         'MPLCONFIGDIR', os.path.join(RUNTIME_TMP_DIR, 'mplconfig')
     ))
+    CACHE_DIR = os.path.abspath(os.environ.get(
+        'CACHE_DIR', os.path.join(DATA_DIR, 'cache')
+    ))
     DB_PATH = os.environ.get('DB_PATH', os.path.join(_BASE_DIR, 'instance', 'bioinfo.db'))
     CELLMARKER_PATH = os.environ.get('CELLMARKER_PATH', os.path.join(os.path.dirname(_BASE_DIR), 'CellMarker_Augmented_2021.txt'))
 

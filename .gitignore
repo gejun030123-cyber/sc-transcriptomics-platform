@@ -6,7 +6,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
-instance/
+/instance
 *.db
 *.sqlite3
 .env
@@ -14,13 +14,13 @@ instance/
 .DS_Store
 venv/
 .venv/
-data/
+/data
 genesets/
 .superpowers/
-cache/
+/cache
 
 # Generated analysis outputs
-bulk_reference_output*/
+/bulk_reference_output*
 artifacts/
 
 # Generated root-level validation and handoff reports

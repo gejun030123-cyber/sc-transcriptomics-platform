@@ -428,7 +428,9 @@ Git 仓库只保存源代码、模板、测试和维护文档。以下内容只�
 | --- | --- | --- |
 | `DATA_DIR` | `<repo>/data` | 项目数据、结果、presets 存储目录 |
 | `RUNTIME_TMP_DIR` | `<repo>/data/runtime_tmp` | 临时分析文件、10x 兼容转换、Python/Numba/Matplotlib 缓存；应设在非根分区的数据盘 |
+| `CACHE_DIR` | `<DATA_DIR>/cache` | Scanpy 等分析读取缓存目录 |
 | `DB_PATH` | `<repo>/instance/bioinfo.db` | SQLite 数据库路径 |
+| `BULK_REFERENCE_OUTPUT_DIR` | `<DATA_DIR>/bulk_reference_output` | Bulk 参考流程默认输出目录 |
 | `CELLMARKER_PATH` | repo 上级目录下 `CellMarker_Augmented_2021.txt` | 可选 CellMarker 数据 |
 | `MAX_WORKERS` | `2` | 后台分析任务并发数 |
 | `MIN_FREE_RAM_GB` | `4` | 资源保护阈值 |
