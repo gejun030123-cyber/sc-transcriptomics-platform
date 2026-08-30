@@ -204,6 +204,64 @@ TOOLS_ANTHROPIC = [
         }
     },
     {
+        "name": "search_pathway_terms",
+        "description": "[只读] 把自然语言生物学主题（如'脂代谢和炎症'）映射到本地基因集的具体通路 term。先向用户展示命中的 term 列表并确认，再用于 sc_cell_go 的 focus_terms 参数。不接触表达数据。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "自然语言主题或关键词，如 '脂代谢和炎症'、'lipid metabolism'"
+                },
+                "libraries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "可选，限定检索的本地基因集库，如 ['GO_Biological_Process_2023','KEGG_2021_Human']；留空检索全部库"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "最多返回的 term 数，默认 60"
+                },
+                "list_themes": {
+                    "type": "boolean",
+                    "description": "设为 true 时只列出平台支持的主题词典，不做检索"
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "read_task_table",
+        "description": "[只读] 读取任务结果表（CSV/TSV/TXT/JSON/XLSX）的筛选摘要：支持列裁剪、关键词包含过滤、FDR 阈值和行数上限。用于在对话中解读富集、DEG、QC 等结果表内容。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "结果文件 ID（来自 get_task_results 的 result_files）"
+                },
+                "columns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "可选，只返回这些列"
+                },
+                "contains": {
+                    "type": "string",
+                    "description": "可选，行级关键词包含过滤（不区分大小写）"
+                },
+                "fdr_max": {
+                    "type": "number",
+                    "description": "可选，按 FDR/Adjusted P-value 列过滤小于该值的行"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "最多返回行数，默认 50，上限 200"
+                }
+            },
+            "required": ["file_id"]
+        }
+    },
+    {
         "name": "propose_parameter_sweep",
         "description": "[需确认] 为优化特定细胞类型分群生成参数搜索候选列表。基于当前分析状态智能选择参数空间。",
         "input_schema": {
@@ -389,6 +447,7 @@ AUTO_EXEC_TOOLS = {
     'inspect_analysis_state', 'inspect_adata', 'get_cluster_summary',
     'score_cell_type_signature', 'list_builtin_markers',
     'recommend_analysis_config',
+    'search_pathway_terms', 'read_task_table',
     'list_wes_workflows', 'list_wes_references', 'inspect_wes_manifest', 'inspect_wes_preflight',
 }
 # 需要用户确认的工具
@@ -410,6 +469,7 @@ SYSTEM_PROMPT = """你是一个生信分析助手，帮助用户进行 RNA-seq �
 6. **细胞类型打分**：使用 score_cell_type_signature 对已有分群进行 marker 评分
 7. **目标优化 Agent**：用户指定细胞类型，你使用 start_goal_agent 自动检查、生成候选参数、评分并推荐最佳分群
 8. **WES 输入审阅**：使用 list_wes_workflows、list_wes_references 和 inspect_wes_manifest 检查清单、配对、参考资源和文件能力；这些工具只读，不启动 WES。
+9. **主题驱动富集**：用户表达生物学主题（如"脂代谢和炎症"）时，使用 search_pathway_terms 映射到具体通路，再用 sc_cell_go 的 focus_terms 运行主题聚焦富集
 
 ## 目标优化 Agent 使用流程
 当用户表示对分群不满意或想找特定细胞类型时：
@@ -433,6 +493,14 @@ SYSTEM_PROMPT = """你是一个生信分析助手，帮助用户进行 RNA-seq �
 ## 可用模块（完整列表）
 单细胞：qc, normalize, hvg, dimred, batch_correct, clustering, qc_reassess, annotation, sc_timecourse, deg, trajectory, proportion, cell_communication
 Bulk：bulk_qc, bulk_normalize, bulk_deg, bulk_pca, bulk_heatmap, bulk_enrichment, bulk_timecourse, bulk_deg_integration
+
+## 主题驱动富集流程
+当用户希望富集结果聚焦某个生物学主题（如"跑完差异表达了，我要关于脂代谢和炎症的富集"）时：
+1. 调用 search_pathway_terms(query="用户主题原话")；不确定平台支持哪些主题时，先传 list_themes=true 查看。
+2. 把命中的通路 term 按库分组展示给用户，说明每个库命中数量，请用户确认或增删；不要未经确认直接提交分析。
+3. 用户确认后，调用 run_analysis(module_name="sc_cell_go", params={{"deg_source_task_id": "<已完成的DEG任务ID>", "method": "ORA", "focus_terms": ["term1", "term2"]}})。focus_terms 不会改变全量统计：富集照常在全部通路上运行，FDR 在全库上校正，另输出主题子表与聚焦图。
+4. 任务完成后，用 get_task_results 找到富集结果表 file_id，再调用 read_task_table(file_id=..., contains=..., fdr_max=...) 摘要主题结果并解读。
+5. 解读时明确：主题图只是从全量结果中筛选展示，不构成独立的校正检验；聚焦 term 无显著结果时如实说明，不得夸大。
 
 ## 回复规则
 - 用中文回复

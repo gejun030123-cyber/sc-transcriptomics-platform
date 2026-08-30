@@ -12,6 +12,8 @@ but the implementation now has two explicit evidence levels:
 import os
 import json
 import re
+import ast
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -259,6 +261,165 @@ def _selected_deg_files(value, project_dir):
     return selected
 
 
+def _parse_focus_terms(value):
+    """解析 focus_terms（列表或逗号/分号/换行分隔文本），去重并限量。
+
+    AI 参数校验层会把 list 值字符串化（如 "['term1', 'term2']"），
+    因此对每个拆分项额外剥离方括号与引号，避免残留杂质。
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        items = [str(item).strip() for item in value]
+    else:
+        raw_value = str(value).strip()
+        # AI 参数校验层会把列表转为 Python 字面量。优先安全地还原它，
+        # 以免 term 本身含逗号时被错误拆分。
+        if raw_value.startswith("[") and raw_value.endswith("]"):
+            try:
+                parsed = ast.literal_eval(raw_value)
+            except (SyntaxError, ValueError):
+                parsed = None
+            if isinstance(parsed, (list, tuple)):
+                items = [str(item).strip() for item in parsed]
+            else:
+                items = [item.strip() for item in re.split(r"[,;\n]+", raw_value)]
+        else:
+            items = [item.strip() for item in re.split(r"[,;\n]+", raw_value)]
+    terms = []
+    for item in items:
+        cleaned = item.strip("[]'\" ").strip()
+        if cleaned and cleaned not in terms:
+            terms.append(cleaned)
+    if len(terms) > 60:
+        raise ValueError("focus_terms 最多支持 60 个通路 term")
+    for term in terms:
+        if len(term) > 200:
+            raise ValueError("focus_terms 中单个通路名称过长")
+    return terms
+
+
+def _focus_term_mask(frame, focus_terms):
+    """对完整 term 名称或去掉数据库 ID 后的显示名做精确匹配。"""
+    if frame is None or frame.empty or "Term" not in frame.columns:
+        return pd.Series(False, index=frame.index if frame is not None else [])
+    terms = frame["Term"].astype(str)
+    normalized = terms.str.lower().str.strip()
+    display = terms.str.replace(r"\s*\([^)]*\)\s*$", "", regex=True).str.lower().str.strip()
+    targets = {term.lower().strip() for term in focus_terms}
+    return normalized.isin(targets) | display.isin(targets)
+
+
+def _emit_focus_outputs(analysis, result, *, focus_terms, show_plots, plot_top_n,
+                        enrichment_max_genes, similarity_threshold, running_term_n,
+                        package_dirs, output_prefix, library, deg_scope,
+                        comparison_id, comparison, method, source_level,
+                        padj_cutoff, gsea_results_by_cluster, audit,
+                        result_files, figure_audits, plot_warnings):
+    """主题聚焦输出：全量统计与全量表保持不变，仅额外导出主题子表与聚焦图。
+
+    聚焦图复用 figure engine 的指定通路选择（``pathway_selection=selected``），
+    图中只展示用户确认的 term；FDR 仍为全库校正结果，审计中显式记录这一点。
+    """
+    if not focus_terms:
+        return
+    completed = result.loc[result["status"].eq("completed")]
+    matched = completed.loc[_focus_term_mask(completed, focus_terms)].copy()
+    matched_terms = sorted(matched["Term"].astype(str).unique().tolist())
+    focus_audit = {
+        "requested_terms": list(focus_terms),
+        "matched_terms": matched_terms,
+        "n_matched_rows": int(len(matched)),
+        "matching_rule": "term 全名（忽略大小写和首尾空白）或去除末尾数据库 ID 后的显示名精确匹配；不使用子串匹配。",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "statistics_note": "FDR 在全库检验族上计算；聚焦输出仅为主题筛选展示，不是独立的校正检验族。",
+        "status": "completed" if matched_terms else "no_match",
+    }
+    audit["focus"] = focus_audit
+    if matched.empty:
+        plot_warnings.append(
+            f"{comparison} / {library}: focus_terms 未命中任何已完成通路，仅记录审计。"
+        )
+        return
+    focus_path = _available_path(
+        package_dirs["go"],
+        f"{output_prefix}_focus_{_safe_name(library)}_{_safe_name(deg_scope)}_"
+        f"{_safe_name(comparison_id, 'comparison')}", ".csv",
+    )
+    matched.to_csv(focus_path, index=False)
+    focus_label = (
+        f"{'Cell-level' if source_level == 'cell_level' else 'Pseudobulk'} {method} "
+        f"focus terms ({library}, {deg_scope}): {comparison}"
+    )
+    result_files.append({
+        "file_path": focus_path, "file_type": "csv", "category": "table",
+        "label": focus_label,
+    })
+    if not show_plots:
+        return
+    from modules.bulk_enrichment import _render_enrichment_variants
+
+    significant = matched["Significant"]
+    if significant.dtype != bool:
+        significant = significant.astype(str).str.lower().isin({"true", "1", "yes"})
+    plot_frame = matched.loc[significant]
+    if plot_frame.empty:
+        plot_warnings.append(
+            f"{comparison} / {library}: 聚焦通路中没有 FDR<{padj_cutoff:g} 的结果，"
+            "不生成聚焦图；主题子表已导出。"
+        )
+        return
+    level_title = (
+        "Cell-level exploratory GO" if source_level == "cell_level"
+        else f"Pseudobulk {method}"
+    )
+    for (cluster, direction), unit_frame in plot_frame.groupby(
+        ["cluster", "direction"], sort=False, observed=True
+    ):
+        if unit_frame.empty:
+            continue
+        cluster_suffix = "" if deg_scope == "all_cells" else f" · cluster {cluster}"
+        direction_suffix = "" if method == "GSEA" else f" · {direction}"
+        focus_params = dict(analysis.params)
+        focus_params.update({
+            "top_n": min(30, max(1, min(int(plot_top_n), int(unit_frame["Term"].nunique())))),
+            "enrichment_plot_suite": "核心图",
+            "pathway_selection": "selected",
+            "target_pathways": list(focus_terms),
+            "enrichment_max_genes": enrichment_max_genes,
+            "similarity_threshold": similarity_threshold,
+            "running_term_n": running_term_n,
+        })
+        stem = (
+            f"{output_prefix}_focus_{_safe_name(library)}_{_safe_name(deg_scope)}_"
+            f"{_safe_name(comparison_id)}_{_safe_name(cluster, 'All')}_"
+            f"{_safe_name(direction, 'All')}"
+        )
+        semantic_warnings = ()
+        if source_level == "cell_level":
+            semantic_warnings = (
+                "该富集基于细胞级探索性 DEG；细胞不是独立生物学重复，"
+                "正式条件比较应以样本级 pseudobulk 结果验证。",
+            )
+        try:
+            exported, audits = _render_enrichment_variants(
+                analysis, unit_frame, method=method,
+                title=f"{level_title} · {comparison}{cluster_suffix}{direction_suffix} · 聚焦",
+                base_output_key=stem,
+                label=f"{focus_label}: cluster {cluster} {direction}",
+                params=focus_params,
+                pre_res=gsea_results_by_cluster.get(str(cluster)),
+                semantic_warnings=semantic_warnings,
+            )
+            result_files.extend(exported)
+            figure_audits.extend(audits)
+        except Exception as exc:
+            plot_warnings.append(
+                f"{comparison} / {library} / cluster {cluster} / {direction}: "
+                f"聚焦绘图失败（{exc}）"
+            )
+
+
 class SCCellGOEnrichment(BaseAnalysis):
     """Run enrichment for cell-level or sample-level DEG exports."""
 
@@ -286,6 +447,7 @@ class SCCellGOEnrichment(BaseAnalysis):
         export_full_tables = str(self.params.get("export_full_tables", "true")).strip().lower() not in {
             "", "0", "false", "no", "off",
         }
+        focus_terms = _parse_focus_terms(self.params.get("focus_terms"))
         libraries = _requested_gene_sets(self.params)
         organism = str(self.params.get("organism", "Human") or "Human")
         execution_mode = str(self.params.get("execution_mode", "local") or "local").lower()
@@ -817,6 +979,22 @@ class SCCellGOEnrichment(BaseAnalysis):
                             ).astype(bool).sum()
                         ),
                     })
+                _emit_focus_outputs(
+                    self, result,
+                    focus_terms=focus_terms, show_plots=show_enrichment_plots,
+                    plot_top_n=plot_top_n,
+                    enrichment_max_genes=enrichment_max_genes,
+                    similarity_threshold=similarity_threshold,
+                    running_term_n=running_term_n,
+                    package_dirs=package_dirs, output_prefix=output_prefix,
+                    library=library, deg_scope=deg_scope,
+                    comparison_id=comparison_id, comparison=comparison,
+                    method=method, source_level=source_level,
+                    padj_cutoff=padj_cutoff,
+                    gsea_results_by_cluster=gsea_results_by_cluster,
+                    audit=audit, result_files=result_files,
+                    figure_audits=figure_audits, plot_warnings=plot_warnings,
+                )
                 audit_path = _available_path(
                     package_dirs["go"],
                     f"{output_prefix}_enrichment_{_safe_name(library)}_"
@@ -966,6 +1144,9 @@ class SCCellGOEnrichment(BaseAnalysis):
             "cluster_execution_scope": "selected" if requested_clusters else "all",
             "full_table_exported": export_full_tables,
         }
+        if focus_terms:
+            summary["focus_terms"] = focus_terms
+            summary["focus_note"] = "focus_terms 仅增加主题子表与聚焦图；全量统计与全量表保持不变。"
         if all_failed:
             summary["error"] = "所有指定富集单元均执行失败；请查看通路审计中的基因集与错误信息。"
         return {

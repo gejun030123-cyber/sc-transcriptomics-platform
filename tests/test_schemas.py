@@ -53,7 +53,10 @@ class TestModuleMetadata:
 
     def test_param_types_valid(self):
         """参数类型都是合法值。"""
-        valid_types = {'number', 'select', 'checkbox', 'text', 'textarea', 'dynamic_select', 'dynamic_multiselect', 'multiselect'}
+        valid_types = {
+            'number', 'select', 'checkbox', 'text', 'textarea', 'dynamic_select',
+            'dynamic_multiselect', 'static_multiselect', 'multiselect',
+        }
         for module_name, params in PARAM_SCHEMAS.items():
             for p in params:
                 assert p['type'] in valid_types, f"{module_name}.{p['key']}: 无效类型 {p['type']}"

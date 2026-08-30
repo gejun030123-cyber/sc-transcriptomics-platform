@@ -78,6 +78,7 @@ PARAM_SCHEMAS = {
         {'key': 'source_level', 'label': '差异结果层级（自动）', 'type': 'select', 'options': ['pseudobulk', 'cell_level'], 'default': 'pseudobulk', 'help': '页面会根据所选 DEG 任务自动设置，不能把细胞级和样本级结果混用。'},
         {'key': 'deg_prefix', 'label': '旧版 DEG 文件前缀（兼容）', 'type': 'text', 'default': 'sc_pseudobulk', 'help': '仅为旧项目结果包兼容保留；新任务不再按前缀搜索。'},
         {'key': 'export_prefix', 'label': '富集结果文件前缀', 'type': 'text', 'default': 'sc_cell_go', 'help': '导出 CSV 与内部溯源文件的统一前缀。'},
+        {'key': 'focus_terms', 'label': '聚焦通路 term（可选）', 'type': 'text', 'default': '', 'help': '逗号/分号分隔的完整通路名称，可来自 AI 的 search_pathway_terms。全量统计与全量表保持不变，仅额外输出主题子表与聚焦 dotplot/barplot；留空则行为与原来完全一致。'},
         {'key': 'method', 'label': '富集方法', 'type': 'select', 'options': ['ORA', 'GSEA'], 'default': 'ORA', 'help': 'ORA：对显著 DEG 做超几何检验；GSEA：对完整 pseudobulk 排名表做预排序 GSEA，仅支持样本级 pseudobulk。'},
         {'key': 'direction_mode', 'label': '差异方向', 'type': 'select', 'options': ['up_down', 'up', 'down', 'all'], 'default': 'up_down', 'help': 'ORA 可单独分析上调、下调或两者；pseudobulk 推荐上下调分开。GSEA 使用完整双向排序，不按此项拆分。'},
         {'key': 'execution_mode', 'label': '基因集执行方式', 'type': 'select', 'options': ['local', 'enrichr'], 'default': 'local', 'help': 'local：仅使用服务器本地 GMT/TXT 基因集，不上传基因列表（推荐）；enrichr：仅用于兼容旧的细胞级 ORA，会将基因列表发送至 Enrichr 在线服务。'},

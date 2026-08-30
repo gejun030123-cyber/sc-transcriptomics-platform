@@ -2,6 +2,7 @@
 """AI 工具函数 — 平台分析功能的接口"""
 import os
 import json
+import math
 from config import Config
 
 
@@ -64,6 +65,10 @@ def execute_tool(name, args, project_id):
         return _score_cell_type_signature(args, project_id)
     elif name == "list_builtin_markers":
         return _list_builtin_markers()
+    elif name == "search_pathway_terms":
+        return _search_pathway_terms(args or {})
+    elif name == "read_task_table":
+        return _read_task_table(args or {}, project_id)
     elif name == "propose_parameter_sweep":
         return _propose_parameter_sweep(args, project_id)
     elif name == "run_parameter_sweep":
@@ -1586,6 +1591,177 @@ def _list_builtin_markers():
         "cell_types": list_builtin_cell_types(),
         "organoid_panels": organoid_panels,
     }
+
+
+def _search_pathway_terms(args):
+    """[只读] 把自然语言主题（如"脂代谢和炎症"）映射到本地基因集的具体通路 term。
+
+    匹配完全在服务器本地对 term 名称做确定性关键词匹配；不接触表达数据，
+    不向外部服务发送任何内容。返回的 term 名称可直接作为 sc_cell_go 的
+    focus_terms 使用。
+    """
+    from modules import theme_lexicon
+
+    if args.get("list_themes"):
+        return {"themes": theme_lexicon.list_themes()}
+    query = str(args.get("query", "") or "").strip()
+    if not query:
+        return {"error": "缺少 query；或设置 list_themes=true 查看支持的主题"}
+    libraries = args.get("libraries") or []
+    if isinstance(libraries, str):
+        libraries = [item.strip() for item in libraries.split(",") if item.strip()]
+    try:
+        limit = int(args.get("limit", 60) or 60)
+    except (TypeError, ValueError):
+        return {"error": "limit 必须为整数"}
+    try:
+        outcome = theme_lexicon.search_terms(query, libraries=libraries, limit=limit)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    outcome["usage_note"] = (
+        "确认 term 列表后，可用 run_analysis(module_name='sc_cell_go', "
+        "params={'deg_source_task_id': '<已完成的DEG任务ID>', 'focus_terms': [...]}) "
+        "运行主题聚焦富集；全量统计照常运行，FDR 始终在全库上计算。"
+    )
+    return outcome
+
+
+def _read_task_table(args, project_id):
+    """[只读] 读取任务登记的结果表（CSV/TSV/TXT/JSON/XLSX）内容摘要。
+
+    仅接受登记在 ResultFile 中且位于当前项目目录内的文件；路径校验复用
+    ``Config._validate_path``。支持列裁剪、关键词包含过滤、FDR 阈值过滤和
+    行数上限，默认只返回前 50 行，避免把大表整段塞进对话。
+    """
+    import pandas as pd
+
+    from models import ResultFile
+
+    file_id = str(args.get("file_id", "") or "").strip()
+    if not file_id:
+        return {"error": "缺少 file_id"}
+    record = ResultFile.get_by_id(file_id)
+    if not record:
+        return {"error": "结果文件不存在"}
+    if str(record.project_id or "") != str(project_id or ""):
+        return {"error": "结果文件不属于当前项目"}
+    allowed_types = {"csv", "tsv", "txt", "json", "xlsx"}
+    if str(record.file_type or "").lower() not in allowed_types:
+        return {"error": f"只支持读取表格类结果文件（{', '.join(sorted(allowed_types))}）"}
+    path = record.file_path
+    try:
+        is_valid, error = Config._validate_path(path, project_id)
+    except (OSError, ValueError) as exc:
+        return {"error": f"路径校验失败: {exc}"}
+    if not is_valid:
+        return {"error": error}
+    try:
+        project_root = os.path.abspath(Config.project_dir(project_id))
+        supplied_path = os.path.abspath(os.fspath(path))
+        relative_path = os.path.relpath(supplied_path, project_root)
+        if relative_path == os.pardir or relative_path.startswith(os.pardir + os.sep):
+            return {"error": "路径不在项目目录内"}
+        current_path = project_root
+        for component in relative_path.split(os.sep):
+            if component in {"", ".", os.pardir}:
+                continue
+            current_path = os.path.join(current_path, component)
+            if os.path.islink(current_path):
+                return {"error": "不支持含符号链接目录的结果文件"}
+    except (OSError, TypeError, ValueError) as exc:
+        return {"error": f"路径校验失败: {exc}"}
+    if not os.path.isfile(path):
+        return {"error": "文件不存在或已被清理"}
+    if os.path.getsize(path) > 200 * 1024 * 1024:
+        return {"error": "文件过大（>200MB），请改用更聚焦的结果文件"}
+
+    try:
+        limit = min(max(int(args.get("limit", 50) or 50), 1), 200)
+    except (TypeError, ValueError):
+        return {"error": "limit 必须为整数"}
+    columns = args.get("columns") or []
+    if isinstance(columns, str):
+        columns = [item.strip() for item in columns.split(",") if item.strip()]
+    elif not isinstance(columns, (list, tuple)):
+        return {"error": "columns 必须为列名列表或逗号分隔文本"}
+    else:
+        columns = [str(item).strip() for item in columns if str(item).strip()]
+    contains = str(args.get("contains", "") or "").strip().lower()
+    fdr_max = args.get("fdr_max")
+    if fdr_max is not None:
+        try:
+            fdr_max = float(fdr_max)
+        except (TypeError, ValueError):
+            return {"error": "fdr_max 必须为 0 到 1 之间的数字"}
+        if not math.isfinite(fdr_max) or not 0 <= fdr_max <= 1:
+            return {"error": "fdr_max 必须为 0 到 1 之间的数字"}
+
+    suffix = os.path.splitext(path)[1].lower()
+    try:
+        if suffix == ".json":
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if isinstance(payload, list) and (not payload or isinstance(payload[0], dict)):
+                frame = pd.DataFrame(payload)
+            else:
+                text = json.dumps(payload, ensure_ascii=False, default=str)
+                return {
+                    "file_id": file_id, "label": record.label,
+                    "file_type": record.file_type, "format": "json_object",
+                    "excerpt": text[:4000],
+                    "note": "JSON 不是记录列表，返回截断摘要。",
+                }
+        elif suffix == ".xlsx":
+            frame = pd.read_excel(path)
+        elif suffix in {".tsv", ".txt"}:
+            try:
+                frame = pd.read_csv(path, sep="\t")
+            except ValueError:
+                frame = pd.read_csv(path, sep=None, engine="python")
+        else:
+            frame = pd.read_csv(path)
+    except Exception as exc:
+        return {"error": f"读取失败: {exc}"}
+
+    total_rows = int(len(frame))
+    all_columns = [str(item) for item in frame.columns]
+    fdr_column = next(
+        (item for item in ("Adjusted P-value", "FDR", "padj", "fdr", "P-adjusted")
+         if item in frame.columns),
+        None,
+    )
+    if contains:
+        mask = frame.astype(str).apply(
+            lambda row: row.str.contains(contains, case=False, regex=False).any(), axis=1,
+        )
+        frame = frame.loc[mask]
+    if fdr_max is not None:
+        if not fdr_column:
+            return {"error": "结果表不含可识别的 FDR/Adjusted P-value 列，无法应用 fdr_max"}
+        numeric = pd.to_numeric(frame[fdr_column], errors="coerce")
+        frame = frame.loc[numeric < fdr_max]
+    if columns:
+        keep = [item for item in columns if item in all_columns]
+        if not keep:
+            return {"error": f"请求的列都不存在；可用列: {all_columns[:30]}"}
+        frame = frame[keep]
+    returned = min(int(len(frame)), limit)
+    rows = json.loads(frame.head(returned).to_json(orient="records", force_ascii=False))
+    outcome = {
+        "file_id": file_id,
+        "label": record.label,
+        "file_type": record.file_type,
+        "columns": [str(item) for item in frame.columns],
+        "total_rows": total_rows,
+        "filtered_rows": int(len(frame)),
+        "returned_rows": returned,
+        "truncated": int(len(frame)) > returned,
+        "rows": rows,
+    }
+    if fdr_column:
+        outcome["fdr_column"] = fdr_column
+    outcome["note"] = "仅返回筛选后的前若干行；完整文件可在结果页下载。"
+    return outcome
 
 
 # ============================================================
