@@ -51,7 +51,7 @@ def _linkage_and_order(matrix, axis, method, metric):
 
 
 class NatureHeatmap:
-    """固定的 Bulk RNA-seq publication heatmap 模板。"""
+    """固定的 transcriptomics publication heatmap 模板。"""
 
     plot_type = 'heatmap'
 

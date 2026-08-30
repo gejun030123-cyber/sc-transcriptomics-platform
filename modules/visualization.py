@@ -40,7 +40,9 @@ def umap_scatter(adata, color_key=None, basis='X_umap', max_cells=50000, title='
         coords = coords[:, :2]
     idx = np.arange(adata.n_obs)
     if adata.n_obs > max_cells:
-        idx = np.random.choice(adata.n_obs, max_cells, replace=False)
+        # 固定种子的确定性抽样：同一数据多次运行图形一致。
+        rng = np.random.default_rng(0)
+        idx = rng.choice(adata.n_obs, max_cells, replace=False)
         coords = coords[idx]
     color_series = None
     if color_key and color_key in adata.obs.columns:
@@ -174,6 +176,9 @@ def compute_gene_variability(data, metric='var'):
 def transform_heatmap_data(data, row_scaling='zscore', pseudocount=1,
                            winsorize='none', clip_range=(-3, 3), missing_value='ignore'):
     """对热图数据进行标准化和变换。data: (samples, genes)"""
+    # 始终在副本上工作：mean_fill 分支此前会原地修改调用方数组，
+    # 与其余分支返回新数组的行为不一致。
+    data = np.array(data, dtype=float, copy=True)
     # 1. 缺失值处理
     if missing_value == 'mean_fill':
         col_means = np.nanmean(data, axis=0)

@@ -1,5 +1,7 @@
 """NatureVolcano：固定阈值语义和受控基因标注。"""
 
+import textwrap
+
 import numpy as np
 import pandas as pd
 
@@ -8,12 +10,78 @@ from figure_engine.style import get_style
 from .common import adjust_labels, attach_contract, finite_numeric, prune_overlapping_labels
 
 
+def _compress_fdr_tail(y_raw, threshold_y):
+    """Keep an extreme FDR tail legible without flattening it at a ceiling.
+
+    DESeq2 can legitimately report adjusted p-values far below the useful
+    display range.  A hard y-axis cap turns all of those points into one dense
+    horizontal row, which hides their relative strength and makes the Volcano
+    plot look broken.  Above a clearly marked break we therefore use a
+    monotonic log compression.  The plotted order is preserved and tick labels
+    remain in the original ``-log10(FDR)`` units.
+    """
+    values = np.asarray(y_raw, dtype=float)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return values, None
+
+    # Values below 1e-12 retain the ordinary, linear volcano scale.  The
+    # threshold line (normally 1.30 for FDR 0.05) is consequently never
+    # affected by compression.
+    break_y = max(12.0, float(np.ceil(float(threshold_y) + 2.0)))
+    max_y = float(np.nanmax(finite))
+    if max_y <= break_y + 1.0:
+        return values, None
+
+    scale = max(4.0, break_y * 0.5)
+    displayed = values.copy()
+    tail = displayed > break_y
+    displayed[tail] = break_y + scale * np.log1p((displayed[tail] - break_y) / scale)
+    return displayed, {"break_y": break_y, "scale": scale, "max_y": max_y}
+
+
+def _tail_tick_values(tail_info):
+    """Return sparse, truthful tick locations for a compressed FDR tail."""
+    break_y = float(tail_info["break_y"])
+    scale = float(tail_info["scale"])
+    max_y = float(tail_info["max_y"])
+
+    # Four linear-range ticks leave enough space for three sparse tail ticks
+    # on a single-column figure.  The tail ticks have familiar 10^x values,
+    # not arbitrary display coordinates.
+    raw_ticks = list(np.linspace(0.0, break_y, num=4))
+    candidates = np.asarray((15, 20, 30, 50, 75, 100, 150, 200, 300), dtype=float)
+    candidates = candidates[(candidates > break_y) & (candidates <= max_y)]
+    if len(candidates) > 3:
+        candidates = candidates[np.linspace(0, len(candidates) - 1, num=3, dtype=int)]
+    raw_ticks.extend(candidates.tolist())
+    raw_ticks = np.asarray(list(dict.fromkeys(float(value) for value in raw_ticks)))
+    displayed = raw_ticks.copy()
+    tail = displayed > break_y
+    displayed[tail] = break_y + scale * np.log1p((displayed[tail] - break_y) / scale)
+    labels = [f"{value:g}" for value in raw_ticks]
+    return displayed, labels
+
+
+def _wrap_title(value, default, width):
+    """Wrap a title while preserving an intentional scientific context line."""
+    text = str(value or default).replace('_', ' ')
+    lines = [line.strip() for line in text.splitlines() if line.strip()] or [default]
+    return '\n'.join(
+        textwrap.fill(line, width=width, break_long_words=False)
+        for line in lines
+    )
+
+
 def _select_labels(frame, spec, regulation):
     genes = frame['_gene'].astype(str)
     selected = []
-    custom = set(spec.label_genes)
-    if custom:
-        selected.extend(frame.index[genes.isin(custom)].tolist())
+    # Follow explicit user order; a custom label is a review request, not an
+    # automatic rank, and may intentionally be non-significant.
+    for gene in spec.label_genes:
+        for index in frame.index[genes.eq(str(gene))]:
+            if index not in selected:
+                selected.append(index)
     remaining = max(0, int(spec.label_n) - len(selected))
     if remaining and spec.label_strategy != 'none':
         significant = frame[regulation.isin(['Up', 'Down'])].copy()
@@ -33,7 +101,7 @@ def _select_labels(frame, spec, regulation):
 
 
 class NatureVolcano:
-    """固定的 Bulk RNA-seq Volcano publication 模板。"""
+    """固定的 transcriptomics Volcano publication 模板。"""
 
     plot_type = 'volcano'
 
@@ -63,14 +131,17 @@ class NatureVolcano:
         regulation[(frame['_fdr'] < spec.fdr_threshold)
                    & (frame['_log2fc'] <= -spec.fc_threshold)] = 'Down'
         y_raw = -np.log10(frame['_fdr'].to_numpy(dtype=float))
-        robust_y = float(np.nanpercentile(y_raw, 99.5)) if len(y_raw) else 0.0
         threshold_y = -np.log10(spec.fdr_threshold)
-        y_limit = max(4.0, threshold_y + 1.5, np.ceil(robust_y + 0.5))
-        y_limit = min(40.0, float(y_limit))
-        clipped = y_raw > y_limit
-        y_display = np.minimum(y_raw, y_limit * 0.985)
+        y_display, tail_info = _compress_fdr_tail(y_raw, threshold_y)
+        y_limit = max(4.0, threshold_y + 1.5, float(np.ceil(np.nanmax(y_display) + 0.6)))
         x_abs = np.abs(frame['_log2fc'].to_numpy(dtype=float))
-        x_limit = max(spec.fc_threshold * 1.6, float(np.nanpercentile(x_abs, 99.8)) * 1.08, 1.5)
+        # Use the full observed range so extreme-fold-change points are drawn at
+        # their true positions instead of being clipped to a vertical strip on
+        # both axes edges (the “两边又跑出画面” volcano artifact).  This mirrors
+        # the bulk DEG volcano contract.
+        finite_x = x_abs[np.isfinite(x_abs)]
+        max_abs_x = float(np.nanmax(finite_x)) if finite_x.size else 0.0
+        x_limit = max(spec.fc_threshold * 1.8, max_abs_x * 1.08, 2.5)
         x_limit = float(np.ceil(x_limit * 2) / 2)
         x_display = np.clip(frame['_log2fc'].to_numpy(dtype=float), -x_limit * 0.99, x_limit * 0.99)
 
@@ -102,14 +173,6 @@ class NatureVolcano:
                         s=point_size, color=style.deg_palette[label],
                         alpha=alpha, linewidths=0, rasterized=True, zorder=zorder,
                     )
-            if clipped.any():
-                ax.scatter(
-                    x_display[clipped], y_display[clipped],
-                    s=11, marker='^',
-                    c=[style.deg_palette[value] for value in regulation.to_numpy()[clipped]],
-                    linewidths=0, alpha=0.9, rasterized=True, zorder=3,
-                )
-
             threshold_color = style.neutral_dark
             ax.axhline(threshold_y, color=threshold_color, linestyle=(0, (3, 2)),
                        linewidth=0.55, zorder=0)
@@ -120,8 +183,21 @@ class NatureVolcano:
             ax.set_xlim(-x_limit, x_limit)
             ax.set_ylim(0, y_limit)
             ax.set_xlabel(r'log$_2$(fold change)')
-            ax.set_ylabel(r'$-\log_{10}$(FDR)')
-            ax.set_title(spec.title or 'Differential expression', loc='left', pad=5)
+            ax.set_ylabel(
+                r'$-\log_{10}$(FDR) · compressed tail'
+                if tail_info else r'$-\log_{10}$(FDR)'
+            )
+            if tail_info:
+                tick_locations, tick_labels = _tail_tick_values(tail_info)
+                ax.set_yticks(tick_locations, tick_labels)
+            title_width = 38 if spec.width == 'single' else 72
+            wrapped_title = _wrap_title(
+                spec.title, 'Differential expression', title_width,
+            )
+            ax.set_title(
+                wrapped_title,
+                loc='left', pad=5,
+            )
             style.apply_axis(ax, profile)
 
             counts = {label: int((regulation == label).sum()) for label in ('Up', 'Down', 'NS')}
@@ -156,13 +232,19 @@ class NatureVolcano:
                 ]
                 ax.legend(handles=handles, loc='lower right', frameon=False,
                           handletextpad=0.35, borderaxespad=0.2)
-            fig.subplots_adjust(left=0.19, right=0.97, bottom=0.17, top=0.90)
+            title_lines = wrapped_title.count('\n') + 1
+            top = max(0.76, 0.90 - 0.055 * (title_lines - 1))
+            fig.subplots_adjust(left=0.19, right=0.97, bottom=0.17, top=top)
 
         if container is not None:
             return container
         return attach_contract(
             fig, spec, style,
             semantic_warnings=warnings + semantic_warnings,
-            encodings={'color': 'DEG direction', 'shape': 'clipped FDR'},
+            encodings={
+                'color': 'DEG direction',
+                'y': ('-log10(FDR), monotonic tail compression' if tail_info
+                      else '-log10(FDR)'),
+            },
             validation_texts=texts,
         )

@@ -86,7 +86,7 @@ def get_markers(cell_type, user_positive=None, user_negative=None):
             'warnings': list[str],
         }
     """
-    builtin = BUILTIN_MARKERS.get(cell_type.lower(), {})
+    builtin = BUILTIN_MARKERS.get(str(cell_type).lower(), {})
     builtin_pos = builtin.get('positive', [])
     builtin_neg = builtin.get('negative', [])
     warnings = []
@@ -104,9 +104,20 @@ def get_markers(cell_type, user_positive=None, user_negative=None):
         return {
             'cell_type': cell_type,
             'positive': [g.upper().strip() for g in user_positive],
-            'negative': [g.upper().strip() for g in (user_negative or builtin_neg)],
+            'negative': [g.upper().strip() for g in builtin_neg],
             'source': 'mixed',
-            'warnings': [] if user_negative else warnings,
+            'warnings': warnings,
+        }
+
+    # 只提供负向 marker 时也必须生效：正向取内置，负向取用户输入。
+    # （此前该分支不存在，user_negative 会被静默丢弃。）
+    if user_negative and not user_positive:
+        return {
+            'cell_type': cell_type,
+            'positive': builtin_pos,
+            'negative': [g.upper().strip() for g in user_negative],
+            'source': 'mixed',
+            'warnings': warnings,
         }
 
     if not builtin_pos:

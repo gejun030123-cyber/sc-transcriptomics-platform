@@ -52,7 +52,9 @@ class TestAnnotationMarkers:
     def test_marker_sets_keys(self):
         """MARKER_SETS 包含内置注释基因集。"""
         from modules.annotation import MARKER_SETS
-        assert set(MARKER_SETS.keys()) == {'Universal', 'TME', 'Immune', 'Blood', 'PBMC'}
+        assert set(MARKER_SETS.keys()) == {
+            'Universal', 'Colorectal', 'TME', 'Immune', 'Blood', 'PBMC',
+        }
 
     def test_organoid_marker_sets_cover_common_tissues(self):
         """类器官面板按组织拆分，且每个类型至少有多个 marker。"""
@@ -132,13 +134,10 @@ class TestElbowLogic:
 
     @staticmethod
     def _elbow_select(variance_ratio):
-        """复现 dimred.py 中的肘部法公式。"""
-        cumvar = np.cumsum(variance_ratio)
-        diffs = np.diff(cumvar)
-        diffs2 = np.diff(diffs)
-        n_comps_auto = int(np.argmax(diffs2) + 2)  # +2 for diff offsets
-        n_comps_auto = max(5, min(n_comps_auto, len(variance_ratio)))
-        return n_comps_auto
+        """调用降维模块实际使用的肘部法逻辑。"""
+        from modules.dimred import _select_elbow_n_comps
+
+        return _select_elbow_n_comps(variance_ratio, len(variance_ratio))
 
     def test_elbow_with_plateau(self):
         """方差比在索引 5 附近平台化 → 选择约 5-7 个 PC。"""
@@ -204,6 +203,28 @@ class TestDEGLogic:
         assert VOLCANO_COLOR_MAP['Down'] == '#0F4D92'
         assert VOLCANO_COLOR_MAP['NS'] == '#98A2B3'
 
+    def test_detection_fraction_is_joined_by_gene_not_rank_position(self):
+        """Scanpy pts uses var order and must not be zipped to ranked names."""
+        from modules.deg import max_detection_fraction_by_gene
+
+        rank_result = {
+            'names': np.array(
+                [('A_MARKER', 'B_MARKER'), ('UNUSED', 'UNUSED'),
+                 ('B_MARKER', 'A_MARKER')],
+                dtype=[('A', object), ('B', object)],
+            ),
+            'pts': pd.DataFrame(
+                {'A': [0.0, 0.0, 1.0], 'B': [1.0, 0.0, 0.0]},
+                index=['B_MARKER', 'UNUSED', 'A_MARKER'],
+            ),
+        }
+
+        detected = max_detection_fraction_by_gene(rank_result)
+
+        assert detected['A_MARKER'] == 1.0
+        assert detected['B_MARKER'] == 1.0
+        assert detected['UNUSED'] == 0.0
+
     def test_correction_map(self):
         """校正方法映射正确。"""
         correction_map = {
@@ -267,11 +288,13 @@ class TestGeneFlagging:
         pd.testing.assert_series_equal(result, expected)
 
     def test_ribo_flagging(self):
-        """以 'RPS' 或 'RPL' 开头的基因应被标记为核糖体基因。"""
-        genes = pd.Series(['RPS2', 'RPL13A', 'GAPDH', 'RPS27', 'RPLP0', 'ACTB'])
-        result = genes.str.startswith(('RPS', 'RPL'))
-        expected = pd.Series([True, True, False, True, True, False])
-        pd.testing.assert_series_equal(result, expected)
+        """只标记核糖体蛋白，不误标 RPS6 激酶。"""
+        from modules.qc import _ribosomal_gene_mask
+
+        genes = ['RPS2', 'RPL13A', 'GAPDH', 'RPS27', 'RPLP0', 'RPS6KA1']
+        result = _ribosomal_gene_mask(genes)
+
+        assert result == [True, True, False, True, True, False]
 
     def test_hb_flagging(self):
         """'HBA1' 应匹配 hb 模式，'HPRT1' 不应匹配。"""
@@ -387,6 +410,34 @@ class TestBatchCorrectValidateInput:
         result = mod.validate_input(adata)
         assert result is None
 
+    def test_corrected_requested_without_corrected_representation_is_rejected(self):
+        """请求校正表示时不能静默退回原始 PCA。"""
+        from modules.clustering import ClusteringAnalysis
+        mod = ClusteringAnalysis(
+            project_dir='/tmp/test',
+            params={'resolutions': '0.8', 'use_corrected': True},
+            progress_callback=lambda pct, msg: None,
+        )
+        adata = _make_adata_for_validation(obsm={'X_pca': np.random.rand(10, 5)})
+        result = mod.validate_input(adata)
+        assert isinstance(result, str)
+        assert '不会静默回退' in result
+
+    def test_corrected_requested_prefers_harmony_representation(self):
+        """Harmony 表示存在时，校正请求解析为 X_pca_harmony。"""
+        from modules.clustering import ClusteringAnalysis
+        mod = ClusteringAnalysis(
+            project_dir='/tmp/test',
+            params={'resolutions': '0.8', 'use_corrected': True},
+            progress_callback=lambda pct, msg: None,
+        )
+        adata = _make_adata_for_validation(obsm={
+            'X_pca': np.random.rand(10, 5),
+            'X_pca_harmony': np.random.rand(10, 5),
+        })
+        assert mod.validate_input(adata) is None
+        assert mod._resolve_representation(adata, True) == 'X_pca_harmony'
+
 
 class TestClusteringValidateInput:
     """测试 clustering 模块的输入校验。"""
@@ -400,20 +451,32 @@ class TestClusteringValidateInput:
         )
         return mod
 
-    def test_missing_umap_returns_error(self):
-        """adata 无 X_umap → 返回错误字符串。"""
+    def test_missing_umap_is_allowed_when_representation_exists(self):
+        """聚类会从 PCA/校正表示重算 UMAP，不要求旧 X_umap。"""
         mod = self._get_module()
-        adata = _make_adata_for_validation()
+        adata = _make_adata_for_validation(obsm={
+            'X_pca': np.random.rand(10, 5),
+        })
         result = mod.validate_input(adata)
-        assert isinstance(result, str)
-        assert 'UMAP' in result or 'umap' in result.lower()
+        assert result is None
 
     def test_with_umap_returns_none(self):
-        """adata 有 X_umap → 返回 None（校验通过）。"""
+        """adata 有 UMAP 和 PCA 表示 → 返回 None（校验通过）。"""
+        mod = self._get_module()
+        adata = _make_adata_for_validation(obsm={
+            'X_umap': np.random.rand(10, 2),
+            'X_pca': np.random.rand(10, 5),
+        })
+        result = mod.validate_input(adata)
+        assert result is None
+
+    def test_missing_representation_returns_error(self):
+        """仅有 UMAP 不能支撑 KNN/聚类。"""
         mod = self._get_module()
         adata = _make_adata_for_validation(obsm={'X_umap': np.random.rand(10, 2)})
         result = mod.validate_input(adata)
-        assert result is None
+        assert isinstance(result, str)
+        assert 'representation' in result.lower()
 
 
 class TestTrajectoryValidateInput:
@@ -437,8 +500,19 @@ class TestTrajectoryValidateInput:
         assert '邻居' in result or 'neighbor' in result.lower()
 
     def test_with_neighbors_returns_none(self):
-        """adata 有 neighbors → 返回 None（校验通过）。"""
+        """adata 有 neighbors 且含 X_umap → 返回 None（校验通过）。"""
+        mod = self._get_module()
+        adata = _make_adata_for_validation(
+            uns={'neighbors': {}},
+            obsm={'X_umap': np.random.rand(10, 2)},
+        )
+        result = mod.validate_input(adata)
+        assert result is None
+
+    def test_with_neighbors_but_missing_umap_returns_error(self):
+        """adata 有 neighbors 但无 X_umap → 返回错误字符串（防止下游 KeyError）。"""
         mod = self._get_module()
         adata = _make_adata_for_validation(uns={'neighbors': {}})
         result = mod.validate_input(adata)
-        assert result is None
+        assert isinstance(result, str)
+        assert 'UMAP' in result or 'umap' in result

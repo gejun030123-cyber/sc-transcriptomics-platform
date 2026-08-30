@@ -114,6 +114,11 @@ def _enrichment_plot_suite(params, method):
     complete suite shares the same SVG/PDF/PNG contract.  Incompatible views
     are never silently substituted with a generic seaborn/matplotlib chart.
     """
+    if (params or {}).get('_batch_subrun'):
+        # The primary dotplot is still emitted by the standard execution path.
+        # Suppress extra variants so five databases do not create dozens of
+        # near-duplicate images; the parent batch writes one overview.
+        return []
     value = str((params or {}).get('enrichment_plot_suite', '完整 Nature 套图') or '').lower()
     core = value in {'core', 'minimal', '核心图', '核心'}
     if str(method).upper() == 'ORA':
@@ -187,7 +192,8 @@ def _gsea_running_payload(pre_res, result_df, term_n=2, *, pathway_selection='to
 
 
 def _render_enrichment_variants(analysis, result_df, *, method, title, base_output_key,
-                                label, params=None, pre_res=None):
+                                label, params=None, pre_res=None,
+                                semantic_warnings=()):
     """Render the fixed additional pathway views through NatureFigureDirector."""
     from figure_engine import NatureFigureDirector
 
@@ -224,6 +230,10 @@ def _render_enrichment_variants(analysis, result_df, *, method, title, base_outp
                 formats=('svg', 'pdf', 'png'),
             )
             figure = director.render(spec, data)
+            if semantic_warnings:
+                existing = getattr(figure, '_nature_semantic_warnings', None)
+                if existing is not None:
+                    existing.extend(str(item) for item in semantic_warnings if str(item).strip())
             suffix = {
                 'enrichment_dotplot': 'dotplot',
                 'gsea': 'gsea',
@@ -388,11 +398,12 @@ def _integrated_enrichment_overview(group, comparison, method, direction):
     return director.render(spec, group)
 
 
-def _write_integrated_overview_figures(integrated, results_path):
+def _write_integrated_overview_figures(integrated, results_path, *, plots_dir=None,
+                                       output_prefix='enrichment_overview'):
     """Export one overview image for each comparable contrast/database group."""
     import matplotlib.pyplot as plt
 
-    plots_dir = Path(results_path).parent / 'plots'
+    plots_dir = Path(plots_dir) if plots_dir else Path(results_path).parent / 'plots'
     plots_dir.mkdir(parents=True, exist_ok=True)
     outputs = []
     group_columns = ['Comparison', 'Method', 'Direction']
@@ -401,7 +412,7 @@ def _write_integrated_overview_figures(integrated, results_path):
         if figure is None:
             continue
         output_key = '_'.join([
-            'enrichment_overview', _safe_output_fragment(method),
+            output_prefix, _safe_output_fragment(method),
             _safe_output_fragment(comparison), _safe_output_fragment(direction),
         ])
         from figure_engine import export_registered_figure
@@ -426,19 +437,24 @@ def _write_integrated_overview_figures(integrated, results_path):
     return outputs
 
 
-def _write_enrichment_integration(results_dir):
-    """Create project-level CSV/XLSX tables from all database-specific results.
+def _write_enrichment_integration(results_dir, *, source_paths=None, plots_dir=None,
+                                  output_prefix='enrichment'):
+    """Create an integrated table from explicitly selected enrichment outputs.
 
     Each source table carries ``Comparison``, ``Database``, ``Method`` and
     ``Direction``.  The integration intentionally retains those fields instead
     of merging similarly named pathways across libraries, whose gene-set
-    definitions may differ.
+    definitions may differ. ``source_paths`` is required for task-scoped batch
+    execution; the legacy directory scan remains only for older single runs.
     """
     results_path = Path(results_dir)
-    source_files = sorted(
-        path for path in results_path.glob('enrichment_*_results.csv')
-        if path.name not in {'enrichment_integrated_results.csv'}
-    )
+    if source_paths is None:
+        source_files = sorted(
+            path for path in results_path.glob('enrichment_*_results.csv')
+            if path.name not in {'enrichment_integrated_results.csv'}
+        )
+    else:
+        source_files = [Path(path) for path in source_paths]
     tables = []
     for path in source_files:
         try:
@@ -480,16 +496,19 @@ def _write_enrichment_integration(results_dir):
     )
 
     output_files = []
-    csv_path = results_path / 'enrichment_integrated_results.csv'
+    csv_path = results_path / f'{output_prefix}_integrated_results.csv'
     integrated.to_csv(csv_path, index=False)
     output_files.append({
         'file_path': str(csv_path), 'file_type': 'csv', 'category': 'table',
         'label': f'通路富集整合表（{len(integrated)} 条）',
     })
-    output_files.extend(_write_integrated_overview_figures(integrated, results_path))
+    output_files.extend(_write_integrated_overview_figures(
+        integrated, results_path, plots_dir=plots_dir,
+        output_prefix=f'{output_prefix}_overview',
+    ))
 
     try:
-        xlsx_path = results_path / 'enrichment_integrated_results.xlsx'
+        xlsx_path = results_path / f'{output_prefix}_integrated_results.xlsx'
         summary_source = integrated.copy()
         if 'Significant' in summary_source.columns:
             summary_source['_significant'] = (
@@ -1106,7 +1125,168 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
     def validate_input(self, adata):
         return None
 
+    @staticmethod
+    def _batch_database_names(value):
+        """Normalise the explicitly selected standard database names."""
+        if isinstance(value, (list, tuple, set)):
+            raw_values = value
+        else:
+            raw_values = re.split(r'[,;\n]+', str(value or ''))
+        allowed = ('GO_BP', 'GO_MF', 'GO_CC', 'KEGG', 'Reactome', 'WikiPathways')
+        selected = []
+        for raw in raw_values:
+            database = str(raw).strip()
+            if not database:
+                continue
+            if database not in allowed:
+                raise ValueError(f'不支持的批量 Human 基因集数据库: {database}')
+            if database not in selected:
+                selected.append(database)
+        if not selected:
+            raise ValueError('请至少选择一个批量 Human 基因集数据库。')
+        return selected
+
+    def _output_directories(self):
+        """Return regular paths or a validated, task-local batch workspace."""
+        batch_key = str(self.params.get('_batch_output_key', '') or '').strip()
+        if not batch_key:
+            return (
+                os.path.join(self.project_dir, 'plots'),
+                os.path.join(self.project_dir, 'results'),
+            )
+        safe_key = _safe_output_fragment(batch_key, fallback='batch')
+        project_root = Path(self.project_dir).resolve()
+        results_dir = (project_root / 'results' / 'enrichment_batches' / safe_key).resolve()
+        plots_dir = (project_root / 'plots' / 'enrichment_batches' / safe_key).resolve()
+        if project_root not in results_dir.parents or project_root not in plots_dir.parents:
+            raise ValueError('批量富集输出目录必须位于当前项目内。')
+        return str(plots_dir), str(results_dir)
+
+    def _run_database_batch(self, input_path, databases):
+        """Run one fixed DEG contrast against several independent libraries.
+
+        A library is a statistical unit here: failures are retained in the
+        summary without invalidating successful libraries, and the final
+        integration receives only the result paths generated in this task.
+        """
+        batch_key = _safe_output_fragment(
+            self.params.get('_analysis_id', 'adhoc_batch'), fallback='adhoc_batch',
+        )
+        batch_params = dict(self.params)
+        batch_params['_batch_output_key'] = batch_key
+        workspace = BulkEnrichmentAnalysis(
+            project_dir=self.project_dir, params=batch_params,
+            progress_callback=self._progress,
+        )
+        plots_dir, results_dir = workspace._output_directories()
+        os.makedirs(plots_dir, exist_ok=True)
+        os.makedirs(results_dir, exist_ok=True)
+
+        result_files = []
+        database_rows = []
+        source_paths = []
+        total = len(databases)
+        for index, database in enumerate(databases, start=1):
+            self.progress(
+                int(3 + (index - 1) * 88 / total),
+                f'批量富集 {index}/{total}: {database}',
+            )
+            sub_params = dict(self.params)
+            sub_params.update({
+                'batch_databases': False,
+                'databases': '',
+                'database': database,
+                '_batch_subrun': True,
+                '_batch_output_key': batch_key,
+            })
+
+            def sub_progress(percent, message, *, _index=index, _database=database):
+                completed = (_index - 1) + max(0, min(100, int(percent))) / 100.0
+                overall = int(3 + completed * 88 / total)
+                self.progress(overall, f'批量富集 {_index}/{total} · {_database}: {message}')
+
+            try:
+                sub_result = BulkEnrichmentAnalysis(
+                    project_dir=self.project_dir, params=sub_params,
+                    progress_callback=sub_progress,
+                ).run(input_path)
+            except Exception as exc:
+                database_rows.append({
+                    'database': database, 'status': 'failed', 'error': str(exc)[:600],
+                })
+                continue
+
+            result_files.extend(sub_result.get('result_files') or [])
+            summary = dict(sub_result.get('summary') or {})
+            full_result_path = summary.pop('full_results_path', '')
+            if full_result_path and os.path.isfile(full_result_path):
+                source_paths.append(full_result_path)
+            database_rows.append({
+                'database': database,
+                'status': 'completed',
+                'n_input_genes': summary.get('n_input_genes'),
+                'n_background_genes': summary.get('n_background_genes'),
+                'n_ranked_genes': summary.get('n_ranked_genes'),
+                'n_tested': summary.get('n_tested'),
+                'n_significant': summary.get('n_significant'),
+                'gene_set_sha256': summary.get('gene_set_sha256'),
+                'gene_set_library': summary.get('gene_set_library'),
+                'mapping_rates': summary.get('mapping_rates'),
+                'mapping_warnings': summary.get('mapping_warnings', []),
+            })
+
+        summary_frame = pd.DataFrame(database_rows)
+        summary_path = Path(results_dir) / f'enrichment_batch_{batch_key}_summary.csv'
+        summary_frame.to_csv(summary_path, index=False)
+        result_files.append({
+            'file_path': str(summary_path), 'file_type': 'csv', 'category': 'table',
+            'label': f'批量富集数据库汇总（{len(databases)} 个）',
+        })
+        manifest = {
+            'comparison': str(self.params.get('input_comparison', '') or ''),
+            'method': str(self.params.get('method', 'ORA') or 'ORA').upper(),
+            'databases_requested': list(databases),
+            'databases': database_rows,
+            'fdr_scope': '每个比较 × 数据库 × 方向独立 BH/FDR；概览不重新校正。',
+            'source_result_files': [Path(path).name for path in source_paths],
+        }
+        manifest_path = Path(results_dir) / f'enrichment_batch_{batch_key}_manifest.json'
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
+        result_files.append({
+            'file_path': str(manifest_path), 'file_type': 'json', 'category': 'qc',
+            'label': '批量富集执行与统计范围说明',
+        })
+
+        if source_paths:
+            integration_prefix = f'enrichment_batch_{batch_key}'
+            result_files.extend(_write_enrichment_integration(
+                results_dir, source_paths=source_paths, plots_dir=plots_dir,
+                output_prefix=integration_prefix,
+            ))
+
+        completed = [row for row in database_rows if row['status'] == 'completed']
+        self.progress(100, '批量富集完成')
+        summary = {
+            'method': manifest['method'],
+            'comparison': manifest['comparison'],
+            'databases_requested': list(databases),
+            'database_results': database_rows,
+            'n_databases_completed': len(completed),
+            'n_databases_failed': len(databases) - len(completed),
+            'n_tested': int(sum(row.get('n_tested') or 0 for row in completed)),
+            'n_significant': int(sum(row.get('n_significant') or 0 for row in completed)),
+            'fdr_scope': manifest['fdr_scope'],
+        }
+        if not completed:
+            summary['error'] = '所有指定基因集数据库均未能完成；请查看批量富集审计文件。'
+        return {'output_adata': None, 'result_files': result_files, 'summary': summary}
+
     def run(self, input_path):
+        if (self.params.get('batch_databases') in (True, 'true', 'on', '1')
+                and not self.params.get('_batch_subrun')):
+            return self._run_database_batch(
+                input_path, self._batch_database_names(self.params.get('databases', '')),
+            )
         method = str(self.params.get('method', 'ORA') or 'ORA').upper()
         database = str(self.params.get('database', 'GO_BP') or 'GO_BP')
         organism = str(self.params.get('organism', 'Human') or 'Human')
@@ -1172,8 +1352,7 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
         self.progress(15, f"加载 {database} 基因集数据库...")
 
         result_files = []
-        plots_dir = os.path.join(self.project_dir, 'plots')
-        results_dir = os.path.join(self.project_dir, 'results')
+        plots_dir, results_dir = self._output_directories()
         os.makedirs(plots_dir, exist_ok=True)
         os.makedirs(results_dir, exist_ok=True)
         geneset_snapshot_file = None
@@ -1613,11 +1792,13 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
         # Results created before contrast-aware enrichment stored no source
         # metadata.  Repair registered legacy tables before building the shared
         # overview so an old GO result and a new KEGG result can be grouped.
-        _backfill_legacy_enrichment_metadata(self.project_dir, results_dir)
+        if not self.params.get('_batch_subrun'):
+            _backfill_legacy_enrichment_metadata(self.project_dir, results_dir)
 
-        # Rebuild the project-level table after every run, retaining source
-        # database/method/direction for valid cross-database comparison.
-        result_files.extend(_write_enrichment_integration(results_dir))
+            # Rebuild the legacy project-level table after a single-library
+            # run. Batch runs integrate only their explicit child result paths
+            # in _run_database_batch(), never the whole project directory.
+            result_files.extend(_write_enrichment_integration(results_dir))
 
         # Clean up temporary enrichment directories
         import shutil
@@ -1671,6 +1852,9 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
                 'n_leading_edge_rows': int(
                     len(leading_edge_frame) if leading_edge_frame is not None else 0
                 ),
+                # Used internally by the parent batch coordinator. The worker
+                # rewrites this path when it snapshots declared result files.
+                'full_results_path': full_results_path,
                 'figure_layout_qc': {
                     'n_figures': len(figure_audits),
                     'n_figures_with_overlap': sum(

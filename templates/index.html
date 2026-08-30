@@ -46,6 +46,7 @@
             <div class="small text-muted mb-2">创建于: {{ p.created_at[:10] }}</div>
             <div>
                 <a href="/projects/{{ p.id }}" class="btn btn-outline-primary btn-sm">查看</a>
+                <a href="/projects/{{ p.id }}/workspace" class="btn btn-primary btn-sm">AI 工作台</a>
                 <form method="post" action="/projects/{{ p.id }}/delete" class="d-inline"
                       onsubmit="return confirm('确定删除此项目及其所有数据？')">
                     <button class="btn btn-outline-danger btn-sm">删除</button>

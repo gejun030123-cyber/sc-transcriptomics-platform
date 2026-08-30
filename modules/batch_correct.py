@@ -1,5 +1,7 @@
 from modules.base import BaseAnalysis
 from modules.io_utils import resolve_obs_grouping, obs_grouping_info
+from modules.pc_strategy import resolve_analysis_n_pcs
+from modules.sc_de_utils import _matrix_is_raw_counts
 
 
 class BatchCorrectAnalysis(BaseAnalysis):
@@ -76,8 +78,15 @@ class BatchCorrectAnalysis(BaseAnalysis):
                 max_iter_harmony=int(self.params.get('harmony_max_iter', 20)),
             )
         embedding = result.Z_corr
-        if embedding.shape[0] == pcs.shape[1]:
+        # Harmony 返回 (n_cells, n_pcs)；旧版 harmonypy 偶见转置输出。
+        # 用期望形状判断而不是 n_cells == n_pcs 的方阵巧合判断。
+        expected_shape = (int(adata.n_obs), int(pcs.shape[1]))
+        if embedding.shape != expected_shape and embedding.shape == expected_shape[::-1]:
             embedding = embedding.T
+        elif embedding.shape != expected_shape:
+            raise RuntimeError(
+                f"Harmony 输出形状 {embedding.shape} 与期望 {expected_shape} 不符"
+            )
         adata.obsm['X_pca_harmony'] = embedding
         return 'X_pca_harmony', {'theta': theta, 'lambda': lamb}
 
@@ -92,7 +101,7 @@ class BatchCorrectAnalysis(BaseAnalysis):
         adata.obsm['X_pca_combat'] = combat_adata.obsm['X_pca'][:, :actual_n_pcs].copy()
         return 'X_pca_combat', {'n_hvg_for_combat': int(combat_adata.n_vars)}
 
-    def _run_bbknn(self, adata, batch_key):
+    def _run_bbknn(self, adata, batch_key, n_pcs=None):
         import bbknn
 
         requested_neighbors = max(1, int(self.params.get('bbknn_neighbors_within_batch', 3)))
@@ -114,12 +123,29 @@ class BatchCorrectAnalysis(BaseAnalysis):
                 f'{requested_neighbors} to {neighbors_within_batch} because the smallest '
                 f'batch has {min_batch_size} cell(s).'
             )
+        bbknn_kwargs = {
+            'batch_key': batch_key,
+            'neighbors_within_batch': neighbors_within_batch,
+            'use_rep': 'X_pca',
+        }
+        if n_pcs is not None:
+            bbknn_kwargs['n_pcs'] = int(n_pcs)
+            method_info['n_pcs'] = int(n_pcs)
         bbknn.bbknn(
             adata,
-            batch_key=batch_key,
-            neighbors_within_batch=neighbors_within_batch,
-            use_rep='X_pca',
+            **bbknn_kwargs,
         )
+        # BBKNN 的整合结果保存在邻居图（obsp['connectivities']）中，而不是
+        # 一个新的 obsm 表示。记录该事实，让下游聚类模块可以复用这张图，
+        # 而不是静默丢掉 BBKNN 结果或误报缺少校正表示。
+        if hasattr(adata, 'uns') and isinstance(adata.uns, dict):
+            adata.uns['bbknn_corrected_graph'] = {
+                'method': 'bbknn',
+                'batch_key': batch_key,
+                'neighbors_within_batch': neighbors_within_batch,
+                'use_rep': 'X_pca',
+                'n_pcs': int(n_pcs) if n_pcs is not None else None,
+            }
         return 'X_pca', method_info
 
     def _run_scanorama(self, adata, batch_key, n_pcs):
@@ -127,6 +153,17 @@ class BatchCorrectAnalysis(BaseAnalysis):
         import scanorama
 
         work = self._hvg_adata(adata)
+        # Scanorama 内部会对输入逐行重新归一化并做 PCA（process_data），
+        # 期望的是表达量/文库尺度而非 log1p 值；与 scVI/SysVI 分支一致，
+        # 用原始 counts 层作为输入（只消费其 obsm['X_scanorama'] 输出）。
+        if 'counts' in work.layers:
+            from modules.sc_de_utils import _matrix_is_raw_counts
+            if _matrix_is_raw_counts(work.layers['counts']):
+                work.X = work.layers['counts'].copy()
+            else:
+                self.progress(-1, 'Scanorama：counts 层不是非负整数原始计数，使用当前 X 尺度。')
+        else:
+            self.progress(-1, '未找到 counts 层，Scanorama 将使用当前 X 尺度（可能是 log1p 值）。')
         batch_values = list(work.obs[batch_key].astype(str).unique())
         batches = [work[work.obs[batch_key].astype(str) == b].copy() for b in batch_values]
         scanorama.integrate_scanpy(batches, dimred=n_pcs)
@@ -161,7 +198,16 @@ class BatchCorrectAnalysis(BaseAnalysis):
 
         work = self._hvg_adata(adata)
         scvi.settings.seed = int(self.params.get('sysvi_seed', 0))
-        SysVI.setup_anndata(work, batch_key=batch_key)
+        # SysVI is a count-generative model.  Falling back to normalized X is
+        # not a harmless convenience: it changes the likelihood scale while
+        # still returning an apparently valid latent embedding.
+        if 'counts' not in work.layers or not _matrix_is_raw_counts(work.layers['counts']):
+            raise ValueError(
+                "SysVI 需要 layers['counts'] 中的非负整数原始 UMI counts；"
+                "请先运行保留 counts 层的 QC/标准化流程。"
+            )
+        layer_for_training = 'counts'
+        SysVI.setup_anndata(work, batch_key=batch_key, layer=layer_for_training)
         model = SysVI(
             work,
             prior=sysvi_prior,
@@ -217,8 +263,12 @@ class BatchCorrectAnalysis(BaseAnalysis):
         max_epochs = int(self.params.get('max_epochs', 80))
 
         work = self._hvg_adata(adata)
-        layer = 'counts' if 'counts' in work.layers else None
-        scvi.model.SCVI.setup_anndata(work, layer=layer, batch_key=batch_key)
+        if 'counts' not in work.layers or not _matrix_is_raw_counts(work.layers['counts']):
+            raise ValueError(
+                "scVI 需要 layers['counts'] 中的非负整数原始 UMI counts；"
+                "请先运行保留 counts 层的 QC/标准化流程。"
+            )
+        scvi.model.SCVI.setup_anndata(work, layer='counts', batch_key=batch_key)
         model = scvi.model.SCVI(
             work,
             n_latent=scvi_n_latent,
@@ -363,6 +413,51 @@ class BatchCorrectAnalysis(BaseAnalysis):
             if info.get('valid'):
                 return key
         return ''
+
+    def _stratified_mixing_metrics(self, adata, representation, batch_key, sample_indices):
+        """Evaluate donor mixing within each biological label when available."""
+        import numpy as np
+        import pandas as pd
+        from sklearn.neighbors import NearestNeighbors
+
+        bio_key = self._bio_label_key(adata)
+        if not bio_key or bio_key == batch_key:
+            return bio_key, []
+        representation = np.asarray(representation, dtype=float)
+        sample_indices = np.asarray(sample_indices, dtype=int)
+        batch_labels = adata.obs[batch_key].astype(str).to_numpy()
+        bio_labels = adata.obs[bio_key].astype(str).to_numpy()
+        rows = []
+        group_counts = pd.Series(bio_labels[sample_indices]).value_counts()
+        for group in group_counts.head(20).index.tolist():
+            indices = sample_indices[bio_labels[sample_indices] == str(group)]
+            if len(indices) < 4 or len(np.unique(batch_labels[indices])) < 2:
+                continue
+            asw, _ = self._silhouette_on_indices(
+                representation, pd.Series(batch_labels), indices,
+            )
+            same_fraction = np.nan
+            valid = np.isfinite(representation[indices]).all(axis=1)
+            valid_indices = indices[valid]
+            if len(valid_indices) >= 4:
+                k = min(15, len(valid_indices) - 1)
+                try:
+                    neighbors = NearestNeighbors(n_neighbors=k + 1).fit(
+                        representation[valid_indices],
+                    ).kneighbors(return_distance=False)[:, 1:]
+                    same_fraction = float(np.mean(
+                        batch_labels[valid_indices[neighbors]] == batch_labels[valid_indices, None]
+                    ))
+                except Exception:
+                    same_fraction = np.nan
+            rows.append({
+                'group': str(group),
+                'n_cells': int(len(indices)),
+                'n_batches': int(len(np.unique(batch_labels[indices]))),
+                'abs_asw_batch': round(abs(float(asw)), 4) if asw is not None else np.nan,
+                'same_donor_neighbor_fraction': round(same_fraction, 4) if np.isfinite(same_fraction) else np.nan,
+            })
+        return bio_key, rows
 
     def _append_neighbor_mixing_metrics(self, metrics, representation, batch_codes,
                                         sample_indices, connectivities=None):
@@ -745,6 +840,16 @@ class BatchCorrectAnalysis(BaseAnalysis):
                 f'Evaluation cluster batch composition ({method})', formats=('png', 'svg'), dpi=300,
             ))
 
+        stratified = metrics.get('stratified_mixing') or []
+        if stratified:
+            from modules.sc_figure_diagnostics import stratified_mixing_figure
+            fig = stratified_mixing_figure(stratified, metrics.get('bio_label_key', 'cell type'))
+            if fig is not None:
+                result_files.extend(self.save_matplotlib_figure(
+                    fig, plots_dir, f'batch_eval_stratified_mixing_{method}.png', 'metrics',
+                    f'Stratified donor mixing ({method})', formats=('png', 'svg'), dpi=300,
+                ))
+
         table_rows = []
         for key, value in metrics.items():
             if isinstance(value, dict):
@@ -801,9 +906,17 @@ class BatchCorrectAnalysis(BaseAnalysis):
         if adata.obs[batch_key].nunique() < 2:
             raise ValueError(f"batch_key '{batch_key}' 只有一个取值，无法评估或执行批次整合")
 
-        n_pcs = int(self.params.get('n_pcs', 50))
-        if 'X_pca' in adata.obsm:
-            n_pcs = max(2, min(n_pcs, adata.obsm['X_pca'].shape[1]))
+        requested_n_pcs = int(self.params.get('n_pcs', 25))
+        n_pcs, pc_diagnostics = resolve_analysis_n_pcs(
+            adata, requested_n_pcs, representation_key='X_pca',
+        )
+        if n_pcs < requested_n_pcs or pc_diagnostics.get('upstream_selected_n_pcs'):
+            self.progress(
+                -1,
+                f"批次校正实际使用 {n_pcs} PCs（请求 {requested_n_pcs}；"
+                f"上游选择 {pc_diagnostics.get('upstream_selected_n_pcs', '—')}，"
+                f"PCA 维度 {pc_diagnostics['available_n_pcs']}）",
+            )
         umap_before = adata.obsm['X_umap'].copy() if 'X_umap' in adata.obsm else None
         method_info = {}
         graph_already_built = False
@@ -843,7 +956,7 @@ class BatchCorrectAnalysis(BaseAnalysis):
             corrected_key, method_info = self._run_combat(adata, batch_key, n_pcs)
         elif method == 'bbknn':
             self.progress(20, "Running BBKNN graph integration...")
-            corrected_key, method_info = self._run_bbknn(adata, batch_key)
+            corrected_key, method_info = self._run_bbknn(adata, batch_key, n_pcs)
             graph_already_built = True
         elif method == 'scanorama':
             self.progress(20, "Running Scanorama integration...")
@@ -892,6 +1005,33 @@ class BatchCorrectAnalysis(BaseAnalysis):
                 'UMAP before integration (batch)', formats=('png', 'svg'), dpi=300,
             ))
 
+            from modules.sc_figure_diagnostics import embedding_before_after_figure
+            fig_compare = embedding_before_after_figure(
+                umap_before, adata.obsm['X_umap'],
+                adata.obs[batch_key].astype(str).to_numpy(),
+                category_label=batch_key,
+                titles=(f'Before integration ({batch_key})', f'After {method} ({batch_key})'),
+            )
+            result_files.extend(self.save_matplotlib_figure(
+                fig_compare, plots_dir, f'batch_umap_before_after_{method}.png', 'umap',
+                f'Before/after {method} UMAP by batch', formats=('png', 'svg'), dpi=300,
+            ))
+
+        bio_label_key = self._bio_label_key(adata)
+        if bio_label_key and bio_label_key != batch_key and 'X_umap' in adata.obsm:
+            from modules.native_figures import umap_panel_figure
+            fig_bio = umap_panel_figure(
+                adata, [batch_key, bio_label_key],
+                titles=[f'After {method}: {batch_key}', f'After {method}: {bio_label_key}'],
+                point_size=5, opacity=0.74, ncols=2,
+            )
+            if fig_bio is not None:
+                result_files.extend(self.save_matplotlib_figure(
+                    fig_bio, plots_dir, f'batch_umap_after_donor_celltype_{method}.png',
+                    'umap', f'After {method} donor versus biological label',
+                    formats=('png', 'svg'), dpi=300, preserve_aspect=True,
+                ))
+
         eval_metrics = {}
         evaluation_comparison = None
         if evaluate:
@@ -909,6 +1049,12 @@ class BatchCorrectAnalysis(BaseAnalysis):
                     connectivities=post_connectivities,
                     include_cluster_metrics=True,
                 )
+                bio_label_key, stratified_mixing = self._stratified_mixing_metrics(
+                    adata, adata.obsm[corrected_key], batch_key, evaluation_indices,
+                )
+                if stratified_mixing:
+                    eval_metrics['bio_label_key'] = bio_label_key
+                    eval_metrics['stratified_mixing'] = stratified_mixing
                 evaluation_comparison = self._build_evaluation_comparison(
                     pre_eval_metrics, eval_metrics, evaluation_sampling, method
                 )
@@ -934,6 +1080,10 @@ class BatchCorrectAnalysis(BaseAnalysis):
             'requested_batch_key': requested_batch_key,
             'batch_key': batch_key,
             'method_info': method_info,
+            'requested_n_pcs': requested_n_pcs,
+            'n_pcs': n_pcs,
+            'pc_diagnostics': pc_diagnostics,
+            'bio_label_key': bio_label_key,
         }
         if eval_metrics:
             summary['eval_metrics'] = eval_metrics

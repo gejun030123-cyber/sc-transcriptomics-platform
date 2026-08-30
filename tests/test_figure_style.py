@@ -99,6 +99,40 @@ def test_native_grouped_bars_pool_high_cardinality_series():
     assert tuple(round(value, 1) for value in fig.get_size_inches()) == (7.0, 5.0)
 
 
+def test_native_bar_charts_keep_value_labels_inside_the_canvas():
+    import matplotlib.pyplot as plt
+
+    from modules.native_figures import bar_figure
+
+    figure = bar_figure(
+        ['Increase', 'Decrease'], [12.0, -6.0],
+        annotations=['12.0', '-6.0'], rotation=0,
+    )
+    axis = figure.axes[0]
+    figure.canvas.draw()
+    axes_box = axis.get_window_extent(figure.canvas.get_renderer())
+    assert all(axes_box.contains(*text.get_window_extent(figure.canvas.get_renderer()).get_points()[0])
+               or axes_box.contains(*text.get_window_extent(figure.canvas.get_renderer()).get_points()[1])
+               for text in axis.texts)
+    assert not any(line.get_visible() for line in axis.get_ygridlines())
+    plt.close(figure)
+
+
+def test_native_diverging_deg_bar_chart_uses_zero_baseline_and_directional_legend():
+    import matplotlib.pyplot as plt
+
+    from modules.native_figures import diverging_bar_figure
+
+    figure = diverging_bar_figure(['cluster_0', 'cluster_1'], [13, 7], [4, 11])
+    axis = figure.axes[0]
+    assert any(tuple(line.get_ydata()) == (0, 0) for line in axis.lines)
+    assert [text.get_text() for text in axis.get_legend().get_texts()] == [
+        'Down-regulated', 'Up-regulated',
+    ]
+    assert min(patch.get_height() for patch in axis.patches) < 0
+    plt.close(figure)
+
+
 def test_native_save_preserves_layout_dimensions(tmp_path):
     import matplotlib.pyplot as plt
     from PIL import Image
@@ -145,6 +179,41 @@ def test_native_save_can_preserve_panel_aspect_with_visualization_defaults(tmp_p
     assert result[0]['file_type'] == 'png'
     width, height = Image.open(tmp_path / 'panel.png').size
     assert width / height > 2.5
+
+
+def test_native_save_does_not_shrink_label_dense_canvas(tmp_path):
+    """UI defaults must not compress a native figure sized for long labels."""
+    import numpy as np
+    from PIL import Image
+
+    from modules.base import BaseAnalysis
+    from modules.native_figures import marker_dotplot_figure
+
+    class Stub(BaseAnalysis):
+        MODULE_NAME = 'style_stub'
+
+        def run(self, input_path):
+            return {}
+
+    categories = [f'cell type {index} with long label' for index in range(10)]
+    genes = [f'GENE{index}' for index in range(12)]
+    fig = marker_dotplot_figure(
+        np.ones((len(categories), len(genes))),
+        np.full((len(categories), len(genes)), 0.5),
+        categories, genes, title='Dense marker validation',
+    )
+    native_width = float(fig.get_size_inches()[0])
+    Stub(
+        str(tmp_path),
+        {'_visualization': {'figure_width': 800, 'figure_height': 500}},
+        lambda *_: None,
+    ).save_matplotlib_figure(
+        fig, str(tmp_path), 'dense_dotplot.png', 'dotplot', 'Dense dotplot',
+        formats=('png',), dpi=100,
+    )
+
+    width, _ = Image.open(tmp_path / 'dense_dotplot.png').size
+    assert width >= int(native_width * 100 * 0.90)
 
 
 def test_correlation_heatmap_masks_diagonal_and_uses_readable_scale():

@@ -22,6 +22,7 @@ from .templates import (
     NatureEnrichmentEmapplot,
     NatureCorrelationHeatmap,
     NatureDiagnostic,
+    NatureEmbedding,
     NatureGSEA,
     NatureGSEARunning,
     NatureGSVA,
@@ -69,8 +70,11 @@ _PLOT_ALIASES = {
     "upset": "upset",
     "wgcna": "wgcna",
     "module_trait": "wgcna",
-    # Secondary Bulk RNA diagnostics use one deterministic renderer.  The
-    # alias remains explicit so callers can keep a scientific plot name while
+    "embedding": "embedding",
+    "umap": "embedding",
+    "tsne": "embedding",
+    # Bulk and single-cell diagnostics use one deterministic renderer. The
+    # aliases remain explicit so callers can keep scientific plot names while
     # visual constants stay in the engine.
     "diagnostic": "diagnostic",
     "normalization": "diagnostic",
@@ -110,6 +114,7 @@ class NatureFigureDirector:
             "ssgsea": NatureSSGSEA(),
             "upset": NatureUpSet(),
             "wgcna": NatureWGCNA(),
+            "embedding": NatureEmbedding(),
             "diagnostic": NatureDiagnostic(),
         }
 
@@ -239,6 +244,7 @@ class NatureFigureDirector:
                 fc_threshold=float(source.get("log2fc_threshold", 1.0)),
                 fdr_threshold=float(source.get("fdr_threshold", source.get("pval_threshold", 0.05))),
                 label_n=int(source.get("label_n", 6)),
+                label_strategy=str(source.get("label_strategy", "top_significant")),
                 label_genes=_as_tuple(source.get("label_genes", ())),
             )
         elif normalized == "correlation_heatmap":

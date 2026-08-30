@@ -248,6 +248,55 @@ def _sample_design_check(adata, sample_key, condition_key, min_samples=2):
     return "pass", "样本与条件设计满足当前样本级比例比较的最小重复要求。", counts
 
 
+def _missing_column_check(adata, role, column, role_candidates=None,
+                          grouping_candidates=None):
+    """Blocked design check for a required obs column that is absent."""
+    columns = [str(item) for item in
+               (grouping_candidates if grouping_candidates else adata.obs.columns)]
+    shown = columns[:10]
+    detail = "可用分组列：" + "、".join(shown) + ("…" if len(columns) > len(shown) else "") + "。"
+    if role_candidates:
+        detail += " 候选：" + "、".join(str(item) for item in role_candidates[:5]) + "。"
+    detail += (" 请通过批量 10x manifest 导入写入 sample_id/condition，"
+               "或在 h5ad.obs 中补充元数据后重试。")
+    return _check(f"{role}列", "blocked", f"缺少{role}列 '{column}'；{detail}")
+
+
+_CONDITION_RECOMMEND_NAMES = (
+    "condition", "treatment", "treatment_group", "disease", "disease_status",
+    "cohort", "response", "phenotype", "case", "control", "stim", "drug",
+    "sample_group", "group",
+)
+_CONDITION_RECOMMEND_PREFIXES = (
+    "condition", "treatment", "disease", "cohort", "response", "phenotype",
+)
+_CONDITION_EXCLUDE_TOKENS = (
+    "annotation", "score", "state", "qc", "flag", "doublet", "marker",
+    "passing", "candidate", "ambient", "lineage", "detected", "missing",
+    "broad", "second", "top", "prediction",
+)
+
+
+def _token_condition_candidates(candidates):
+    """Only condition-named columns are safe automatic recommendations.
+
+    The generic candidate list also contains QC/annotation flags whose names
+    embed words like "status" or "response"; those must never be auto-filled
+    as an experimental condition.
+    """
+    safe = []
+    for column in (candidates.get("condition_candidates") or []):
+        lower = str(column).lower()
+        if lower in _CONDITION_RECOMMEND_NAMES:
+            safe.append(str(column))
+            continue
+        if lower.startswith(_CONDITION_RECOMMEND_PREFIXES) and not any(
+            token in lower for token in _CONDITION_EXCLUDE_TOKENS
+        ):
+            safe.append(str(column))
+    return safe
+
+
 def build_design_preflight(adata, module_name, params=None, input_path=""):
     """Build JSON-safe design and contrast checks for a proposed analysis.
 
@@ -267,6 +316,9 @@ def build_design_preflight(adata, module_name, params=None, input_path=""):
         suggested = selected_groupby or (candidates["condition_candidates"] or [""])[0]
         if suggested:
             recommended["groupby"] = suggested
+    elif module_name == "deg":
+        if not selected_groupby and candidates["grouping_candidates"]:
+            recommended["groupby"] = candidates["grouping_candidates"][0]
     elif module_name == "proportion":
         if candidates["celltype_candidates"]:
             recommended["groupby"] = candidates["celltype_candidates"][0]
@@ -395,19 +447,185 @@ def build_design_preflight(adata, module_name, params=None, input_path=""):
                 batch_key,
             ))
 
+    if module_name == "sc_cell_deg":
+        comparison_type = _selected_value(params, "comparison_type") or "condition"
+        sample_key = _selected_value(params, "sample_key")
+        condition_key = _selected_value(params, "condition_key")
+        cluster_key = _selected_value(params, "cluster_key")
+        if comparison_type == "condition":
+            if not condition_key:
+                checks.append(_check("条件列", "blocked", "未指定条件列；条件间细胞级比较需要一个条件列。"))
+            elif condition_key not in adata.obs.columns:
+                checks.append(_missing_column_check(
+                    adata, "条件", condition_key,
+                    role_candidates=_token_condition_candidates(candidates),
+                    grouping_candidates=candidates["grouping_candidates"],
+                ))
+                token_condition = _token_condition_candidates(candidates)
+                if token_condition:
+                    recommended["condition_key"] = token_condition[0]
+            else:
+                profile = _column_profile(adata, condition_key)
+                if profile["n_missing"]:
+                    checks.append(_check("条件列", "blocked", f"条件列 '{condition_key}' 存在空值。"))
+                elif profile["n_unique"] < 2:
+                    checks.append(_check("条件列", "blocked", f"条件列 '{condition_key}' 只有一个取值，无法比较。"))
+                else:
+                    checks.append(_check("条件列", "pass", f"已识别 {profile['n_unique']} 个条件组。", condition_key))
+            if condition_key:
+                recommended.setdefault("condition_key", condition_key)
+        else:
+            if not sample_key:
+                checks.append(_check("样本列", "blocked", "未指定样本列；该比较模式需要真实样本 ID 列。"))
+            elif sample_key not in adata.obs.columns:
+                checks.append(_missing_column_check(
+                    adata, "样本", sample_key,
+                    role_candidates=candidates["sample_candidates"],
+                    grouping_candidates=candidates["grouping_candidates"],
+                ))
+                if candidates["sample_candidates"]:
+                    recommended["sample_key"] = candidates["sample_candidates"][0]
+            else:
+                profile = _column_profile(adata, sample_key)
+                if profile["n_missing"]:
+                    checks.append(_check("样本列", "blocked", f"样本列 '{sample_key}' 存在空值。"))
+                elif profile["n_unique"] < 2:
+                    checks.append(_check("样本列", "blocked", f"样本列 '{sample_key}' 只有一个样本，无法比较。"))
+                else:
+                    checks.append(_check("样本列", "pass", f"已识别 {profile['n_unique']} 个样本。", sample_key))
+                    if str(sample_key).lower() in _TECHNICAL_BATCH_NAMES:
+                        checks.append(_check(
+                            "样本列", "warning",
+                            f"'{sample_key}' 看起来是技术 batch；未确认其为生物学样本，请人工核对实验设计后使用。",
+                            sample_key,
+                        ))
+            if sample_key:
+                recommended.setdefault("sample_key", sample_key)
+            if comparison_type in {"within_sample_clusters", "between_samples_within_cluster"}:
+                if not cluster_key:
+                    checks.append(_check("聚类列", "blocked", "未指定聚类列。"))
+                elif cluster_key not in adata.obs.columns:
+                    checks.append(_missing_column_check(
+                        adata, "聚类", cluster_key,
+                        role_candidates=candidates["celltype_candidates"],
+                        grouping_candidates=candidates["grouping_candidates"],
+                    ))
+                else:
+                    checks.append(_check("聚类列", "pass", f"已使用聚类列 '{cluster_key}'。", cluster_key))
+                if cluster_key:
+                    recommended.setdefault("cluster_key", cluster_key)
+
+    if module_name == "sc_pseudobulk_deg":
+        sample_key = _selected_value(params, "sample_key")
+        condition_key = _selected_value(params, "condition_key")
+        cluster_key = _selected_value(params, "cluster_key")
+        scope = _selected_value(params, "analysis_scope") or "per_cluster"
+        token_condition = _token_condition_candidates(candidates)
+        if not sample_key:
+            checks.append(_check("样本列", "blocked", "未指定生物学样本列；pseudobulk DEG 需要真实样本 ID。"))
+        elif sample_key not in adata.obs.columns:
+            checks.append(_missing_column_check(
+                adata, "样本", sample_key,
+                role_candidates=candidates["sample_candidates"],
+                grouping_candidates=candidates["grouping_candidates"],
+            ))
+            if candidates["sample_candidates"]:
+                recommended["sample_key"] = candidates["sample_candidates"][0]
+        else:
+            profile = _column_profile(adata, sample_key)
+            if profile["n_missing"]:
+                checks.append(_check("样本列", "blocked", f"样本列 '{sample_key}' 存在空值。"))
+            elif profile["n_unique"] < 2:
+                checks.append(_check("样本列", "blocked", f"样本列 '{sample_key}' 只有一个样本，无法进行组间比较。"))
+            else:
+                checks.append(_check("样本列", "pass", f"已识别 {profile['n_unique']} 个样本。", sample_key))
+                if str(sample_key).lower() in _TECHNICAL_BATCH_NAMES:
+                    checks.append(_check(
+                        "样本列", "warning",
+                        f"'{sample_key}' 看起来是技术 batch；未确认其为生物学样本，pseudobulk 结论需人工核对实验设计。",
+                        sample_key,
+                    ))
+        if sample_key:
+            recommended.setdefault("sample_key", sample_key)
+
+        if not condition_key:
+            checks.append(_check("条件列", "blocked", "未指定条件列；pseudobulk DEG 需要每个样本一个 condition。"))
+        elif condition_key not in adata.obs.columns:
+            checks.append(_missing_column_check(
+                adata, "条件", condition_key,
+                role_candidates=token_condition,
+                grouping_candidates=candidates["grouping_candidates"],
+            ))
+            if token_condition:
+                recommended["condition_key"] = token_condition[0]
+        else:
+            profile = _column_profile(adata, condition_key)
+            if profile["n_missing"]:
+                checks.append(_check("条件列", "blocked", f"条件列 '{condition_key}' 存在空值。"))
+            elif profile["n_unique"] < 2:
+                checks.append(_check("条件列", "blocked", f"条件列 '{condition_key}' 只有一个取值。"))
+            else:
+                checks.append(_check("条件列", "pass", f"已识别 {profile['n_unique']} 个条件组。", condition_key))
+        if condition_key:
+            recommended.setdefault("condition_key", condition_key)
+
+        if scope == "per_cluster":
+            if not cluster_key:
+                checks.append(_check("聚类列", "blocked", "未指定聚类列。"))
+            elif cluster_key not in adata.obs.columns:
+                checks.append(_missing_column_check(
+                    adata, "聚类", cluster_key,
+                    role_candidates=candidates["celltype_candidates"],
+                    grouping_candidates=candidates["grouping_candidates"],
+                ))
+            else:
+                checks.append(_check("聚类列", "pass", f"已使用聚类列 '{cluster_key}'。", cluster_key))
+            if cluster_key:
+                recommended.setdefault("cluster_key", cluster_key)
+        batch_key = _selected_value(params, "batch_key")
+        if batch_key and batch_key not in adata.obs.columns:
+            checks.append(_check("批次列", "blocked", f"批次列 '{batch_key}' 不在 adata.obs 中。"))
+
     # A condition perfectly nested in a technical batch should not automatically
     # stop exploratory work, but the user needs to see it before integration.
-    condition_key = _selected_value(params, "condition_key") or _selected_value(params, "groupby")
+    # 注意：proportion 模块的 groupby 是细胞类型列，不是条件列；只有真正的
+    # condition_key（或伪 bulk/时序模块的 groupby 语义）才能参与混杂判断。
+    condition_key = _selected_value(params, "condition_key")
+    if not condition_key and module_name != "proportion":
+        condition_key = _selected_value(params, "groupby")
     batch_key = _selected_value(params, "batch_key")
-    if condition_key in adata.obs.columns and batch_key in adata.obs.columns and condition_key != batch_key:
+    if (
+        condition_key and condition_key in adata.obs.columns
+        and batch_key and batch_key in adata.obs.columns
+        and condition_key != batch_key
+    ):
         import pandas as pd
 
+        n_batches = adata.obs[batch_key].nunique()
         table = pd.crosstab(adata.obs[condition_key].astype(str), adata.obs[batch_key].astype(str))
-        if not table.empty and bool((table.gt(0).sum(axis=1) == 1).all()) and table.shape[0] > 1:
+        if n_batches >= 2 and not table.empty and bool((table.gt(0).sum(axis=1) == 1).all()) and table.shape[0] > 1:
             checks.append(_check(
                 "batch 与条件混杂", "warning",
                 "每个条件只出现在一个 batch；批次校正可能移除真实条件差异，不能据此做因果解释。",
             ))
+
+    # 分析范围（scope_key/scope_values）一致性检查：适用于所有带范围参数的模块
+    scope_key = _selected_value(params, "scope_key")
+    if scope_key:
+        if scope_key not in adata.obs.columns:
+            checks.append(_check("分析范围", "blocked", f"范围列 '{scope_key}' 不在 adata.obs 中。"))
+        else:
+            scope_values_raw = _selected_value(params, "scope_values")
+            scope_values = [v.strip() for v in scope_values_raw.replace("\n", ",").split(",") if v.strip()]
+            if not scope_values:
+                checks.append(_check("分析范围", "warning", f"已填写范围列 '{scope_key}' 但未选择取值；将分析全部细胞。"))
+            else:
+                present = [v for v in scope_values if v in set(adata.obs[scope_key].astype(str))]
+                missing = [v for v in scope_values if v not in present]
+                if not present:
+                    checks.append(_check("分析范围", "blocked", f"范围取值都不存在于 '{scope_key}'：{scope_values}"))
+                elif missing:
+                    checks.append(_check("分析范围", "warning", f"范围取值不存在于 '{scope_key}'：{missing}"))
 
     status = max((check["status"] for check in checks), key=lambda value: _STATUS_RANK.get(value, 1), default="review")
     if status == "pass":

@@ -526,8 +526,12 @@ class TestSummaryJSONSerializable:
 
         mod = QCAnalysis(
             project_dir=str(tmp_path),
+            # 合成数据对 Scrublet 是退化输入（可能把所有细胞判为 doublet），
+            # 本测试只验证 summary 的 JSON 可序列化性，因此只标记不过滤，
+            # 确保完整 scrublet 证据（含 simulated score 摘要）进入 summary。
             params={'nUMIs': 200, 'detected_genes': 100, 'mito_perc': 0.20,
-                    'doublets_method': 'scrublet', 'batch_key': ''},
+                    'doublets_method': 'scrublet', 'batch_key': '',
+                    'filter_doublets': False},
             progress_callback=lambda p, m: None,
         )
         result = mod.run(input_path)

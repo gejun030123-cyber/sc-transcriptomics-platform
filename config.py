@@ -53,6 +53,21 @@ class Config:
             return key
 
     SECRET_KEY = _load_secret.__func__()
+    # Optional shared access gate for controlled lab deployments.  Keep this
+    # empty for local development/tests; deployments exposed through a tunnel
+    # should set a strong value outside the repository (for example in .env).
+    PLATFORM_ACCESS_PASSWORD = os.environ.get('PLATFORM_ACCESS_PASSWORD', '')
+    try:
+        PLATFORM_ACCESS_SESSION_HOURS = max(
+            1.0, float(os.environ.get('PLATFORM_ACCESS_SESSION_HOURS', '12'))
+        )
+    except ValueError:
+        PLATFORM_ACCESS_SESSION_HOURS = 12.0
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = 'Lax'
+    SESSION_COOKIE_SECURE = os.environ.get(
+        'PLATFORM_SESSION_COOKIE_SECURE', 'false'
+    ).strip().lower() in {'1', 'true', 'yes', 'on'}
     DATA_DIR = os.environ.get('DATA_DIR', os.path.join(_BASE_DIR, 'data'))
     # Keep transient analysis files on the project data volume by default.
     # ``/tmp`` is commonly mounted on the root filesystem and can fill up when
@@ -72,6 +87,26 @@ class Config:
     DB_PATH = os.environ.get('DB_PATH', os.path.join(_BASE_DIR, 'instance', 'bioinfo.db'))
     CELLMARKER_PATH = os.environ.get('CELLMARKER_PATH', os.path.join(os.path.dirname(_BASE_DIR), 'CellMarker_Augmented_2021.txt'))
 
+    # CellOracle 虚拟敲除（virtual KO）运行环境。
+    # CellOracle 依赖 Python 3.8-3.10，而平台主环境为 Python 3.12，
+    # 因此虚拟敲除模块通过 subprocess 调用独立的 celloracle 环境执行。
+    # 可用环境变量 CELLORACLE_PYTHON / CELLORACLE_WORKER_SCRIPT /
+    # CELLORACLE_HOME_DIR 覆盖以下默认值。
+    CELLORACLE_PYTHON = os.path.abspath(os.environ.get(
+        'CELLORACLE_PYTHON',
+        '/home/oelab/AnaData/GJ/celloracle/celloracle_env/bin/python'
+    ))
+    CELLORACLE_WORKER_SCRIPT = os.path.abspath(os.environ.get(
+        'CELLORACLE_WORKER_SCRIPT',
+        os.path.join(_BASE_DIR, 'modules', 'celloracle_worker.py')
+    ))
+    # celloracle 会在 HOME/.config（genomepy）、HOME/celloracle_data 等位置
+    # 写缓存，统一放到独立目录，避免污染用户主目录。
+    CELLORACLE_HOME_DIR = os.path.abspath(os.environ.get(
+        'CELLORACLE_HOME_DIR',
+        '/home/oelab/AnaData/GJ/celloracle/celloracle_home'
+    ))
+
     MAX_WORKERS = int(os.environ.get('MAX_WORKERS', '2'))
     CHUNK_SIZE_MB = 50
     PLOTLY_MAX_CELLS = 50000
@@ -83,6 +118,70 @@ class Config:
     # roots; arbitrary absolute paths and symlinks remain disallowed.  Example:
     # SC_BATCH_SOURCE_ROOTS=/home/oelab/data/GJ:/mnt/sc_data
     SC_BATCH_SOURCE_ROOTS = os.environ.get('SC_BATCH_SOURCE_ROOTS', '')
+
+    # Server-resident WES inputs are also opt-in.  FASTQ/BAM/CRAM/VCF files
+    # are usually too large for browser upload; only administrators may expose
+    # explicitly configured, read-only roots to a project preflight.
+    WES_SOURCE_ROOTS = os.environ.get('WES_SOURCE_ROOTS', '')
+    # Small user-uploaded capture BEDs are stored in a platform-owned area.
+    # The path can be moved to a lab data volume without changing the API.
+    WES_UPLOAD_ROOT = os.environ.get('WES_UPLOAD_ROOT', '').strip()
+    WES_MAX_CAPTURE_BED_MB = float(os.environ.get('WES_MAX_CAPTURE_BED_MB', '100'))
+    # WES execution is opt-in.  Preparing a run and reviewing its bundle stay
+    # available in the lab UI even when Nextflow is not installed on this host.
+    WES_EXECUTOR_ENABLED = os.environ.get('WES_EXECUTOR_ENABLED', '').strip().lower() in {
+        '1', 'true', 'yes', 'on'
+    }
+    WES_NEXTFLOW_BIN = os.environ.get('WES_NEXTFLOW_BIN', 'nextflow').strip() or 'nextflow'
+    # Sarek's built-in Docker profile still uses the local Nextflow executor;
+    # administrators may replace it with ``apptainer`` or an institutional
+    # profile after validating the container runtime.
+    WES_NEXTFLOW_PROFILE = os.environ.get('WES_NEXTFLOW_PROFILE', 'docker').strip() or 'docker'
+    WES_NEXTFLOW_PIPELINE = os.environ.get(
+        'WES_NEXTFLOW_PIPELINE', 'nf-core/sarek'
+    ).strip() or 'nf-core/sarek'
+    # This is the administrator's validated Sarek/iGenomes key for the
+    # installed reference bundle.  A deployment using a custom FASTA should
+    # set the corresponding Sarek genome configuration explicitly.
+    WES_NEXTFLOW_GENOME = os.environ.get('WES_NEXTFLOW_GENOME', 'GATK.GRCh38').strip()
+    # Optional local Sarek resources.  Keep them unset until the whole bundle
+    # has been copied, checksummed and registered; an empty value lets staff
+    # prepare/review a run but the production launch gate remains closed.
+    WES_NEXTFLOW_IGENOMES_BASE = os.environ.get(
+        'WES_NEXTFLOW_IGENOMES_BASE', ''
+    ).strip()
+    WES_NEXTFLOW_VEP_CACHE = os.environ.get('WES_NEXTFLOW_VEP_CACHE', '').strip()
+    WES_NEXTFLOW_PON = os.environ.get('WES_NEXTFLOW_PON', '').strip()
+    WES_NEXTFLOW_GERMLINE_RESOURCE = os.environ.get(
+        'WES_NEXTFLOW_GERMLINE_RESOURCE', ''
+    ).strip()
+    # SRA is converted locally before entering the regular FASTQ manifest
+    # path.  Keep this separate from Nextflow so an SRA conversion cannot
+    # silently start a WES run.
+    WES_SRA_FASTERQ_BIN = os.environ.get('WES_SRA_FASTERQ_BIN', 'fasterq-dump').strip() or 'fasterq-dump'
+    try:
+        WES_SRA_THREADS = max(1, int(os.environ.get('WES_SRA_THREADS', '4')))
+    except ValueError:
+        WES_SRA_THREADS = 4
+    try:
+        WES_SRA_MIN_FREE_GB = max(1.0, float(os.environ.get('WES_SRA_MIN_FREE_GB', '50')))
+    except ValueError:
+        WES_SRA_MIN_FREE_GB = 50.0
+    try:
+        WES_SRA_DISK_FACTOR = max(2.0, float(os.environ.get('WES_SRA_DISK_FACTOR', '3')))
+    except ValueError:
+        WES_SRA_DISK_FACTOR = 3.0
+    # Real runs must use catalogued, checksum-verified resources.  Tests and
+    # administrator-only engineering drills can opt out explicitly on the
+    # executor object; the web API never disables this gate.
+    WES_REQUIRE_VALIDATED_REFERENCES = os.environ.get(
+        'WES_REQUIRE_VALIDATED_REFERENCES', 'true'
+    ).strip().lower() in {'1', 'true', 'yes', 'on'}
+    WES_MIN_FREE_GB = float(os.environ.get('WES_MIN_FREE_GB', '50'))
+    WES_HAPPY_BIN = os.environ.get('WES_HAPPY_BIN', 'hap.py').strip() or 'hap.py'
+    WES_SOMPY_BIN = os.environ.get('WES_SOMPY_BIN', 'som.py').strip() or 'som.py'
+    WES_NEXTFLOW_POLL_SECONDS = float(os.environ.get('WES_NEXTFLOW_POLL_SECONDS', '5'))
+    WES_CANCEL_GRACE_SECONDS = int(os.environ.get('WES_CANCEL_GRACE_SECONDS', '20'))
 
     # AI 对话配置（支持 OpenAI compatible 和 Anthropic messages compatible API）
     AI_API_KEY = os.environ.get('AI_API_KEY', '')
@@ -230,6 +329,66 @@ class Config:
             raise ValueError('服务器目录不在允许的 SC_BATCH_SOURCE_ROOTS 下')
         if require_directory and not os.path.isdir(resolved):
             raise ValueError(f'服务器目录不存在或不是目录: {path}')
+        return resolved
+
+    @classmethod
+    def wes_source_roots(cls):
+        """Return canonical administrator-approved roots for WES inputs."""
+        raw = os.environ.get('WES_SOURCE_ROOTS', cls.WES_SOURCE_ROOTS)
+        roots = []
+        for item in str(raw or '').split(os.pathsep):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                root = os.path.realpath(item)
+            except (OSError, ValueError):
+                continue
+            if os.path.isdir(root) and root not in roots:
+                roots.append(root)
+        upload_root = cls.wes_upload_root()
+        if os.path.isdir(upload_root) and upload_root not in roots:
+            roots.append(upload_root)
+        return tuple(roots)
+
+    @classmethod
+    def wes_upload_root(cls):
+        """Return the writable, platform-owned root for capture BED uploads."""
+        configured = os.environ.get('WES_UPLOAD_ROOT', cls.WES_UPLOAD_ROOT).strip()
+        return os.path.abspath(configured or os.path.join(cls.DATA_DIR, 'wes_uploads'))
+
+    @classmethod
+    def validate_wes_source_path(cls, path, *, require_file=True):
+        """Validate a read-only WES path under ``WES_SOURCE_ROOTS``."""
+        if not path:
+            raise ValueError('缺少 WES 服务器数据路径')
+        roots = cls.wes_source_roots()
+        if not roots:
+            raise ValueError(
+                'WES 服务器目录尚未启用；管理员需在 .env 中设置 WES_SOURCE_ROOTS'
+            )
+        try:
+            supplied = os.path.abspath(str(path))
+            resolved = os.path.realpath(supplied)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f'WES 服务器路径解析失败: {exc}') from exc
+        if os.path.islink(supplied):
+            raise ValueError('WES 服务器数据不接受符号链接路径')
+        if not any(resolved == root or resolved.startswith(root + os.sep) for root in roots):
+            raise ValueError('WES 服务器路径不在允许的 WES_SOURCE_ROOTS 下')
+        if require_file and not os.path.isfile(resolved):
+            raise ValueError(f'WES 文件不存在或不是普通文件: {path}')
+        return resolved
+
+    @classmethod
+    def validate_wes_reference_path(cls, path, *, require_directory=False):
+        """Validate one configured reference file/directory without following links."""
+        resolved = cls.validate_wes_source_path(path, require_file=False)
+        if require_directory:
+            if not os.path.isdir(resolved):
+                raise ValueError(f'WES 参考资源不存在或不是目录: {path}')
+        elif not os.path.isfile(resolved):
+            raise ValueError(f'WES 参考资源不存在或不是普通文件: {path}')
         return resolved
 
 

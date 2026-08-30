@@ -1,5 +1,7 @@
 """NatureMA：平均表达量与 log2 fold-change 的固定投稿模板。"""
 
+import textwrap
+
 import numpy as np
 import pandas as pd
 
@@ -11,6 +13,45 @@ from .common import adjust_labels, attach_contract, finite_numeric, prune_overla
 def _first_column(frame, candidates):
     lookup = {str(column).strip().lower(): column for column in frame.columns}
     return next((lookup[name.lower()] for name in candidates if name.lower() in lookup), None)
+
+
+def _wrap_title(value, default, width):
+    """Wrap each supplied title line independently to retain context grouping."""
+    text = str(value or default).replace('_', ' ')
+    lines = [line.strip() for line in text.splitlines() if line.strip()] or [default]
+    return '\n'.join(
+        textwrap.fill(line, width=width, break_long_words=False)
+        for line in lines
+    )
+
+
+def _select_labels(frame, spec, regulation):
+    """Prioritise requested genes, then fill the remaining label budget fairly."""
+    selected = []
+    genes = frame['_gene'].astype(str)
+    # Preserve the scientist's requested ordering rather than the incidental
+    # order of the DEG table. A requested gene may be non-significant; it is
+    # still a legitimate point to inspect on an MA plot.
+    for gene in spec.label_genes:
+        for index in frame.index[genes.eq(str(gene))]:
+            if index not in selected:
+                selected.append(index)
+    remaining = max(0, int(spec.label_n) - len(selected))
+    if remaining and spec.label_strategy != 'none':
+        significant = frame.loc[regulation != 'NS'].copy()
+        significant['_abs_fc'] = significant['_log2fc'].abs()
+        significant = significant.sort_values(['_fdr', '_abs_fc'], ascending=[True, False])
+        per_side = max(1, int(np.ceil(remaining / 2)))
+        candidates = pd.concat([
+            significant.loc[regulation.loc[significant.index] == 'Up'].head(per_side),
+            significant.loc[regulation.loc[significant.index] == 'Down'].head(per_side),
+        ]).sort_values(['_fdr', '_abs_fc'], ascending=[True, False])
+        for index in candidates.index:
+            if index not in selected:
+                selected.append(index)
+            if len(selected) >= int(spec.label_n):
+                break
+    return selected
 
 
 class NatureMA:
@@ -50,9 +91,15 @@ class NatureMA:
         regulation = np.full(len(frame), 'NS', dtype=object)
         regulation[significant & (y >= spec.fc_threshold)] = 'Up'
         regulation[significant & (y <= -spec.fc_threshold)] = 'Down'
-        y_limit = max(spec.fc_threshold * 1.6, float(np.nanpercentile(np.abs(y), 99.5)) * 1.08, 1.5)
-        y_limit = min(12.0, float(np.ceil(y_limit * 2) / 2))
-        y_display = np.clip(y, -y_limit * 0.985, y_limit * 0.985)
+        # Do not squeeze legitimate extreme fold changes into artificial rows
+        # against the upper/lower MA boundary.  Unlike Volcano FDR tails, the
+        # y-axis is itself the effect size, so clipping/compressing it would
+        # alter the visual evidence.  The full observed range with 10% headroom
+        # keeps points and their selected labels inside the axes.
+        max_abs_fc = float(np.nanmax(np.abs(y)))
+        y_limit = max(spec.fc_threshold * 1.6, max_abs_fc * 1.10, 1.5)
+        y_limit = float(np.ceil(y_limit * 2) / 2)
+        y_display = y
 
         with style.context(spec):
             if container is None:
@@ -75,20 +122,16 @@ class NatureMA:
             ax.set_ylim(-y_limit, y_limit)
             ax.set_xlabel(r'log$_2$(mean expression + 1)')
             ax.set_ylabel(r'log$_2$(fold change)')
-            ax.set_title(spec.title or 'MA plot', loc='left', pad=5)
+            title_width = 38 if spec.width == 'single' else 72
+            wrapped_title = _wrap_title(spec.title, 'MA plot', title_width)
+            ax.set_title(
+                wrapped_title,
+                loc='left', pad=5,
+            )
             style.apply_axis(ax, profile)
 
             texts = []
-            candidates = list(frame.index[frame['_gene'].isin(spec.label_genes)])
-            if spec.label_strategy != 'none' and len(candidates) < spec.label_n:
-                ranked = frame.assign(_abs_fc=np.abs(y)).sort_values(
-                    ['_fdr', '_abs_fc'], ascending=[True, False])
-                ranked = ranked[ranked.index.isin(frame.index[regulation != 'NS'])]
-                for index in ranked.index:
-                    if index not in candidates:
-                        candidates.append(index)
-                    if len(candidates) >= spec.label_n:
-                        break
+            candidates = _select_labels(frame, spec, pd.Series(regulation, index=frame.index))
             max_labels = 8 if spec.width == 'single' else 12
             for index in candidates[:max_labels]:
                 position = frame.index.get_loc(index)
@@ -114,7 +157,9 @@ class NatureMA:
                     for label in ('Up', 'Down', 'NS')
                 ]
                 ax.legend(handles=handles, loc='upper right', frameon=False)
-            fig.subplots_adjust(left=0.19, right=0.97, bottom=0.17, top=0.90)
+            title_lines = wrapped_title.count('\n') + 1
+            top = max(0.76, 0.90 - 0.055 * (title_lines - 1))
+            fig.subplots_adjust(left=0.19, right=0.97, bottom=0.17, top=top)
 
         if container is not None:
             return container

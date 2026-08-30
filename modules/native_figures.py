@@ -17,6 +17,14 @@ from modules.figure_style import (
     register_nature_cjk_font,
     stable_category_colors,
 )
+from figure_engine.templates.common import adjust_labels
+
+# The categorical bar palette is intentionally softer than the general-purpose
+# palette. Paired with a dark outline, it stays readable without making the
+# bars visually heavier than their labels.
+BAR_PALETTE = (
+    '#7BA9C8', '#F07B73', '#B7B2CF', '#79B4A4', '#D8AD62', '#9AA6B2',
+)
 
 # Apply the shared font contract before any native canvas is constructed.  This
 # prevents tight_layout from resolving CJK labels against DejaVu Sans before
@@ -45,6 +53,19 @@ def _style_axis(ax):
         spine.set_visible(spine_name in ('left', 'bottom'))
         spine.set_color('#98A2B3')
         spine.set_linewidth(0.7)
+    return ax
+
+
+def _style_bar_axis(ax, *, show_grid=False):
+    """Apply the clean, outline-led bar-chart treatment used in result views."""
+    _style_axis(ax)
+    for spine_name in ('left', 'bottom'):
+        spine = ax.spines[spine_name]
+        spine.set_color('#15191E')
+        spine.set_linewidth(1.25)
+    ax.tick_params(colors='#15191E', width=1.05, length=4)
+    if show_grid:
+        ax.grid(axis='both', color=NATURE_GRID, linewidth=0.55, alpha=0.88, zorder=0)
     return ax
 
 
@@ -105,6 +126,7 @@ def plot_umap_axis(ax, adata, color_key, title='', basis='X_umap',
     coords = np.asarray(adata.obsm[basis])[:, :2]
     values = adata.obs[color_key] if color_key in adata.obs.columns else None
     import pandas as pd
+    label_texts = []
 
     if values is None:
         ax.scatter(coords[:, 0], coords[:, 1], s=point_size,
@@ -138,7 +160,7 @@ def plot_umap_axis(ax, adata, color_key, title='', basis='X_umap',
                 label=str(category),
             )
             if label_categories:
-                ax.text(
+                label_texts.append(ax.text(
                     float(np.median(coords[mask, 0])),
                     float(np.median(coords[mask, 1])),
                     str(category), ha='center', va='center', fontsize=8,
@@ -146,7 +168,7 @@ def plot_umap_axis(ax, adata, color_key, title='', basis='X_umap',
                     bbox={'boxstyle': 'round,pad=0.18', 'facecolor': 'white',
                           'edgecolor': '#D0D5DD', 'alpha': 0.82, 'linewidth': 0.5},
                     zorder=5,
-                )
+                ))
         if show_legend and len(categorical.cat.categories) and not label_categories:
             legend = ax.legend(
                 loc='center left', bbox_to_anchor=(1.01, 0.5), frameon=False,
@@ -155,6 +177,8 @@ def plot_umap_axis(ax, adata, color_key, title='', basis='X_umap',
             )
             legend.get_title().set_fontsize(8)
 
+    if label_texts:
+        adjust_labels(label_texts, ax, arrow_color='#98A2B3')
     ax.set_title(title, loc='left', pad=10, fontsize=10,
                  fontweight='semibold', color=NATURE_TEXT)
     ax.set_xlabel('UMAP 1', fontsize=9, color=NATURE_TEXT)
@@ -242,6 +266,79 @@ def heatmap_figure(matrix, x_labels=None, y_labels=None, title='',
     colorbar.set_label(colorbar_label, fontsize=8, labelpad=5)
     _style_axis(ax)
     fig.tight_layout(pad=1.1)
+    return fig
+
+
+def marker_violin_figure(values_by_category, categories, genes, title='',
+                         y_label='Expression (display scale)'):
+    """Render compact per-gene violin panels for one cluster-vs-rest contrast.
+
+    ``values_by_category`` is ordered as ``[category][gene]``.  Keeping the
+    input as arrays rather than an AnnData object makes the renderer reusable
+    and lets callers deterministically subsample large cell collections before
+    drawing a static figure.
+    """
+    import matplotlib.pyplot as plt
+
+    categories = [str(category) for category in categories]
+    genes = [str(gene) for gene in genes]
+    if not categories or not genes or len(values_by_category) != len(categories):
+        raise ValueError('Marker violin requires matching categories and genes.')
+
+    n_panels = len(genes)
+    ncols = min(3, max(1, n_panels))
+    nrows = int(np.ceil(n_panels / ncols))
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(max(7.2, 3.35 * ncols), max(3.9, 3.25 * nrows + 0.55)),
+        dpi=150,
+        squeeze=False,
+    )
+    colors = [NATURE_PALETTE[index % len(NATURE_PALETTE)]
+              for index in range(len(categories))]
+
+    for gene_index, gene in enumerate(genes):
+        axis = axes.flat[gene_index]
+        series = []
+        for category_index in range(len(categories)):
+            raw_values = np.asarray(values_by_category[category_index][gene_index], dtype=float)
+            finite_values = raw_values[np.isfinite(raw_values)]
+            # matplotlib's KDE estimator needs at least two observations.  A
+            # single observed cell is still informative, so draw it as a thin
+            # distribution instead of discarding the whole marker panel.
+            if finite_values.size == 1:
+                finite_values = np.repeat(finite_values, 2)
+            elif finite_values.size == 0:
+                finite_values = np.zeros(2, dtype=float)
+            series.append(finite_values)
+        parts = axis.violinplot(
+            series, positions=np.arange(1, len(categories) + 1),
+            showmedians=True, showextrema=False, widths=0.78,
+        )
+        for body_index, body in enumerate(parts['bodies']):
+            body.set_facecolor(colors[body_index])
+            body.set_edgecolor(colors[body_index])
+            body.set_alpha(0.78)
+        for key in ('cmedians',):
+            if key in parts:
+                parts[key].set_color('#15191E')
+                parts[key].set_linewidth(1.0)
+        axis.set_xticks(np.arange(1, len(categories) + 1), categories,
+                         rotation=28, ha='right')
+        axis.set_title(gene, loc='left', pad=7, fontsize=9,
+                       fontweight='semibold', color=NATURE_TEXT)
+        axis.set_ylabel(y_label, fontsize=8, color=NATURE_TEXT)
+        axis.grid(axis='y', color=NATURE_GRID, linewidth=0.55, alpha=0.72)
+        _style_axis(axis)
+
+    for axis in axes.flat[n_panels:]:
+        axis.set_visible(False)
+    fig.suptitle(title, x=0.01, ha='left', y=0.995, fontsize=11,
+                 fontweight='semibold', color=NATURE_TEXT)
+    layout_rect = (0.0, 0.0, 1.0, 0.93)
+    fig._native_layout_rect = layout_rect
+    fig.tight_layout(rect=layout_rect, pad=1.1)
     return fig
 
 
@@ -508,27 +605,45 @@ def summarize_correlation_pairs(pairwise_table, method='pearson'):
 
 def bar_figure(labels, values, title='', x_label='', y_label='',
                colors=None, annotations=None, rotation=35):
+    """Draw a compact categorical bar chart with legible value callouts.
+
+    Category order is intentionally supplied by the caller: sample, cluster,
+    and time-course order are scientific context and must not be silently
+    reordered merely for visual effect. The chart instead uses restrained
+    spacing, a dark outline, and optional value labels to make the comparisons
+    easier to scan.
+    """
     import matplotlib.pyplot as plt
 
     labels = [str(label) for label in labels]
     values = np.asarray(values, dtype=float)
     colors = colors or [NATURE_PALETTE[0]] * len(labels)
-    fig, ax = plt.subplots(figsize=(max(7.0, 0.55 * len(labels) + 4.0), 5.0), dpi=150)
-    bars = ax.bar(np.arange(len(labels)), values, color=colors, alpha=0.88,
-                  edgecolor='white', linewidth=0.35)
+    longest_label = max((len(label) for label in labels), default=0)
+    label_rotation = max(rotation, 55) if longest_label > 24 else rotation
+    fig, ax = plt.subplots(
+        figsize=(max(7.0, 0.80 * len(labels) + 4.0),
+                 max(5.0, 4.2 + 0.025 * longest_label)),
+        dpi=150,
+    )
+    bars = ax.bar(np.arange(len(labels)), values, width=0.66, color=colors, alpha=0.96,
+                  edgecolor='#15191E', linewidth=0.85, zorder=3)
     if annotations is not None:
+        finite = np.abs(values[np.isfinite(values)])
+        value_range = max(float(finite.max()) if finite.size else 0.0, 1.0)
+        offset = value_range * 0.018
         for bar, annotation in zip(bars, annotations):
-            ax.text(bar.get_x() + bar.get_width() / 2,
-                    bar.get_height() + max(0.01, np.nanmax(np.abs(values)) * 0.015),
-                    str(annotation), ha='center', va='bottom', fontsize=8,
+            height = bar.get_height()
+            direction = 1 if height >= 0 else -1
+            ax.text(bar.get_x() + bar.get_width() / 2, height + direction * offset,
+                    str(annotation), ha='center', va='bottom' if direction > 0 else 'top', fontsize=8,
                     color=NATURE_TEXT)
-    ax.set_xticks(np.arange(len(labels)), labels, rotation=rotation, ha='right')
+    ax.set_xticks(np.arange(len(labels)), labels, rotation=label_rotation, ha='right')
     ax.set_title(title, loc='left', pad=10, fontsize=10,
                  fontweight='semibold', color=NATURE_TEXT)
     ax.set_xlabel(x_label, fontsize=9, color=NATURE_TEXT)
     ax.set_ylabel(y_label, fontsize=9, color=NATURE_TEXT)
-    ax.grid(axis='y', color=NATURE_GRID, linewidth=0.55, alpha=0.72)
-    _style_axis(ax)
+    _style_bar_axis(ax)
+    ax.margins(x=0.045, y=0.10)
     fig.tight_layout(pad=1.1)
     return fig
 
@@ -654,29 +769,72 @@ def grouped_bar_figure(labels, series, title='', x_label='', y_label='',
         for _, values in ranked[keep_n:]:
             other_values += np.nan_to_num(values, nan=0.0)
         series = kept + [('Other', other_values)]
-    fig, ax = plt.subplots(figsize=(max(7.0, 0.55 * len(labels) + 4.0), 5.0), dpi=150)
+    longest_label = max((len(label) for label in labels), default=0)
+    label_rotation = max(rotation, 55) if longest_label > 24 else rotation
+    fig, ax = plt.subplots(
+        figsize=(max(7.0, 0.80 * len(labels) + 4.0),
+                 max(5.0, 4.2 + 0.025 * longest_label)),
+        dpi=150,
+    )
     x = np.arange(len(labels))
-    width = min(0.78 / max(1, len(series)), 0.32)
+    width = min(0.74 / max(1, len(series)), 0.30)
     bottoms = np.zeros(len(labels), dtype=float)
     for index, (name, values) in enumerate(series):
         offset = 0 if stacked else (index - (len(series) - 1) / 2) * width
-        ax.bar(x + offset, values, width=width if not stacked else 0.72,
-               color=NATURE_PALETTE[index % len(NATURE_PALETTE)],
-               alpha=0.88, edgecolor='white', linewidth=0.35, label=name,
+        ax.bar(x + offset, values, width=width if not stacked else 0.70,
+               color=BAR_PALETTE[index % len(BAR_PALETTE)],
+               alpha=0.96, edgecolor='#15191E', linewidth=0.75, label=name,
                bottom=bottoms if stacked else None)
         if stacked:
             bottoms += values
+    ax.set_xticks(x, labels, rotation=label_rotation, ha='right')
+    ax.set_title(title, loc='left', pad=10, fontsize=10,
+                 fontweight='semibold', color=NATURE_TEXT)
+    ax.set_xlabel(x_label, fontsize=9, color=NATURE_TEXT)
+    ax.set_ylabel(y_label, fontsize=9, color=NATURE_TEXT)
+    if series:
+        ax.legend(frameon=False, fontsize=7, ncol=min(4, len(series)),
+                  loc='upper center', bbox_to_anchor=(0.5, 1.08),
+                  borderaxespad=0.0, handlelength=1.2, columnspacing=1.0)
+    _style_bar_axis(ax)
+    ax.margins(x=0.045, y=0.08)
+    fig.tight_layout(pad=1.1, rect=(0, 0, 1, 0.94) if series else None)
+    return fig
+
+
+def diverging_bar_figure(labels, up_values, down_values, title='', x_label='',
+                          y_label='Number of DEGs', rotation=35):
+    """Render up/down counts as an explicit zero-centred diverging bar chart.
+
+    Down-regulated counts are plotted below the zero baseline solely for the
+    display. Callers keep their original non-negative counts in tables and
+    summaries, avoiding ambiguity about the underlying statistic.
+    """
+    import matplotlib.pyplot as plt
+
+    labels = [str(label) for label in labels]
+    up_values = np.asarray(up_values, dtype=float)
+    down_values = np.asarray(down_values, dtype=float)
+    if len(labels) != len(up_values) or len(labels) != len(down_values):
+        raise ValueError('labels、up_values 和 down_values 的长度必须一致。')
+    x = np.arange(len(labels))
+    fig, ax = plt.subplots(figsize=(max(7.0, 0.60 * len(labels) + 4.0), 5.4), dpi=150)
+    ax.bar(x, -down_values, width=0.72, color='#7299C0', alpha=0.96,
+           edgecolor='#15191E', linewidth=0.75, label='Down-regulated', zorder=3)
+    ax.bar(x, up_values, width=0.72, color='#F07B73', alpha=0.96,
+           edgecolor='#15191E', linewidth=0.75, label='Up-regulated', zorder=3)
+    finite = np.abs(np.concatenate((up_values, down_values)))
+    limit = max(float(np.nanmax(finite)) if finite.size else 0.0, 1.0)
+    ax.set_ylim(-limit * 1.14, limit * 1.14)
+    ax.axhline(0, color='#15191E', linewidth=0.85, zorder=4)
     ax.set_xticks(x, labels, rotation=rotation, ha='right')
     ax.set_title(title, loc='left', pad=10, fontsize=10,
                  fontweight='semibold', color=NATURE_TEXT)
     ax.set_xlabel(x_label, fontsize=9, color=NATURE_TEXT)
     ax.set_ylabel(y_label, fontsize=9, color=NATURE_TEXT)
-    ax.grid(axis='y', color=NATURE_GRID, linewidth=0.55, alpha=0.72)
-    if series:
-        ax.legend(frameon=False, fontsize=7, ncol=min(4, len(series)),
-                  loc='upper center', bbox_to_anchor=(0.5, 1.04),
-                  borderaxespad=0.0, handlelength=1.2, columnspacing=1.0)
-    _style_axis(ax)
+    ax.legend(frameon=False, fontsize=8, loc='upper right', handlelength=1.15)
+    _style_bar_axis(ax, show_grid=True)
+    ax.margins(x=0.045)
     fig.tight_layout(pad=1.1)
     return fig
 
@@ -778,8 +936,10 @@ def marker_dotplot_figure(mean_expression, detection_fraction, categories,
         vmin, vmax = 0.0, 1.0
     norm = Normalize(vmin=vmin, vmax=vmax, clip=True)
 
-    width = max(8.0, 0.72 * n_categories + 3.8)
-    height = max(5.2, 0.34 * n_genes + 2.7)
+    longest_category = max((len(category) for category in categories), default=0)
+    category_rotation = 55 if longest_category > 24 else 35
+    width = max(8.0, 0.95 * n_categories + 3.8)
+    height = max(5.2, 0.34 * n_genes + 2.7, 4.2 + 0.025 * longest_category)
     fig, ax = plt.subplots(figsize=(width, height), dpi=150)
     x, y = np.meshgrid(np.arange(n_categories), np.arange(n_genes))
     values = np.nan_to_num(mean_expression.T, nan=vmin).ravel()
@@ -789,7 +949,7 @@ def marker_dotplot_figure(mean_expression, detection_fraction, categories,
         x.ravel(), y.ravel(), s=sizes, c=values, cmap=nature_continuous_cmap(),
         norm=norm, edgecolors='white', linewidths=0.35, alpha=0.95,
     )
-    ax.set_xticks(np.arange(n_categories), categories, rotation=35, ha='right')
+    ax.set_xticks(np.arange(n_categories), categories, rotation=category_rotation, ha='right')
     ax.set_yticks(np.arange(n_genes), gene_labels)
     ax.set_xlim(-0.55, n_categories - 0.45)
     ax.set_ylim(-0.55, n_genes - 0.45)

@@ -6,8 +6,37 @@ from config import Config
 
 QC_OBS_COLUMNS = frozenset({
     'total_counts', 'n_genes_by_counts', 'pct_counts_mt', 'size_factor',
-    'total_counts_mt', 'total_counts_ribo', 'pct_counts_ribo', '_auto_group',
+    'total_counts_mt', 'total_counts_ribo', 'total_counts_hb',
+    'pct_counts_ribo', 'pct_counts_hb',
+    'mito_perc', 'ribo_perc', 'hb_perc', '_auto_group',
 })
+
+QC_PERCENTAGE_COLUMNS = (
+    ('pct_counts_mt', 'mito_perc'),
+    ('pct_counts_ribo', 'ribo_perc'),
+    ('pct_counts_hb', 'hb_perc'),
+)
+
+
+def restore_scanpy_qc_percentages(adata):
+    """Restore ``pct_counts_*`` columns to Scanpy's 0-100 percentage scale.
+
+    OmicVerse stores its ``*_perc`` aliases as fractions and mirrors those
+    fractions into Scanpy-named ``pct_counts_*`` columns. Prefer the explicit
+    fraction aliases when present so downstream thresholds and plots keep the
+    standard Scanpy percentage semantics. Values outside the fractional 0-1
+    range are treated as percentages for compatibility with imported data.
+    """
+    for pct_column, fraction_column in QC_PERCENTAGE_COLUMNS:
+        if fraction_column not in adata.obs.columns:
+            continue
+        values = pd.to_numeric(adata.obs[fraction_column], errors='coerce')
+        finite = values[np.isfinite(values)]
+        is_fraction = finite.empty or (
+            float(finite.min()) >= 0.0 and float(finite.max()) <= 1.0 + 1e-8
+        )
+        adata.obs[pct_column] = values * 100.0 if is_fraction else values
+    return adata
 
 # These fields describe cells, libraries, or technical processing rather than
 # the biological grouping that should normally drive DEG/proportion analyses.
@@ -133,6 +162,68 @@ def obs_grouping_info(adata, column, *, max_categories=50,
     return result
 
 
+def batch_cluster_overlap(adata, cluster_key, batch_key, *, dominance_threshold=0.90):
+    """Summarise whether clusters are dominated by a single technical batch.
+
+    This is a descriptive warning, not a batch-correction score: a genuinely
+    biological population can be present in one batch.  It gives downstream
+    review code a bounded, explicit signal instead of requiring visual
+    inspection of a composition bar plot alone.
+    """
+    result = {
+        'valid': False,
+        'cluster_key': str(cluster_key or ''),
+        'batch_key': str(batch_key or ''),
+        'n_clusters': 0,
+        'n_batches': 0,
+        'dominance_threshold': float(dominance_threshold),
+        'batch_dominated_cluster_count': 0,
+        'batch_dominated_cell_fraction': 0.0,
+        'max_batch_fraction': None,
+        'weighted_max_batch_fraction': None,
+        'warnings': [],
+    }
+    if not cluster_key or not batch_key:
+        result['reason'] = '未指定 cluster 或 batch 列'
+        return result
+    columns = getattr(adata, 'obs', pd.DataFrame()).columns
+    if cluster_key not in columns or batch_key not in columns:
+        result['reason'] = 'cluster 或 batch 列不存在'
+        return result
+
+    clusters = adata.obs[cluster_key].astype(str)
+    batches = adata.obs[batch_key].astype(str)
+    n_clusters = int(clusters.nunique(dropna=False))
+    n_batches = int(batches.nunique(dropna=False))
+    result.update({'n_clusters': n_clusters, 'n_batches': n_batches})
+    if n_clusters < 2 or n_batches < 2:
+        result['reason'] = '至少需要两个 cluster 和两个 batch 才能评估重合'
+        return result
+
+    table = pd.crosstab(clusters, batches)
+    sizes = table.sum(axis=1).astype(float)
+    fractions = table.div(sizes, axis=0)
+    max_fractions = fractions.max(axis=1)
+    dominated = max_fractions >= float(dominance_threshold)
+    dominated_cells = float(sizes.loc[dominated].sum())
+    total_cells = max(float(sizes.sum()), 1.0)
+    weights = sizes / total_cells
+    weighted_max = float((max_fractions * weights).sum())
+    result.update({
+        'valid': True,
+        'batch_dominated_cluster_count': int(dominated.sum()),
+        'batch_dominated_cell_fraction': round(dominated_cells / total_cells, 4),
+        'max_batch_fraction': round(float(max_fractions.max()), 4),
+        'weighted_max_batch_fraction': round(weighted_max, 4),
+    })
+    if int(dominated.sum()):
+        result['warnings'].append(
+            f"{int(dominated.sum())}/{n_clusters} 个 cluster 的单一 batch 占比 ≥ "
+            f"{float(dominance_threshold):.0%}；需排查 batch-driven cluster。"
+        )
+    return result
+
+
 def rank_obs_grouping_candidates(adata, module_name='', *, purpose='groupby',
                                  include_technical=False):
     """Return safe obs grouping columns in a parameter-aware order.
@@ -145,6 +236,7 @@ def rank_obs_grouping_candidates(adata, module_name='', *, purpose='groupby',
     """
     module = str(module_name or '').strip().lower()
     purpose = str(purpose or 'groupby').strip().lower()
+    columns = list(getattr(adata, 'obs', pd.DataFrame()).columns)
     if purpose == 'batch_key':
         priority = _BATCH_PRIORITY
         allow_technical = True
@@ -161,6 +253,15 @@ def rank_obs_grouping_candidates(adata, module_name='', *, purpose='groupby',
     elif purpose == 'condition_key' or purpose == 'group_column':
         priority = _GROUPING_PRIORITIES['condition']
         allow_technical = bool(include_technical)
+    elif module == 'deg' and any(
+        _normalise_obs_column_name(column) in {'celltype', 'cell_type', 'annotation'}
+        for column in columns
+    ):
+        priority = (
+            'celltype', 'cell_type', 'annotation', 'cell_type_annotation',
+            'leiden', 'cluster', 'condition', 'treatment', 'group',
+        )
+        allow_technical = bool(include_technical)
     elif module == 'bulk_deg' or module.startswith('bulk_'):
         priority = _GROUPING_PRIORITIES['bulk']
         allow_technical = bool(include_technical)
@@ -172,7 +273,6 @@ def rank_obs_grouping_candidates(adata, module_name='', *, purpose='groupby',
         allow_technical = bool(include_technical)
 
     candidates = []
-    columns = list(getattr(adata, 'obs', pd.DataFrame()).columns)
     for index, column in enumerate(columns):
         if column in QC_OBS_COLUMNS:
             continue
@@ -516,10 +616,38 @@ def infer_sc_data_format(input_path):
     return 'unknown'
 
 
-def _ensure_counts_layer(adata):
-    """Preserve raw/imported matrix in counts layer if absent."""
-    if 'counts' not in adata.layers:
+def _is_raw_count_matrix(matrix):
+    """Return whether a matrix is finite, non-negative and integer-valued."""
+    values = np.asarray(matrix.data if hasattr(matrix, 'data') else matrix, dtype=float)
+    if values.size == 0:
+        return True
+    return bool(
+        np.isfinite(values).all()
+        and (values >= 0).all()
+        and np.allclose(values, np.rint(values), rtol=0.0, atol=1e-6)
+    )
+
+
+def _ensure_counts_layer(adata, input_format=None):
+    """Preserve counts without inventing them from an arbitrary h5ad ``X``.
+
+    Matrix/10x imports conventionally contain raw counts in ``X`` and may be
+    promoted after an explicit integer/non-negative check.  A processed h5ad,
+    loom or zarr object has no such contract: its ``X`` may be log-normalized,
+    residuals or an embedding matrix.  Leave those objects unmodified and mark
+    the missing layer so count-dependent modules can fail with an actionable
+    message instead of producing plausible-looking but invalid results.
+    """
+    if 'counts' in adata.layers:
+        adata.uns['counts_layer_missing'] = False
+        return adata
+    raw_native_formats = {'10x_mtx', '10x_h5', 'expression_matrix'}
+    if input_format in raw_native_formats and _is_raw_count_matrix(adata.X):
         adata.layers['counts'] = adata.X.copy()
+        adata.uns['counts_layer_inferred_from_x'] = True
+        adata.uns['counts_layer_missing'] = False
+    else:
+        adata.uns['counts_layer_missing'] = True
     return adata
 
 
@@ -531,7 +659,7 @@ def _standardize_imported_adata(adata, input_format=None, species=None, genome=N
         adata.obs_names_make_unique()
 
     adata = remap_var_names(adata)
-    adata = _ensure_counts_layer(adata)
+    adata = _ensure_counts_layer(adata, input_format=input_format)
 
     if input_format:
         adata.uns['input_format'] = input_format
@@ -699,6 +827,10 @@ def summarize_adata_import(adata, input_format, output_path):
         'obs_columns': list(map(str, adata.obs.columns[:20])),
         'var_columns': list(map(str, adata.var.columns[:20])),
         'layers': list(map(str, adata.layers.keys())),
+        'counts_layer_status': 'present' if 'counts' in adata.layers else 'missing',
+        'counts_layer_inferred_from_x': bool(
+            adata.uns.get('counts_layer_inferred_from_x', False)
+        ),
     }
 
 

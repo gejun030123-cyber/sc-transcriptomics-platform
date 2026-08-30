@@ -1,0 +1,19 @@
+.ai-settings-page { max-width: 1180px; margin: 0 auto 48px; }
+.ai-settings-heading { display:flex; align-items:flex-end; justify-content:space-between; gap:24px; margin: 8px 0 28px; }
+.ai-settings-heading h1 { margin: 8px 0 6px; color:#172554; font-size: 2rem; }
+.ai-settings-heading p { margin:0; color:#64748b; }
+.ai-settings-card { border-radius:16px; }
+.ai-settings-card h2 { font-size:1.1rem; color:#172554; margin-bottom:6px; }
+.ai-settings-card .form-label { font-weight:600; color:#334155; }
+.ai-settings-actions { display:flex; align-items:center; gap:10px; }
+.ai-settings-summary dl { margin-top:20px; }
+.ai-settings-summary dt { color:#64748b; font-weight:500; padding:8px 0; }
+.ai-settings-summary dd { color:#0f172a; font-weight:600; padding:8px 0; margin-bottom:0; }
+.ai-settings-help { color:#64748b; font-size:.86rem; }
+.ai-settings-help h3 { color:#334155; font-size:1rem; }
+.ai-settings-help li { margin-bottom:8px; }
+@media (max-width: 700px) {
+    .ai-settings-heading { align-items:flex-start; flex-direction:column; gap:10px; }
+    .ai-settings-actions { flex-wrap:wrap; }
+    .ai-settings-actions .ms-auto { margin-left:0 !important; width:100%; text-align:left; padding-left:0; }
+}

@@ -72,6 +72,12 @@ def execute_tool(name, args, project_id):
         return _start_goal_agent(args, project_id)
     elif name == "continue_goal_agent":
         return _continue_goal_agent(args, project_id)
+    elif name == "list_wes_workflows":
+        return _list_wes_workflows()
+    elif name == "list_wes_references":
+        return _list_wes_references(args or {})
+    elif name in {"inspect_wes_manifest", "inspect_wes_preflight"}:
+        return _inspect_wes_manifest(args, project_id)
     return {"error": f"未知工具: {name}"}
 
 
@@ -352,12 +358,34 @@ def _get_task_results(task_id):
 
     files = ResultFile.get_by_task(task_id)
     result_files = []
+    attachments = []
+    image_types = {'png', 'jpg', 'jpeg', 'svg', 'webp', 'tiff'}
     for f in files:
-        result_files.append({
+        item = {
+            "id": f.id,
             "label": f.label,
             "type": f.file_type,
             "category": f.category,
-        })
+        }
+        result_files.append(item)
+        # Only expose project-owned, existing image files as chat attachments.
+        # The download endpoint performs the same validation again, so the URL
+        # is safe even if a result file is removed between these two checks.
+        if (f.file_type or '').lower() in image_types:
+            try:
+                is_valid, _ = Config._validate_path(f.file_path, t.project_id)
+            except (OSError, ValueError):
+                is_valid = False
+            if is_valid and os.path.isfile(f.file_path):
+                attachments.append({
+                    "id": f.id,
+                    "task_id": t.id,
+                    "project_id": t.project_id,
+                    "label": f.label or f.category or "分析图",
+                    "category": f.category or "plot",
+                    "type": (f.file_type or '').lower(),
+                    "url": f"/api/projects/{t.project_id}/result-file/{f.id}",
+                })
 
     return {
         "task_id": t.id,
@@ -365,6 +393,7 @@ def _get_task_results(task_id):
         "status": t.status,
         "result_data": result_data,
         "result_files": result_files,
+        "attachments": attachments,
     }
 
 
@@ -388,6 +417,117 @@ def _list_modules(pipeline_type="all"):
         }
 
     return {"modules": modules}
+
+
+def _list_wes_workflows():
+    """列出 WES 工作流契约；不启动外部执行器。"""
+    from modules.workflows.registry import list_workflows
+
+    return {"workflows": list_workflows("wes")}
+
+
+def _list_wes_references(args):
+    """List the registered reference catalog without exposing sequence files."""
+    from modules.workflows.references import list_reference_assets
+
+    references = list_reference_assets(
+        assembly=str(args.get("assembly", "") or "").strip(),
+        bundle_version=str(args.get("bundle_version", "") or "").strip(),
+        status=str(args.get("status", "registered") or "registered").strip(),
+    )
+    for item in references:
+        if item.get("file_path"):
+            item["file_name"] = os.path.basename(item.pop("file_path"))
+    return {"references": references}
+
+
+def _redact_wes_manifest(manifest):
+    """Keep AI context structural; do not expose absolute human-data paths."""
+    if not isinstance(manifest, dict):
+        return manifest
+    path_fields = {
+        "fastq_1", "fastq_2", "bam", "bai", "cram", "crai", "vcf", "tbi",
+        "pedigree_path", "capture_bed_path",
+    }
+    safe = dict(manifest)
+    samples = []
+    for raw in manifest.get("samples", []):
+        if not isinstance(raw, dict):
+            samples.append(raw)
+            continue
+        sample = dict(raw)
+        for field in path_fields:
+            if sample.get(field):
+                sample[field] = os.path.basename(str(sample[field]))
+        samples.append(sample)
+    safe["samples"] = samples
+    if safe.get("capture_bed_path"):
+        safe["capture_bed_path"] = os.path.basename(str(safe["capture_bed_path"]))
+    return safe
+
+
+def _resolve_wes_manifest(args, project_id):
+    """Resolve a manifest from a registered id, project file, or inline object."""
+    if not project_id:
+        return None, "缺少项目上下文"
+
+    manifest_id = str(args.get("manifest_id", "") or "").strip()
+    if manifest_id:
+        from modules.workflows.storage import get_manifest
+        record = get_manifest(manifest_id, project_id)
+        if not record:
+            return None, "manifest_id 不存在或不属于当前项目"
+        return record.get("manifest"), None
+
+    inline = args.get("manifest")
+    if inline is not None:
+        return inline, None
+
+    manifest_path = str(args.get("manifest_path", "") or "").strip()
+    if not manifest_path:
+        return None, "需要 manifest_id、manifest_path 或 manifest"
+    if not os.path.isabs(manifest_path):
+        manifest_path = os.path.join(Config.project_dir(project_id), manifest_path)
+    path_error = _validate_project_path(manifest_path, project_id)
+    if path_error:
+        try:
+            manifest_path = Config.validate_wes_source_path(manifest_path)
+        except ValueError:
+            return None, f"manifest_path: {path_error}"
+    try:
+        from modules.workflows.preflight import load_manifest_file
+        return load_manifest_file(manifest_path), None
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return None, f"manifest 读取失败: {exc}"
+
+
+def _inspect_wes_manifest(args, project_id):
+    """只读执行 WES manifest 预检查，供 AI 解释输入与风险。"""
+    from modules.workflows.preflight import validate_manifest
+
+    manifest, error = _resolve_wes_manifest(args or {}, project_id)
+    if error:
+        return {"error": error}
+    workflow_key = str((args or {}).get("workflow_key", "") or "").strip()
+    if not workflow_key:
+        return {"error": "缺少 workflow_key"}
+    result = validate_manifest(
+        manifest,
+        project_dir=Config.project_dir(project_id),
+        workflow_key=workflow_key,
+        require_files=bool((args or {}).get("check_files", True)),
+        source_roots=Config.wes_source_roots(),
+        content_checks=bool((args or {}).get("check_content", False)),
+    )
+    response = result.to_dict()
+    response["manifest"] = _redact_wes_manifest(response.get("manifest"))
+    for item in response.get("checks", {}).get("content_checks", []):
+        for check in item.get("checks", []):
+            if check.get("path"):
+                check["file_name"] = os.path.basename(str(check.pop("path")))
+    response["workflow_key"] = workflow_key
+    response["message"] = "仅完成 WES 输入预检查；不会启动外部工作流。"
+    return response
 
 
 def _matrix_value_profile(matrix, n_obs, n_vars):
@@ -868,8 +1008,26 @@ def _recommend_analysis_config(args, project_id):
         recommend('hvg_flavor', 'seurat_v3', '使用方差稳定的常用 HVG 方法')
 
     elif module_name == 'dimred':
-        recommend('n_comps', 30 if n_obs < 5000 else 50, '根据细胞规模设置 PCA 维度')
-        recommend('umap_n_neighbors', 15 if n_obs < 20000 else 30, '大数据增大邻居数以保留全局结构')
+        recommend('n_comps', 50, '作为自动选 PC 的最大候选维度；最终使用的 PC 数由 elbow 决定')
+        recommend('auto_n_comps', 'elbow', '默认用 elbow 选择最终 PC 数；none 仅供高级用户固定使用最大候选数')
+        batch_name_tokens = {
+            'batch', 'technical_batch', 'sequencing_batch', 'library_batch',
+            'sample', 'sample_id', 'library', 'library_id',
+            'donor', 'donor_id', 'orig_ident', 'orig.ident',
+        }
+        batch_candidates = [
+            candidate for candidate in profile.get('batch_candidates', [])
+            if (
+                str(candidate.get('column', '')).strip().lower() in batch_name_tokens
+                or str(candidate.get('column', '')).strip().lower().endswith('_batch')
+                or str(candidate.get('column', '')).strip().lower().startswith(('batch_', 'sample_', 'donor_', 'library_'))
+            )
+        ]
+        if batch_candidates:
+            recommend('batch_key', batch_candidates[0]['column'], '仅使用数据中检测到的有效 batch/sample/donor/library 分类列')
+        else:
+            warnings.append('未检测到可靠的 batch/sample/donor/library 分类列；降维不自动指定 batch_key。')
+        recommend('umap_n_neighbors', 15, '使用常规的局部/全局结构平衡；大数据如需更强全局结构可由高级用户调整')
 
     elif module_name == 'clustering':
         rare_target = any(word in objective.lower() for word in ('稀有', '少数', 'rare'))
@@ -896,6 +1054,13 @@ def _recommend_analysis_config(args, project_id):
         recommend('method', 'wilcoxon', '单细胞表达稀疏且非正态，优先使用 Wilcoxon')
         if group_column:
             recommend('groupby', group_column, '使用已有聚类或注释列')
+        objective_lower = str(objective or '').lower()
+        if any(token in objective_lower for token in ('vs', '对比', '相对', 'compare', 'pairwise')):
+            mode = 'custom' if any(token in objective_lower for token in ('vs', '对比')) else 'pairwise'
+            recommend(
+                'comparison_mode', mode,
+                '目标包含具体比较：custom 只运行 A-vs-B 列表，pairwise 运行全部两两比较',
+            )
 
     cleaned_params, validation_error = _validate_analysis_params(module_name, params)
     if validation_error:

@@ -217,6 +217,8 @@ def test_task_result_page_has_individual_and_batch_plot_exports(client):
     assert resp.status_code == 200
     assert '科研图（默认展示）'.encode() in resp.data
     assert '下载 PNG'.encode() in resp.data
+    assert b'result-figure-header' in resp.data
+    assert b'result-figure-preview' in resp.data
     assert b'Plotly.newPlot' not in resp.data
 
 

@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import numpy as np
 from modules.base import BaseAnalysis
 from modules.io_utils import resolve_obs_grouping
@@ -22,23 +23,37 @@ def _run_stat_test(ct_abs, test_type, n_permutations=1000):
     elif test_type == 'permutation':
         observed_chi2, _, _, _ = chi2_contingency(ct_abs)
         count = 0
+        valid_permutations = 0
         import pandas as pd
-        for _ in range(n_permutations):
-            shuffled = ct_abs.copy()
-            total = shuffled.values.sum()
-            col_sums = shuffled.sum(axis=0).values
-            row_sums = shuffled.sum(axis=1).values
-            pvals = col_sums / total
-            pvals = pvals / pvals.sum()
-            perm_table = np.random.multinomial(row_sums[0], pvals).reshape(1, -1)
-            for rs in row_sums[1:]:
-                row = np.random.multinomial(rs, pvals)
-                perm_table = np.vstack([perm_table, row])
+        # Conditional label permutation keeps both row totals (group cell
+        # counts) and column totals (cell-type totals) fixed.  Independent
+        # multinomial draws used to generate a different null table with
+        # random margins, so the reported p value was not a permutation test
+        # for the observed contingency table.
+        rng = np.random.default_rng(0)
+        row_sums = ct_abs.sum(axis=1).to_numpy(dtype=int)
+        col_sums = ct_abs.sum(axis=0).to_numpy(dtype=int)
+        labels = np.repeat(np.arange(len(col_sums), dtype=int), col_sums)
+        for _ in range(max(1, int(n_permutations))):
+            shuffled_labels = rng.permutation(labels)
+            perm_table = np.zeros_like(ct_abs.values, dtype=int)
+            offset = 0
+            for row_index, row_size in enumerate(row_sums):
+                assigned = shuffled_labels[offset:offset + row_size]
+                perm_table[row_index, :] = np.bincount(
+                    assigned, minlength=len(col_sums),
+                )
+                offset += row_size
             perm_df = pd.DataFrame(perm_table, index=ct_abs.index, columns=ct_abs.columns)
-            perm_chi2, _, _, _ = chi2_contingency(perm_df)
+            try:
+                perm_chi2, _, _, _ = chi2_contingency(perm_df)
+            except ValueError:
+                continue
+            valid_permutations += 1
             if perm_chi2 >= observed_chi2:
                 count += 1
-        pval = (count + 1) / (n_permutations + 1)
+        pval = ((count + 1) / (valid_permutations + 1)
+                if valid_permutations else float('nan'))
         return observed_chi2, pval
     else:
         chi2, pval, _, _ = chi2_contingency(ct_abs)
@@ -72,7 +87,8 @@ def _sample_level_composition(adata, groupby, sample_key, condition_key,
                               min_samples_per_condition=2,
                               min_cells_per_sample=10,
                               allow_technical_sample=False,
-                              allow_technical_condition=False):
+                              allow_technical_condition=False,
+                              condition_pairs=None):
     """Build sample × celltype proportions and safe per-celltype tests.
 
     Cell counts are useful descriptive evidence but are not biological
@@ -186,35 +202,71 @@ def _sample_level_composition(adata, groupby, sample_key, condition_key,
 
     conditions = sorted(condition_counts)
     rows = []
-    for celltype in celltypes:
-        values_by_condition = [
-            eligible.loc[
-                (eligible['celltype'] == celltype) & (eligible['condition'] == condition),
-                'proportion',
-            ].to_numpy(dtype=float)
-            for condition in conditions
-        ]
-        try:
-            if len(conditions) == 2:
-                statistic, pvalue = mannwhitneyu(
-                    values_by_condition[0], values_by_condition[1], alternative='two-sided'
-                )
-                test_name = 'mann_whitney_u'
-            else:
-                statistic, pvalue = kruskal(*values_by_condition)
-                test_name = 'kruskal'
-        except Exception:
-            statistic, pvalue, test_name = np.nan, np.nan, 'unavailable'
-        row = {
-            'celltype': str(celltype), 'test': test_name,
-            'statistic': float(statistic) if np.isfinite(statistic) else np.nan,
-            'p_value': float(pvalue) if np.isfinite(pvalue) else np.nan,
-            'n_samples': int(sum(len(values) for values in values_by_condition)),
-        }
-        for condition, values in zip(conditions, values_by_condition):
-            row[f'n_{condition}'] = int(len(values))
-            row[f'mean_{condition}'] = float(np.mean(values)) if len(values) else np.nan
-        rows.append(row)
+    if condition_pairs:
+        # 指定比较组时，样本级检验只运行列出的对（与细胞级 pairwise 一致），
+        # 避免“指定了 A-vs-B 却仍输出全部条件 Kruskal”的口径漂移。
+        for experimental, control in condition_pairs:
+            if experimental not in condition_counts or control not in condition_counts:
+                continue
+            for celltype in celltypes:
+                values_exp = eligible.loc[
+                    (eligible['celltype'] == celltype) & (eligible['condition'] == experimental),
+                    'proportion',
+                ].to_numpy(dtype=float)
+                values_ctrl = eligible.loc[
+                    (eligible['celltype'] == celltype) & (eligible['condition'] == control),
+                    'proportion',
+                ].to_numpy(dtype=float)
+                try:
+                    statistic, pvalue = mannwhitneyu(
+                        values_exp, values_ctrl, alternative='two-sided'
+                    )
+                    test_name = 'mann_whitney_u'
+                except Exception:
+                    statistic, pvalue, test_name = np.nan, np.nan, 'unavailable'
+                row = {
+                    'celltype': str(celltype),
+                    "comparison": f"{experimental} vs {control}",
+                    'test': test_name,
+                    'statistic': float(statistic) if np.isfinite(statistic) else np.nan,
+                    'p_value': float(pvalue) if np.isfinite(pvalue) else np.nan,
+                    'n_samples': int(len(values_exp) + len(values_ctrl)),
+                }
+                row[f'n_{experimental}'] = int(len(values_exp))
+                row[f'n_{control}'] = int(len(values_ctrl))
+                row[f'mean_{experimental}'] = float(np.mean(values_exp)) if len(values_exp) else np.nan
+                row[f'mean_{control}'] = float(np.mean(values_ctrl)) if len(values_ctrl) else np.nan
+                rows.append(row)
+    else:
+        for celltype in celltypes:
+            values_by_condition = [
+                eligible.loc[
+                    (eligible['celltype'] == celltype) & (eligible['condition'] == condition),
+                    'proportion',
+                ].to_numpy(dtype=float)
+                for condition in conditions
+            ]
+            try:
+                if len(conditions) == 2:
+                    statistic, pvalue = mannwhitneyu(
+                        values_by_condition[0], values_by_condition[1], alternative='two-sided'
+                    )
+                    test_name = 'mann_whitney_u'
+                else:
+                    statistic, pvalue = kruskal(*values_by_condition)
+                    test_name = 'kruskal'
+            except Exception:
+                statistic, pvalue, test_name = np.nan, np.nan, 'unavailable'
+            row = {
+                'celltype': str(celltype), 'test': test_name,
+                'statistic': float(statistic) if np.isfinite(statistic) else np.nan,
+                'p_value': float(pvalue) if np.isfinite(pvalue) else np.nan,
+                'n_samples': int(sum(len(values) for values in values_by_condition)),
+            }
+            for condition, values in zip(conditions, values_by_condition):
+                row[f'n_{condition}'] = int(len(values))
+                row[f'mean_{condition}'] = float(np.mean(values)) if len(values) else np.nan
+            rows.append(row)
     tests = pd.DataFrame(rows)
     if not tests.empty:
         tests['fdr_bh'] = _bh_adjust(tests['p_value'].to_numpy(dtype=float))
@@ -237,6 +289,7 @@ class ProportionAnalysis(BaseAnalysis):
 
         self.progress(5, "Loading data...")
         adata = self.load_adata(input_path)
+        adata = self.apply_scope(adata)
         requested_groupby = str(self.params.get('groupby', 'celltype') or '').strip()
         requested_batch_key = str(self.params.get('batch_key', 'batch') or '').strip()
         requested_condition_key = str(self.params.get('condition_key', '') or '').strip()
@@ -247,6 +300,17 @@ class ProportionAnalysis(BaseAnalysis):
         min_cells_per_group = int(self.params.get('min_cells_per_group', 10))
         min_cells_per_sample = int(self.params.get('min_cells_per_sample', 10))
         min_samples_per_condition = int(self.params.get('min_samples_per_condition', 2))
+
+        # 指定比较组（A-vs-B）同时约束细胞级与样本级检验，避免口径不一致。
+        compare_groups_str = self.params.get('compare_groups', '').strip()
+        compare_pairs = []
+        if compare_groups_str:
+            for item in compare_groups_str.replace('\n', ';').split(';'):
+                item = item.strip()
+                if '-vs-' in item:
+                    parts = item.split('-vs-')
+                    if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                        compare_pairs.append((parts[0].strip(), parts[1].strip()))
 
         groupby, group_info = resolve_obs_grouping(
             adata, requested_groupby, fallbacks=['leiden'],
@@ -279,19 +343,56 @@ class ProportionAnalysis(BaseAnalysis):
         if comparison_key != requested_comparison_key:
             self.progress(-1, f"比较列已改用 '{comparison_key}'：{comparison_info.get('requested_reason', '')}")
 
+        # Compute sample-level composition before removing rare cell types for
+        # the cell-level table.  Filtering globally first changes every
+        # sample's denominator and can manufacture condition differences when
+        # a cell type is rare in only one condition.
+        if analysis_unit == 'cell':
+            sample_level = {
+                'available': False, 'inference_ready': False,
+                'warnings': ['已选择细胞级描述模式；不报告样本级 p 值/FDR。'],
+                'proportions': pd.DataFrame(), 'tests': pd.DataFrame(),
+                'design': pd.DataFrame(), 'condition_counts': {},
+            }
+        else:
+            sample_level = _sample_level_composition(
+                adata, groupby, requested_sample_key, requested_condition_key,
+                min_samples_per_condition=min_samples_per_condition,
+                min_cells_per_sample=min_cells_per_sample,
+                allow_technical_sample=bool(self.params.get('confirm_batch_is_biological_sample', False)),
+                allow_technical_condition=bool(self.params.get('confirm_batch_is_biological_condition', False)),
+                condition_pairs=compare_pairs,
+            )
+
         self.progress(30, "Computing cell proportions...")
+        removed_groups = []
         if min_cells_per_group > 0:
             group_counts = adata.obs[groupby].value_counts()
             valid_groups = group_counts[group_counts >= min_cells_per_group].index.tolist()
             if len(valid_groups) < len(group_counts):
                 removed = set(group_counts.index) - set(valid_groups)
+                removed_groups = sorted(map(str, removed))
                 self.progress(-1, f"移除 {len(removed)} 个低细胞数组: {removed}")
                 adata = adata[adata.obs[groupby].isin(valid_groups)].copy()
         ct = pd.crosstab(adata.obs[comparison_key], adata.obs[groupby], normalize='index')
         ct_abs = pd.crosstab(adata.obs[comparison_key], adata.obs[groupby])
+        if ct.shape[0] < 2 or ct.shape[1] == 0:
+            raise ValueError(
+                f'过滤后没有可比较的细胞类型/分组（列联表 {ct.shape}）。'
+                '请放宽 min_cells_per_group 或检查分组列。'
+            )
 
-        self.progress(50, "Running chi-squared test...")
-        chi2, pval = _run_stat_test(ct_abs, stat_test, n_permutations)
+        # 过滤后列联表可能为空或退化为单组：chi2_contingency 在空表上抛
+        # ValueError、单行/单列表返回误导性 p=1.0。不足两组时跳过检验并在
+        # summary 中明确记录，而不是崩溃或输出无意义 p 值。
+        stat_skipped = False
+        if ct_abs.shape[0] < 2 or ct_abs.shape[1] < 2:
+            stat_skipped = True
+            self.progress(-1, '过滤后有效分组不足两组，跳过列联表检验。')
+            chi2, pval = float('nan'), float('nan')
+        else:
+            self.progress(50, "Running chi-squared test...")
+            chi2, pval = _run_stat_test(ct_abs, stat_test, n_permutations)
 
         self.progress(65, "Generating proportion plots...")
         plots_dir = self.ensure_plots_dir()
@@ -347,25 +448,6 @@ class ProportionAnalysis(BaseAnalysis):
         result_files.append({'file_path': os.path.join(results_dir, 'cell_counts.csv'), 'file_type': 'csv', 'category': 'table', 'label': 'Cell Counts'})
         result_files.append({'file_path': os.path.join(results_dir, 'cell_proportions.csv'), 'file_type': 'csv', 'category': 'table', 'label': 'Cell Proportions'})
 
-        # Sample-level inference is opt-in by design through a real sample and
-        # condition column.  The legacy chi-square result above remains a
-        # descriptive cell-count association, never a substitute for samples.
-        if analysis_unit == 'cell':
-            sample_level = {
-                'available': False, 'inference_ready': False,
-                'warnings': ['已选择细胞级描述模式；不报告样本级 p 值/FDR。'],
-                'proportions': pd.DataFrame(), 'tests': pd.DataFrame(),
-                'design': pd.DataFrame(), 'condition_counts': {},
-            }
-        else:
-            sample_level = _sample_level_composition(
-                adata, groupby, requested_sample_key, requested_condition_key,
-                min_samples_per_condition=min_samples_per_condition,
-                min_cells_per_sample=min_cells_per_sample,
-                allow_technical_sample=bool(self.params.get('confirm_batch_is_biological_sample', False)),
-                allow_technical_condition=bool(self.params.get('confirm_batch_is_biological_condition', False)),
-            )
-
         if sample_level['available']:
             sample_prop_path = os.path.join(results_dir, 'sample_level_cell_proportions.csv')
             sample_tests_path = os.path.join(results_dir, 'sample_level_proportion_tests.csv')
@@ -397,16 +479,7 @@ class ProportionAnalysis(BaseAnalysis):
                     'Sample-level Mean Cell Proportions', formats=('png', 'svg'), dpi=300,
                 ))
 
-        # Pairwise group comparison
-        compare_groups_str = self.params.get('compare_groups', '').strip()
-        compare_pairs = []
-        if compare_groups_str:
-            for item in compare_groups_str.replace('\n', ';').split(';'):
-                item = item.strip()
-                if '-vs-' in item:
-                    parts = item.split('-vs-')
-                    if len(parts) == 2 and parts[0].strip() and parts[1].strip():
-                        compare_pairs.append((parts[0].strip(), parts[1].strip()))
+        # Pairwise group comparison（compare_pairs 已在开头统一解析）
 
         for group_a, group_b in compare_pairs:
             if group_a in ct.index and group_b in ct.index:
@@ -416,14 +489,16 @@ class ProportionAnalysis(BaseAnalysis):
                 ct_sub_abs = pd.crosstab(adata_sub.obs[comparison_key], adata_sub.obs[groupby])
                 ct_sub = pd.crosstab(adata_sub.obs[comparison_key], adata_sub.obs[groupby], normalize='index')
 
-                chi2_sub, pval_sub = _run_stat_test(ct_sub_abs, stat_test, n_permutations)
+                chi2_sub, pval_sub = _run_stat_test(ct_sub_abs, stat_test, n_permutations) \
+                    if (ct_sub_abs.shape[0] >= 2 and ct_sub_abs.shape[1] >= 2) \
+                    else (float('nan'), float('nan'))
 
                 fig_sub = grouped_bar_figure(
                     ct_sub.index.tolist(), [(str(col), ct_sub[col].values) for col in ct_sub.columns],
                     title=f'Cell Proportions: {group_a} vs {group_b} (p={pval_sub:.4f})',
                     x_label=comparison_key, y_label='Proportion', rotation=35, stacked=True,
                 )
-                safe_name = f'{group_a}_vs_{group_b}'.replace(' ', '_')
+                safe_name = re.sub(r'[^A-Za-z0-9_.-]', '_', f'{group_a}_vs_{group_b}')
                 result_files.extend(self.save_matplotlib_figure(
                     fig_sub, plots_dir, f'proportion_compare_{safe_name}.png', 'bar',
                     f'{group_a} vs {group_b} 比例比较', formats=('png', 'svg'), dpi=300,
@@ -441,13 +516,23 @@ class ProportionAnalysis(BaseAnalysis):
             'output_adata': output_path,
             'result_files': result_files,
             'summary': {
-                'chi2': round(float(chi2), 2),
-                'p_value': float(pval),
+                # 语义化统计量名：fisher_exact 返回的是 OR 而不是 chi2。
+                'statistic': round(float(chi2), 2) if not stat_skipped else None,
+                'chi2': (
+                    round(float(chi2), 2)
+                    if not stat_skipped and stat_test in ('chi_square', 'permutation')
+                    else None
+                ),
+                'p_value': float(pval) if not stat_skipped else None,
                 'n_batches': len(ct.index),
                 'n_groups': len(ct.columns),
                 'stat_test': stat_test,
-                'cell_level_association_p_value': float(pval),
-                'inference_unit': 'sample' if sample_level['inference_ready'] else 'cell (descriptive only)',
+                'stat_skipped': bool(stat_skipped),
+                'removed_low_cell_groups': removed_groups,
+                'cell_level_association_p_value': float(pval) if not stat_skipped else None,
+                'inference_unit': ('sample'
+                                   if sample_level['inference_ready']
+                                   else ('sample (downgraded to descriptive)' if requested_sample_key else 'cell (descriptive only)')),
                 'sample_key': requested_sample_key,
                 'condition_key': requested_condition_key,
                 'sample_level_inference_ready': bool(sample_level['inference_ready']),
@@ -456,6 +541,8 @@ class ProportionAnalysis(BaseAnalysis):
                 'sample_level_warnings': sample_level['warnings'],
                 'requested_groupby': requested_groupby,
                 'groupby': groupby,
+                'scope_key': str(self.params.get('scope_key', '') or '').strip() or None,
+                'scope_values': ([v.strip() for v in str(self.params.get('scope_values', '') or '').split(',') if v.strip()] or None),
                 'requested_batch_key': requested_batch_key,
                 'batch_key': comparison_key,
                 'comparison_key': comparison_key,

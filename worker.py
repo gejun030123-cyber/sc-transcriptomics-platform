@@ -2,6 +2,8 @@ import concurrent.futures
 import traceback
 import json
 import logging
+import os
+import shutil
 from datetime import datetime
 from database import get_conn
 from models import gen_id, AnalysisTask, ResultFile, PipelineRun
@@ -29,12 +31,91 @@ def _refresh_project_status(project_id):
     except Exception as exc:
         logger.warning("[Worker] Failed to refresh project %s status: %s", project_id, exc)
 
+
+def _snapshot_task_artifacts(task, project_dir, result):
+    """Copy module outputs to an immutable, task-scoped artifact directory.
+
+    Analysis modules historically used stable names such as ``qc_output.h5ad``
+    and ``plots/umap.png``.  Those names are useful for direct module use, but
+    they are unsafe as database-backed task results because a rerun replaces
+    the bytes referenced by an older task.  Snapshot only files declared by a
+    module, and rewrite the returned paths before registration/manifesting.
+    """
+    if not isinstance(result, dict):
+        return result
+    task_id = str(getattr(task, 'id', '') or '').strip()
+    if not task_id:
+        return result
+    module_name = str(getattr(task, 'module_name', 'analysis') or 'analysis')
+    safe_module = ''.join(ch if ch.isalnum() or ch in '._-' else '_' for ch in module_name)
+    safe_task = ''.join(ch if ch.isalnum() or ch in '._-' else '_' for ch in task_id)
+    artifact_dir = os.path.join(
+        os.path.realpath(project_dir), 'results', 'task_artifacts',
+        safe_module, safe_task,
+    )
+    os.makedirs(artifact_dir, exist_ok=True)
+    path_map = {}
+
+    def copy_one(source, target_name):
+        if not source or not isinstance(source, str):
+            return source
+        source_path = os.path.abspath(source)
+        if os.path.islink(source_path):
+            return source_path
+        source = os.path.realpath(source_path)
+        if not os.path.isfile(source):
+            return source
+        target = os.path.join(artifact_dir, target_name)
+        # A module can legitimately register two files with the same basename;
+        # the caller supplies an indexed target name for those entries.
+        shutil.copy2(source, target)
+        path_map.setdefault(source_path, target)
+        return target
+
+    output_path = result.get('output_adata')
+    if isinstance(output_path, str) and output_path:
+        result['output_adata'] = copy_one(output_path, 'output_adata' + os.path.splitext(output_path)[1])
+
+    snapshots = []
+    for index, rf in enumerate(result.get('result_files') or []):
+        if not isinstance(rf, dict):
+            snapshots.append(rf)
+            continue
+        item = dict(rf)
+        source = item.get('file_path') or item.get('path')
+        if isinstance(source, str) and source:
+            basename = os.path.basename(os.path.realpath(source)) or f'file_{index}'
+            # Prefixing with the declaration index makes duplicate basenames
+            # deterministic and prevents one result from replacing another.
+            target_name = f'{index:03d}_{basename}'
+            item['file_path'] = copy_one(source, target_name)
+        snapshots.append(item)
+    result['result_files'] = snapshots
+
+    # A few modules include output paths in nested summary/audit fields.  Keep
+    # those references consistent with the immutable files exposed to the UI.
+    def rewrite_paths(value):
+        if isinstance(value, dict):
+            return {key: rewrite_paths(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [rewrite_paths(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(rewrite_paths(item) for item in value)
+        if isinstance(value, str):
+            return path_map.get(os.path.abspath(value), value)
+        return value
+
+    if 'summary' in result:
+        result['summary'] = rewrite_paths(result['summary'])
+    return result
+
 def active_count():
     return sum(1 for f in _active_futures.values() if not f.done())
 
 
 def register_task_outputs(task, project_id, project_dir, result, pipeline_run_id=None):
     """Persist result files, converting legacy Plotly payloads to static figures."""
+    result = _snapshot_task_artifacts(task, project_dir, result)
     created_result_files = []
     for rf in (result.get('result_files') or []):
         try:
@@ -121,6 +202,12 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
         if not task.mark_running():
             logger.warning(f"[Worker] Task {task_id} not in pending state, skipping")
             return
+
+        # Modules that expose internal source tables use this ID to avoid
+        # collisions even when a caller submits directly to the worker rather
+        # than through the browser route.
+        params = dict(params or {})
+        params.setdefault('_analysis_id', task.id)
 
         progress_log = []
 
@@ -230,18 +317,31 @@ def _run_pipeline_run(run_id, project_id, modules, params_by_module, project_dir
         task_ids = []
         total_steps = len(modules)
         progress_log = []
+        latest_sc_deg_source = None
 
         for i, module_name in enumerate(modules):
             # 更新 pipeline 进度
             pct = int((i / total_steps) * 100)
             pipeline_run.update_progress(pct, module_name, json.dumps(progress_log, ensure_ascii=False))
 
+            module_params = dict(params_by_module.get(module_name, {}) or {})
+            if module_name == 'sc_cell_go' and latest_sc_deg_source:
+                # A pipeline has no browser task picker.  Bind enrichment to
+                # the DEG task just produced in this same run instead of
+                # falling back to directory/mtime discovery.
+                module_params['deg_source_files'] = latest_sc_deg_source['files']
+                module_params['deg_source_level'] = latest_sc_deg_source['level']
+                module_params['source_level'] = latest_sc_deg_source['level']
+                module_params['source_task_id'] = latest_sc_deg_source['task_id']
+
             # 创建子任务
             task = AnalysisTask(
                 project_id=project_id,
                 module_name=module_name,
-                params_json=json.dumps(params_by_module.get(module_name, {}), ensure_ascii=False)
+                params_json='{}',
             )
+            module_params.setdefault('_analysis_id', task.id)
+            task.params_json = json.dumps(module_params, ensure_ascii=False)
             task.save()
             task_ids.append(task.id)
 
@@ -269,7 +369,7 @@ def _run_pipeline_run(run_id, project_id, modules, params_by_module, project_dir
                 progress_log.append({'time': now, 'pct': pct, 'msg': f'[{_module}] {message}'})
                 task.update_progress(pct, message, json.dumps(progress_log, ensure_ascii=False))
 
-            module = cls(project_dir=project_dir, params=params_by_module.get(module_name, {}),
+            module = cls(project_dir=project_dir, params=module_params,
                          progress_callback=progress_cb)
 
             # 执行模块
@@ -307,6 +407,10 @@ def _run_pipeline_run(run_id, project_id, modules, params_by_module, project_dir
                 return
 
             register_task_outputs(task, project_id, project_dir, result, pipeline_run_id=run_id)
+            # register_task_outputs snapshots the module output and rewrites
+            # result['output_adata']; chain the immutable snapshot, not the
+            # legacy shared intermediate path.
+            output_adata = result.get('output_adata') or output_adata
 
             # 标记任务完成
             task.mark_completed(output_adata, summary_json)
@@ -317,6 +421,13 @@ def _run_pipeline_run(run_id, project_id, modules, params_by_module, project_dir
 
             # 链式传递
             current_input = output_adata
+            if module_name in {'sc_cell_deg', 'sc_pseudobulk_deg'}:
+                source_files = summary.get('deg_source_files') or []
+                source_level = str(summary.get('deg_source_level') or '')
+                if source_files and source_level in {'cell_level', 'pseudobulk'}:
+                    latest_sc_deg_source = {
+                        'files': source_files, 'level': source_level, 'task_id': task.id,
+                    }
 
         # 全部完成
         pipeline_run.mark_completed()

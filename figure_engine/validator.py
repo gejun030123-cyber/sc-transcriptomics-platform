@@ -32,7 +32,11 @@ class ValidationReport:
 
     def to_dict(self):
         return {
+            # Keep the historical field for consumers that already read it,
+            # while making the scope of this score explicit.
+            'figure_quality_score': self.score,
             'nature_readiness_score': self.score,
+            'score_type': 'figure_quality',
             'status': self.status,
             'ready': self.ready,
             'issues': [asdict(issue) if isinstance(issue, ValidationIssue) else dict(issue)
@@ -173,7 +177,7 @@ class FigureValidator:
         encodings = dict(getattr(fig, '_nature_encodings', {}) or {})
         color_semantics = str(encodings.get('color', '')).lower()
         continuous_color = any(token in color_semantics for token in (
-            'fdr', 'z-score', 'zscore', 'expression', 'correlation', 'nes',
+            'continuous', 'fdr', 'z-score', 'zscore', 'expression', 'correlation', 'nes',
             'jaccard', 'log2fc', 'direction', 'loading', 'variance',
             'distance', 'ratio', 'qvalue', '-log10',
         ))

@@ -74,12 +74,168 @@ def init_db():
             log_text TEXT DEFAULT '',
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
+
+        -- Platform-level overrides entered from the AI API settings page.
+        -- Values are never returned to the browser in clear text; the API key
+        -- is only read by the server-side adapter at request time.
+        CREATE TABLE IF NOT EXISTS platform_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT DEFAULT '',
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_project ON analysis_tasks(project_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON analysis_tasks(status)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_result_files_task ON result_files(task_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_result_files_project ON result_files(project_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_runs_project ON pipeline_runs(project_id)")
+
+    # Generic assay/workflow assets.  These tables are deliberately additive:
+    # existing AnalysisTask/PipelineRun records remain the compatibility view
+    # for single-cell and Bulk RNA modules.
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS data_assets (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            sample_id TEXT DEFAULT '',
+            assay_type TEXT NOT NULL DEFAULT '',
+            role TEXT DEFAULT '',
+            artifact_kind TEXT NOT NULL,
+            format TEXT DEFAULT '',
+            file_path TEXT NOT NULL,
+            size_bytes INTEGER DEFAULT 0,
+            checksum TEXT DEFAULT '',
+            reference_build TEXT DEFAULT '',
+            metadata_json TEXT DEFAULT '{}',
+            parent_asset_ids_json TEXT DEFAULT '[]',
+            created_by_run_id TEXT DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS sample_manifests (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            version INTEGER NOT NULL,
+            content_json TEXT NOT NULL,
+            checksum TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            validation_json TEXT DEFAULT '{}',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(project_id, version),
+            UNIQUE(project_id, checksum)
+        );
+
+        CREATE TABLE IF NOT EXISTS reference_assets (
+            id TEXT PRIMARY KEY,
+            species TEXT DEFAULT '',
+            assembly TEXT NOT NULL,
+            bundle_version TEXT NOT NULL,
+            asset_type TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            checksum TEXT DEFAULT '',
+            source TEXT DEFAULT '',
+            license_note TEXT DEFAULT '',
+            metadata_json TEXT DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'registered',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS workflow_runs (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            workflow_key TEXT NOT NULL,
+            manifest_id TEXT NOT NULL REFERENCES sample_manifests(id),
+            status TEXT NOT NULL DEFAULT 'pending',
+            external_run_id TEXT DEFAULT '',
+            parameter_signature TEXT DEFAULT '',
+            launch_json TEXT DEFAULT '{}',
+            provenance_json TEXT DEFAULT '{}',
+            error_text TEXT DEFAULT '',
+            executor TEXT DEFAULT 'nextflow',
+            workflow_release TEXT DEFAULT '',
+            profile TEXT DEFAULT '',
+            run_dir TEXT DEFAULT '',
+            pid INTEGER,
+            process_group_id INTEGER,
+            stdout_path TEXT DEFAULT '',
+            stderr_path TEXT DEFAULT '',
+            exit_code INTEGER,
+            cancel_requested_at DATETIME,
+            started_at DATETIME,
+            finished_at DATETIME,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS workflow_artifacts (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+            asset_id TEXT REFERENCES data_assets(id) ON DELETE SET NULL,
+            artifact_kind TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            checksum TEXT DEFAULT '',
+            required INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT DEFAULT '{}',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS wes_sra_jobs (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            sample_id TEXT NOT NULL,
+            patient_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            capture_kit_id TEXT DEFAULT '',
+            source_path TEXT NOT NULL,
+            source_asset_id TEXT DEFAULT '',
+            output_dir TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            progress INTEGER NOT NULL DEFAULT 0,
+            progress_message TEXT DEFAULT '',
+            input_size_bytes INTEGER NOT NULL DEFAULT 0,
+            output_paths_json TEXT DEFAULT '{}',
+            output_asset_ids_json TEXT DEFAULT '[]',
+            log_text TEXT DEFAULT '',
+            error_text TEXT DEFAULT '',
+            started_at DATETIME,
+            finished_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_assets_project ON data_assets(project_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_manifests_project ON sample_manifests(project_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_workflow_runs_project ON workflow_runs(project_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_workflow_artifacts_run ON workflow_artifacts(run_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_wes_sra_jobs_project ON wes_sra_jobs(project_id)")
+
+    wes_sra_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(wes_sra_jobs)").fetchall()
+    }
+    if "capture_kit_id" not in wes_sra_columns:
+        db.execute("ALTER TABLE wes_sra_jobs ADD COLUMN capture_kit_id TEXT DEFAULT ''")
+
+    # Existing lab databases may have been created before the lightweight WES
+    # runtime fields were introduced.  Keep this additive and migration-free:
+    # only fixed, trusted column names are used here.
+    workflow_run_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(workflow_runs)").fetchall()
+    }
+    workflow_run_additions = {
+        "executor": "TEXT DEFAULT 'nextflow'",
+        "workflow_release": "TEXT DEFAULT ''",
+        "profile": "TEXT DEFAULT ''",
+        "run_dir": "TEXT DEFAULT ''",
+        "pid": "INTEGER",
+        "process_group_id": "INTEGER",
+        "stdout_path": "TEXT DEFAULT ''",
+        "stderr_path": "TEXT DEFAULT ''",
+        "exit_code": "INTEGER",
+        "cancel_requested_at": "DATETIME",
+        "updated_at": "DATETIME DEFAULT CURRENT_TIMESTAMP",
+    }
+    for column, definition in workflow_run_additions.items():
+        if column not in workflow_run_columns:
+            db.execute(f"ALTER TABLE workflow_runs ADD COLUMN {column} {definition}")
 
     # 图形美化工作台：原始图片、编辑版本与分析任务解耦，确保编辑永不覆盖
     # 原始分析输出。

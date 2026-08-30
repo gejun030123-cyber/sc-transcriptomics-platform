@@ -67,7 +67,7 @@ def export_registered_figure(fig, output_stem, spec: FigureSpec, *, category, la
             'file_path': str(qa_path),
             'file_type': 'json',
             'category': 'info',
-            'label': f'{label} · Nature readiness {report.score}/100',
+            'label': f'{label} · Figure Quality / Nature readiness {report.score}/100',
         })
     if enforce_gate:
         validator.require(report)

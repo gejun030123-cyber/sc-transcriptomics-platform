@@ -35,13 +35,16 @@
                 <h6 class="mb-1">多个 10x ZIP 合并导入</h6>
                 <p class="small text-muted mb-2">
                     至少选择两个 ZIP；每个 ZIP 内需包含一套 filtered_feature_bc_matrix（matrix.mtx、barcodes.tsv、features/genes.tsv）。
-                    导入后会自动写入 <code>obs["batch"]</code>。大型服务器目录数据建议使用下方 manifest 导入。
+                    选择 ZIP 后请为每个样本标记 <strong>样本 ID</strong> 与 <strong>条件</strong>（如 对照组/疾病组，可自定义）；
+                    导入后会自动写入 <code>obs["sample_id"]</code>、<code>obs["condition"]</code> 和 <code>obs["batch"]</code>。
+                    大型服务器目录数据建议使用下方 manifest 导入。
                 </p>
                 <input type="file" id="batch-zip-input" class="form-control form-control-sm mb-2" accept=".zip" multiple>
-                <div class="row g-2 mb-2">
-                    <div class="col-md-6"><input type="text" id="batch-name-1" class="form-control form-control-sm" placeholder="批次 1 名称，如 Control"></div>
-                    <div class="col-md-6"><input type="text" id="batch-name-2" class="form-control form-control-sm" placeholder="批次 2 名称，如 Treatment"></div>
-                </div>
+                <div id="batch-meta-rows" class="mb-2"></div>
+                <datalist id="batch-condition-options">
+                    <option value="对照组"></option>
+                    <option value="疾病组"></option>
+                </datalist>
                 <button type="button" class="btn btn-outline-primary btn-sm w-100" id="btn-import-batches" onclick="startBatchImport10x()">
                     合并所选批次并导入 h5ad
                 </button>
@@ -394,6 +397,43 @@ function startImportSc() {
     });
 }
 
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = String(text == null ? '' : text);
+    return div.innerHTML;
+}
+
+function renderBatchMetaRows() {
+    const input = document.getElementById('batch-zip-input');
+    const container = document.getElementById('batch-meta-rows');
+    if (!input || !container) return;
+    const files = Array.from(input.files || []);
+    container.innerHTML = '';
+    files.forEach((file, index) => {
+        const stem = (file.name.replace(/\.[^.]+$/, '') || 'batch_' + (index + 1))
+            .replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[._-]+|[._-]+$/g, '') || ('batch_' + (index + 1));
+        const row = document.createElement('div');
+        row.className = 'row g-2 mb-1 batch-meta-row';
+        row.innerHTML = [
+            '<div class="col-md-3">',
+            '  <label class="form-label small mb-0">样本 ID（sample_id）</label>',
+            '  <input type="text" class="form-control form-control-sm batch-sample-id" value="' + escapeHtml(stem) + '">',
+            '</div>',
+            '<div class="col-md-4">',
+            '  <label class="form-label small mb-0">批次名称（batch）</label>',
+            '  <input type="text" class="form-control form-control-sm batch-name" value="' + escapeHtml(stem) + '">',
+            '</div>',
+            '<div class="col-md-5">',
+            '  <label class="form-label small mb-0">条件（condition）</label>',
+            '  <input type="text" class="form-control form-control-sm batch-condition" list="batch-condition-options" placeholder="如 对照组、疾病组，可自定义">',
+            '</div>',
+        ].join('');
+        container.appendChild(row);
+    });
+}
+
+document.getElementById('batch-zip-input')?.addEventListener('change', renderBatchMetaRows);
+
 function startBatchImport10x() {
     const input = document.getElementById('batch-zip-input');
     const files = Array.from(input.files || []);
@@ -404,10 +444,21 @@ function startBatchImport10x() {
         msg.textContent = '请至少选择两个 ZIP 文件。';
         return;
     }
+    const rows = Array.from(document.querySelectorAll('#batch-meta-rows .batch-meta-row'));
+    if (rows.length !== files.length) {
+        renderBatchMetaRows();
+        msg.className = 'small mt-2 text-warning';
+        msg.textContent = '请确认每个 ZIP 的样本 ID、批次名称与条件后重试。';
+        return;
+    }
     const formData = new FormData();
-    files.forEach(file => formData.append('batch_zip', file));
-    formData.append('batch_name', document.getElementById('batch-name-1').value || 'batch_1');
-    formData.append('batch_name', document.getElementById('batch-name-2').value || 'batch_2');
+    rows.forEach((row, index) => {
+        formData.append('batch_zip', files[index]);
+        formData.append('batch_name', row.querySelector('.batch-name').value || ('batch_' + (index + 1)));
+        formData.append('sample_id', row.querySelector('.batch-sample-id').value || ('batch_' + (index + 1)));
+        const condition = row.querySelector('.batch-condition').value.trim();
+        if (condition) formData.append('condition', condition);
+    });
     const species = document.getElementById('tenx-species').value;
     const genome = document.getElementById('tenx-genome').value;
     if (species) formData.append('species', species);
@@ -517,7 +568,9 @@ function pollScImportTask(taskId) {
                     if (summary.input_format) details.push(`格式：${summary.input_format}`);
                     if (summary.sparsity !== undefined) details.push(`稀疏度：${summary.sparsity}%`);
                     if (summary.file_size_mb !== undefined) details.push(`文件大小：${summary.file_size_mb} MB`);
-                    if (summary.output_file) details.push(`输出：${summary.output_file}`);
+                    if (summary.output_file) details.push('输出：' + summary.output_file);
+                    if (summary.sample_ids && summary.sample_ids.length) details.push('样本：' + summary.sample_ids.join('、'));
+                    if (summary.conditions && summary.conditions.some(Boolean)) details.push('条件：' + summary.conditions.join('、'));
                     if (details.length) msg += '<br>' + details.join(' | ');
                     document.getElementById('sc-import-result-msg').innerHTML = msg;
                     document.getElementById('btn-import-sc').disabled = false;

@@ -92,13 +92,34 @@ class Convert10x(BaseAnalysis):
         self.progress(10, '正在准备导入单细胞数据...')
 
         if not source_path:
+            # mtx_dir 与单文件导入一样必须限制在项目目录内，防止参数注入
+            # 读取服务器任意目录。
+            project_root = os.path.realpath(self.project_dir)
+            real_mtx_dir = os.path.realpath(mtx_dir)
+            if not (real_mtx_dir == project_root
+                    or real_mtx_dir.startswith(project_root + os.sep)):
+                raise ValueError('mtx_dir 必须位于项目目录内: ' + mtx_dir)
+            if not os.path.isdir(real_mtx_dir):
+                raise FileNotFoundError('10x 矩阵目录不存在: ' + mtx_dir)
             detected_format = '10x_mtx'
             output_path = os.path.join(self.project_dir, 'uploads', 'converted_10x.h5ad')
 
             self.progress(30, '正在解析矩阵文件...')
-            adata = convert_10x_to_h5ad(mtx_dir, output_path, species=species, genome=genome)
+            adata = convert_10x_to_h5ad(real_mtx_dir, output_path, species=species, genome=genome)
+            if 'sample_id' not in adata.obs.columns:
+                sample_id = _safe_batch_name(
+                    os.path.basename(real_mtx_dir.rstrip(os.sep)), 'sample_1')
+                adata.obs['sample_id'] = sample_id
         else:
             source_path = os.path.abspath(source_path)
+            # 单文件导入与批次导入必须一致地限制在项目目录内，防止通过
+            # 参数注入读取服务器任意文件。
+            project_root = os.path.realpath(self.project_dir)
+            real_source = os.path.realpath(source_path)
+            if not (real_source == project_root or real_source.startswith(project_root + os.sep)):
+                raise ValueError('导入文件必须位于项目目录内: ' + source_path)
+            if not os.path.isfile(real_source):
+                raise FileNotFoundError('导入文件不存在: ' + source_path)
             detected_format = infer_sc_data_format(source_path) if input_format == 'auto' else input_format
             stem = os.path.basename(source_path.rstrip(os.sep))
             stem = re.sub(r'\.(h5ad|h5|hdf5|loom|zarr|csv|tsv|txt|xlsx|xls|mtx)(\.gz)?$', '', stem, flags=re.I)
@@ -113,6 +134,8 @@ class Convert10x(BaseAnalysis):
                 species=species,
                 genome=genome,
             )
+            if 'sample_id' not in adata.obs.columns:
+                adata.obs['sample_id'] = _safe_batch_name(stem, 'single_cell')
 
         self.progress(90, '正在计算统计信息...')
         summary = summarize_adata_import(adata, detected_format, output_path)
@@ -146,6 +169,8 @@ class Convert10x(BaseAnalysis):
         os.makedirs(extraction_root, exist_ok=True)
         adatas = []
         batch_names = []
+        sample_ids = []
+        conditions = []
         batch_records = []
         species = self.params.get('species')
         genome = self.params.get('genome')
@@ -158,6 +183,8 @@ class Convert10x(BaseAnalysis):
             if not os.path.realpath(zip_path).startswith(project_root + os.sep):
                 raise ValueError('批次 ZIP 必须位于项目目录内')
             batch_name = _safe_batch_name(item.get('batch_name'), f'batch_{index}')
+            sample_id = _safe_batch_name(item.get('sample_id'), batch_name)
+            condition = str(item.get('condition') or '').strip()
             extract_dir = os.path.join(extraction_root, f'{index}_{batch_name}')
             if os.path.isdir(extract_dir):
                 shutil.rmtree(extract_dir)
@@ -175,17 +202,26 @@ class Convert10x(BaseAnalysis):
             )
             adata.obs_names = [f'{batch_name}_{name}' for name in adata.obs_names]
             adata.obs['batch'] = batch_name
+            adata.obs['sample_id'] = sample_id
+            adata.obs['condition'] = condition
             adatas.append(adata)
             batch_names.append(batch_name)
+            sample_ids.append(sample_id)
+            conditions.append(condition)
             total_counts = adata.obs['total_counts'] if 'total_counts' in adata.obs else None
             batch_records.append({
                 'batch': batch_name,
+                'sample_id': sample_id,
+                'condition': condition,
                 'n_cells': int(adata.n_obs),
                 'n_genes': int(adata.n_vars),
                 'median_total_counts': round(float(total_counts.median()), 3) if total_counts is not None else None,
             })
 
-        self.progress(75, '正在合并两个批次...')
+        if len(set(sample_ids)) != len(sample_ids):
+            raise ValueError('样本 ID（sample_id）必须唯一且不能为空')
+
+        self.progress(75, '正在合并批次...')
         combined = ad.concat(
             adatas,
             axis=0,
@@ -196,8 +232,16 @@ class Convert10x(BaseAnalysis):
             fill_value=0,
         )
         combined.obs['batch'] = combined.obs['batch'].astype(str)
+        combined.obs['sample_id'] = combined.obs['sample_id'].astype(str)
+        combined.obs['condition'] = combined.obs['condition'].astype(str)
         combined.uns['batch_imports'] = batch_names
         combined.uns['input_format'] = '10x_mtx_zip_batches'
+        combined.uns['sc_batch_import'] = {
+            'sample_key': 'sample_id',
+            'condition_key': 'condition',
+            'source': 'upload_marked',
+            'input_format': '10x_mtx_zip_batches',
+        }
         output_path = os.path.join(uploads_dir, 'combined_batches_imported.h5ad')
         combined.write_h5ad(output_path)
         import pandas as pd
@@ -246,7 +290,11 @@ class Convert10x(BaseAnalysis):
         summary.update({
             'n_batches': len(batch_names),
             'batch_names': batch_names,
+            'sample_ids': sample_ids,
+            'conditions': conditions,
             'batch_column': 'batch',
+            'sample_column': 'sample_id',
+            'condition_column': 'condition',
         })
         self.progress(100, f'批次导入完成，共 {summary["n_cells"]} 个细胞、{summary["n_genes"]} 个基因')
         return {

@@ -3,7 +3,7 @@ import json
 import numpy as np
 import pandas as pd
 from modules.base import BaseAnalysis
-from modules.io_utils import obs_grouping_info
+from modules.io_utils import obs_grouping_info, restore_scanpy_qc_percentages
 
 
 class QCReassessAnalysis(BaseAnalysis):
@@ -11,6 +11,15 @@ class QCReassessAnalysis(BaseAnalysis):
     DISPLAY_NAME = "QC 重新评估"
     DESCRIPTION = "聚类后检查 doublet 和 QC 指标，标记低质量簇"
     INPUT_REQUIRES = ['leiden']
+
+    @staticmethod
+    def _as_bool(value, default=False):
+        """把表单/API 传来的布尔值统一解析，避免字符串 'false' 被当真。"""
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value.strip().lower() not in {'', '0', 'false', 'no', 'off', 'none'}
+        return bool(value)
 
     def run(self, input_path):
         import scanpy as sc
@@ -20,13 +29,16 @@ class QCReassessAnalysis(BaseAnalysis):
 
         self.progress(5, "加载数据...")
         adata = self.load_adata(input_path)
+        # 兼容旧版 QC 输出：旧文件的 pct_counts_* 可能被写成
+        # 0-1 fraction，而本模块的阈值和图均使用 0-100 percentage。
+        restore_scanpy_qc_percentages(adata)
 
         cluster_key = self.params.get('cluster_key', 'leiden')
         doublet_threshold = float(self.params.get('doublet_threshold', 0.3))
         mt_threshold = float(self.params.get('mt_threshold', 15.0))
         ribo_threshold = float(self.params.get('ribosomal_threshold', 0))
         min_cells = int(self.params.get('min_cells_per_cluster', 10))
-        auto_remove = self.params.get('auto_remove', False)
+        auto_remove = self._as_bool(self.params.get('auto_remove', False), False)
 
         # A QC metric (for example ``log1p_n_genes_by_counts``) is numeric and
         # can have nearly one value per cell.  Treating it as a cluster column
@@ -70,6 +82,11 @@ class QCReassessAnalysis(BaseAnalysis):
             doublet_frac = 0.0
             if 'predicted_doublet' in adata.obs.columns:
                 doublet_frac = adata.obs.loc[mask, 'predicted_doublet'].mean()
+                # QC 默认已剔除全部预测 doublet：predicted_doublet 全为
+                # False 时该指标恒为 0，改用连续 doublet_score 的簇均值，
+                # 否则“高双细胞簇”检查在标准流水线下永远不触发。
+                if doublet_frac == 0.0 and 'doublet_score' in adata.obs.columns:
+                    doublet_frac = adata.obs.loc[mask, 'doublet_score'].mean()
             elif 'doublet_score' in adata.obs.columns:
                 doublet_frac = (adata.obs.loc[mask, 'doublet_score'] > 0.5).mean()
             mt_mean = adata.obs.loc[mask, 'pct_counts_mt'].mean() if 'pct_counts_mt' in adata.obs.columns else 0
@@ -133,6 +150,10 @@ class QCReassessAnalysis(BaseAnalysis):
         if auto_remove and n_low > 0:
             low_clusters = set(stats_df[stats_df['low_quality']]['cluster'].tolist())
             keep_mask = ~adata.obs[cluster_key].astype(str).isin(low_clusters)
+            if int(keep_mask.sum()) == 0:
+                raise ValueError(
+                    'auto_remove 会移除全部细胞；请放宽 QC 阈值或关闭 auto_remove。'
+                )
             n_before = adata.n_obs
             adata = adata[keep_mask].copy()
             self.progress(45, f"Removed {n_before - adata.n_obs} cells from {len(low_clusters)} low-quality clusters")

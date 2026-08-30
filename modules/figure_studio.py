@@ -183,18 +183,23 @@ def _heatmap_context(task, data_path):
 def _source_mode_for_result(result_file):
     filename = os.path.basename(result_file.file_path).lower()
     task = AnalysisTask.get_by_id(result_file.task_id)
-    if filename.startswith('bulk_deg_volcano') and task and task.module_name == 'bulk_deg':
-        suffix = filename[len('bulk_deg_volcano'):].rsplit('.', 1)[0]
+    if (
+        (filename.startswith('bulk_deg_volcano') or filename.startswith('bulk_deg_ma'))
+        and task and task.module_name == 'bulk_deg'
+    ):
+        plot_kind = 'ma' if filename.startswith('bulk_deg_ma') else 'volcano'
+        stem = f'bulk_deg_{plot_kind}'
+        suffix = filename[len(stem):].rsplit('.', 1)[0]
         companion = os.path.join(Config.results_dir(result_file.project_id), f'bulk_deg_results{suffix}.csv')
         if _validate_project_path(companion, result_file.project_id):
-            return 'bulk_volcano', companion
+            return f'bulk_{plot_kind}', companion, {}
     if filename == 'bulk_heatmap.png' and task and task.module_name == 'bulk_heatmap':
         if _validate_project_path(task.output_adata_path, result_file.project_id):
-            return 'bulk_heatmap', task.output_adata_path
+            return 'bulk_heatmap', task.output_adata_path, {}
     if filename == 'bulk_corr_heatmap.png' and task and task.module_name == 'bulk_heatmap':
         companion = os.path.join(Config.results_dir(result_file.project_id), 'bulk_correlation_pairs.csv')
         if _validate_project_path(companion, result_file.project_id):
-            return 'bulk_correlation', companion
+            return 'bulk_correlation', companion, {}
     if filename.startswith('enrichment_') and filename.endswith('.png') and task and task.module_name == 'bulk_enrichment':
         output_key = filename.rsplit('.', 1)[0]
         if output_key.startswith('enrichment_overview_'):
@@ -203,7 +208,7 @@ def _source_mode_for_result(result_file):
                 'enrichment_integrated_results.csv',
             )
             if _validate_project_path(integrated, result_file.project_id):
-                return 'bulk_enrichment_overview', integrated
+                return 'bulk_enrichment_overview', integrated, {}
         companion = os.path.join(Config.results_dir(result_file.project_id), f'{output_key}_results.csv')
         if not _validate_project_path(companion, result_file.project_id):
             # Extended Nature views use a suffixed image stem (…_chord,
@@ -226,8 +231,250 @@ def _source_mode_for_result(result_file):
                         companion = candidate
                     break
         if _validate_project_path(companion, result_file.project_id):
-            return 'bulk_enrichment', companion
-    return 'style_only', ''
+            return 'bulk_enrichment', companion, {}
+    # Single-cell DEG figures (cell-level or pseudobulk) are data redraws
+    # with manual gene labelling.
+    if task and task.module_name in {'sc_cell_deg', 'sc_pseudobulk_deg'}:
+        for plot_kind in ('volcano', 'ma'):
+            sc_deg = _sc_deg_figure_context(result_file, task, plot_kind)
+            if sc_deg:
+                data_path, context = sc_deg
+                return f'sc_{plot_kind}', data_path, context
+    # Single-cell GO enrichment figures use the same pathway-selection controls
+    # as Bulk RNA-seq; keep the running curve non-redrawable because its score
+    # depends on the full ranking object that a CSV cannot rebuild.
+    if task and task.module_name == 'sc_cell_go':
+        sc_enrichment = _sc_enrichment_context(result_file, task)
+        if sc_enrichment:
+            data_path, context = sc_enrichment
+            return 'sc_enrichment', data_path, context
+    return 'style_only', '', {}
+
+
+def _sc_safe_name(value, fallback='value'):
+    """Recreate the SC module name-safe fragment used in figure stems."""
+    text = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(value or '').strip()).strip('._-')
+    return text or fallback
+
+
+def _task_params(task_id):
+    """Return the analysis-task parameters as a plain dict."""
+    task = AnalysisTask.get_by_id(task_id)
+    if not task:
+        return {}
+    try:
+        params = json.loads(task.params_json or '{}')
+    except (TypeError, ValueError, json.JSONDecodeError):
+        params = {}
+    return params if isinstance(params, dict) else {}
+
+
+def _sc_package_csv_paths(project_id, folder_key):
+    """Return project-local SC CSV package paths for one numeric subfolder.
+
+    folder_key is 'deg' or 'go'.  Both registered user-visible tables and the
+    protected '.internal' copies are considered so a figure can be redrawn even
+    when 'export_full_tables' was left off.
+    """
+    folder_names = {
+        'deg': '03_differential_expression',
+        'go': '04_go_enrichment',
+    }
+    dirname = folder_names.get(folder_key)
+    if not dirname:
+        return []
+    results_root = os.path.join(Config.project_dir(project_id), 'results')
+    if not os.path.isdir(results_root):
+        return []
+    paths = []
+    seen = set()
+    for package in sorted(os.listdir(results_root)):
+        package_dir = os.path.join(results_root, package)
+        target_dir = os.path.join(package_dir, dirname)
+        if not os.path.isdir(target_dir):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(target_dir):
+            for name in filenames:
+                if not name.lower().endswith('.csv'):
+                    continue
+                candidate = os.path.join(dirpath, name)
+                if candidate in seen or not _validate_project_path(candidate, project_id):
+                    continue
+                seen.add(candidate)
+                paths.append(candidate)
+    return paths
+
+
+def _sc_task_csv_paths(result_file, folder_key):
+    """Find task-artifact tables first, then legacy SC result packages."""
+    candidates = []
+    seen = set()
+    artifact_dir = os.path.dirname(result_file.file_path)
+    if os.path.isdir(artifact_dir):
+        for name in sorted(os.listdir(artifact_dir)):
+            if not name.lower().endswith('.csv'):
+                continue
+            candidate = os.path.join(artifact_dir, name)
+            if candidate in seen or not _validate_project_path(candidate, result_file.project_id):
+                continue
+            seen.add(candidate)
+            candidates.append(candidate)
+    for candidate in _sc_package_csv_paths(result_file.project_id, folder_key):
+        if candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+    return candidates
+
+
+def _read_csv_identity(path):
+    """Read only the small provenance columns needed to bind an SC figure."""
+    try:
+        frame = pd.read_csv(path)
+    except (OSError, pd.errors.EmptyDataError, pd.errors.ParserError, ValueError):
+        return None
+
+    def uniq(column):
+        if column not in frame.columns:
+            return []
+        seen = []
+        for value in frame[column].dropna().tolist():
+            text = str(value).strip()
+            if text and text not in seen:
+                seen.append(text)
+        return seen
+
+    return {
+        'path': path,
+        'columns': set(frame.columns),
+        'comparison_ids': uniq('comparison_id'),
+        'deg_scopes': uniq('deg_scope'),
+        'clusters': uniq('cluster'),
+        'directions': uniq('direction'),
+        'gene_sets': uniq('gene_set'),
+        'methods': uniq('method'),
+    }
+
+
+def _sc_deg_figure_context(result_file, task, plot_kind):
+    """Bind one SC DEG Volcano/MA figure to its exact comparison table."""
+    filename = os.path.basename(result_file.file_path)
+    cell_marker = f'sc_cell_deg_{plot_kind}_'
+    pseudobulk_marker = f'sc_pseudobulk_{plot_kind}_'
+    if cell_marker in filename:
+        token = cell_marker
+        default_prefix = 'sc_cell_level'
+        module_name = 'sc_cell_deg'
+    elif pseudobulk_marker in filename:
+        token = pseudobulk_marker
+        default_prefix = 'sc_pseudobulk'
+        module_name = 'sc_pseudobulk_deg'
+    else:
+        return None
+    token_index = filename.find(token)
+    stem = filename.rsplit('.', 1)[0][token_index + len(token):]
+    params = _task_params(task.id)
+    prefix = _sc_safe_name(params.get('export_prefix', default_prefix), default_prefix)
+    for candidate in _sc_task_csv_paths(result_file, 'deg'):
+        identity = _read_csv_identity(candidate)
+        if not identity:
+            continue
+        if 'gene' not in identity['columns']:
+            continue
+        if not any(column in identity['columns'] for column in ('log2FC', 'avg_log2FC', 'logFC')):
+            continue
+        if not any(column in identity['columns'] for column in ('padj', 'p.adjust', 'p_val_adj')):
+            continue
+        if module_name == 'sc_cell_deg':
+            for comparison_id in identity['comparison_ids']:
+                for deg_scope in identity['deg_scopes']:
+                    for cluster in identity['clusters']:
+                        expected = (
+                            f"{prefix}_{_sc_safe_name(comparison_id)}_"
+                            f"{_sc_safe_name(deg_scope)}_{_sc_safe_name(cluster)}"
+                        )
+                        if expected == stem:
+                            return candidate, {
+                                'module': module_name,
+                                'comparison_id': comparison_id,
+                                'deg_scope': deg_scope,
+                                'cluster': cluster,
+                                'evidence_role': 'discovery',
+                            }
+        else:
+            for comparison_id in identity['comparison_ids']:
+                for cluster in identity['clusters']:
+                    expected = (
+                        f"{prefix}_{_sc_safe_name(comparison_id)}_"
+                        f"{_sc_safe_name(cluster)}"
+                    )
+                    if expected == stem:
+                        return candidate, {
+                            'module': module_name,
+                            'comparison_id': comparison_id,
+                            'deg_scope': '',
+                            'cluster': cluster,
+                            'evidence_role': 'comparison',
+                        }
+    return None
+
+
+_ENRICHMENT_SUFFIX_BY_PLOT_TYPE = {
+    'enrichment_dotplot': 'dotplot',
+    'enrichment_barplot': 'barplot',
+    'enrichment_chord': 'chord',
+    'enrichment_cnetplot': 'cnetplot',
+    'enrichment_emapplot': 'emapplot',
+    'gsea': 'gsea',
+}
+
+
+def _sc_enrichment_context(result_file, task):
+    """Bind an SC GO enrichment figure to its pathway table and cluster/direction."""
+    filename = os.path.basename(result_file.file_path)
+    marker = 'sc_cell_go_'
+    marker_index = filename.find(marker)
+    if marker_index < 0:
+        return None
+    plot_type = _enrichment_plot_type_from_filename(result_file.file_path, '')
+    if plot_type not in _ENRICHMENT_SUFFIX_BY_PLOT_TYPE:
+        return None
+    suffix = _ENRICHMENT_SUFFIX_BY_PLOT_TYPE[plot_type]
+    stem = filename.rsplit('.', 1)[0]
+    # Task-artifact registration prefixes files with a stable sequence number
+    # (for example ``004_sc_cell_go_…``); historical package files start
+    # directly with the marker.  Both name forms identify the same analysis
+    # contract.
+    base = stem[marker_index + len(marker):]
+    for candidate in _sc_task_csv_paths(result_file, 'go'):
+        identity = _read_csv_identity(candidate)
+        if not identity:
+            continue
+        if not {'Term', 'Adjusted P-value', 'Overlap'}.issubset(identity['columns']):
+            continue
+        for gene_set in identity['gene_sets']:
+            for deg_scope in identity['deg_scopes']:
+                for comparison_id in identity['comparison_ids']:
+                    prefix = (
+                        f"{_sc_safe_name(gene_set)}_"
+                        f"{_sc_safe_name(deg_scope)}_{_sc_safe_name(comparison_id)}_"
+                    )
+                    if not base.startswith(prefix):
+                        continue
+                    remainder = base[len(prefix):]
+                    if remainder.endswith('_' + suffix):
+                        remainder = remainder[:-(len(suffix) + 1)]
+                    for direction in ('Up', 'Down', 'All'):
+                        if remainder.endswith('_' + direction):
+                            cluster = remainder[:-(len(direction) + 1)]
+                            if cluster in identity['clusters'] and direction in identity['directions']:
+                                return candidate, {
+                                    'module': 'sc_cell_go',
+                                    'cluster': cluster,
+                                    'direction': direction,
+                                    'method': identity['methods'][0] if identity['methods'] else '',
+                                    'plot_type': plot_type,
+                                }
+    return None
 
 
 def _enrichment_plot_type_from_filename(file_path, data_path=''):
@@ -280,14 +527,20 @@ def resolve_source(project_id, source_kind, source_id):
             raise FigureStudioError('未找到可编辑的平台图。')
         if not _validate_project_path(source.file_path, project_id):
             raise FigureStudioError('原图路径无效。')
-        edit_mode, data_path = _source_mode_for_result(source)
+        edit_mode, data_path, sc_context = _source_mode_for_result(source)
         payload = {
             'kind': source_kind, 'id': source.id, 'label': source.label,
             'file_type': source.file_type, 'file_path': source.file_path,
             'edit_mode': edit_mode, 'data_path': data_path,
         }
-        if edit_mode in {'bulk_enrichment', 'bulk_enrichment_overview'}:
-            payload['plot_type'] = _enrichment_plot_type_from_filename(source.file_path, data_path)
+        if edit_mode in {'bulk_enrichment', 'bulk_enrichment_overview', 'sc_enrichment'}:
+            payload['plot_type'] = (
+                sc_context.get('plot_type', '')
+                if edit_mode == 'sc_enrichment' and sc_context
+                else _enrichment_plot_type_from_filename(source.file_path, data_path)
+            )
+        if edit_mode in {'sc_volcano', 'sc_ma', 'sc_enrichment'} and sc_context:
+            payload['sc_context'] = sc_context
         if edit_mode == 'bulk_heatmap':
             payload.update(_heatmap_context(AnalysisTask.get_by_id(source.task_id), data_path))
         return payload
@@ -345,14 +598,20 @@ def list_sources(project_id):
         if key in seen:
             continue
         seen.add(key)
-        mode, data_path = _source_mode_for_result(item)
+        mode, data_path, sc_context = _source_mode_for_result(item)
         source_payload = {
             'kind': 'result_file', 'id': item.id, 'label': item.label or '平台分析图',
             'file_type': item.file_type, 'edit_mode': mode,
             'preview_url': f'/projects/{project_id}/results/file/{item.id}',
         }
-        if mode in {'bulk_enrichment', 'bulk_enrichment_overview'}:
-            source_payload['plot_type'] = _enrichment_plot_type_from_filename(item.file_path, data_path)
+        if mode in {'bulk_enrichment', 'bulk_enrichment_overview', 'sc_enrichment'}:
+            source_payload['plot_type'] = (
+                sc_context.get('plot_type', '')
+                if mode == 'sc_enrichment' and sc_context
+                else _enrichment_plot_type_from_filename(item.file_path, data_path)
+            )
+        if mode in {'sc_volcano', 'sc_ma', 'sc_enrichment'} and sc_context:
+            source_payload['sc_context'] = sc_context
         if mode == 'bulk_heatmap':
             task = AnalysisTask.get_by_id(item.task_id)
             if task:
@@ -492,6 +751,127 @@ def _render_bulk_volcano(data_path, style, label):
     return fig, 'data_redraw'
 
 
+def _load_sc_deg_frame(data_path, context):
+    """Load one exact SC DEG comparison/cluster unit for semantic redraws."""
+    deg_df = pd.read_csv(data_path)
+    gene_col = 'gene' if 'gene' in deg_df.columns else 'names'
+    if gene_col not in deg_df.columns:
+        raise FigureStudioError('差异表达图对应的 SC DEG 结果缺少基因列。')
+    fc_col = next(
+        (column for column in ('log2FC', 'avg_log2FC', 'logFC') if column in deg_df.columns),
+        None,
+    )
+    fdr_col = next(
+        (column for column in ('padj', 'p.adjust', 'p_val_adj') if column in deg_df.columns),
+        None,
+    )
+    if fc_col is None or fdr_col is None:
+        raise FigureStudioError('差异表达图对应的 SC DEG 结果缺少 log2FC 或 padj 列。')
+    deg_df = deg_df.copy()
+    deg_df['gene'] = deg_df[gene_col].astype(str)
+    deg_df['log2FC'] = pd.to_numeric(deg_df[fc_col], errors='coerce')
+    deg_df['padj'] = pd.to_numeric(deg_df[fdr_col], errors='coerce').fillna(1.0)
+    for key, value in context.items() or {}:
+        if key in {'module', 'evidence_role', 'plot_type'}:
+            continue
+        if value and key in deg_df.columns:
+            deg_df = deg_df[deg_df[key].astype(str) == str(value)]
+    if deg_df.empty:
+        raise FigureStudioError('未找到该差异表达图对应的比较单元数据。')
+    return deg_df
+
+
+def _render_sc_volcano(data_path, style, label, context):
+    """Redraw an SC cell/pseudobulk volcano with manual gene labels."""
+    import math
+
+    from figure_engine import NatureFigureDirector
+
+    deg_df = _load_sc_deg_frame(data_path, context)
+    custom_genes = tuple(
+        item.strip() for item in re.split(r'[,\n;]+', style['label_genes']) if item.strip()
+    )
+    director = NatureFigureDirector()
+    logfc_cutoff = math.log2(style['fc_threshold'])
+    spec = director.spec_from_params(
+        'volcano', {},
+        width='single',
+        title=style['title'] or label,
+        evidence_role=context.get('evidence_role', 'discovery'),
+        fc_threshold=logfc_cutoff,
+        fdr_threshold=style['pvalue_threshold'],
+        label_n=0 if custom_genes else 8,
+        label_strategy='none' if custom_genes else 'top_significant',
+        label_genes=custom_genes,
+        show_legend=True,
+    )
+    fig = director.render(spec, deg_df)
+    _apply_common_style(fig, fig.axes[0], style)
+    return fig, 'data_redraw'
+
+
+def _ma_expression_column(frame):
+    """Return the observed mean-expression field required by an MA plot."""
+    for column in ('mean_expression', 'base_mean_count', 'baseMean'):
+        if column in frame.columns:
+            return pd.to_numeric(frame[column], errors='coerce')
+    if {'mean_group1', 'mean_group2'}.issubset(frame.columns):
+        return (
+            pd.to_numeric(frame['mean_group1'], errors='coerce')
+            + pd.to_numeric(frame['mean_group2'], errors='coerce')
+        ) / 2.0
+    return None
+
+
+def _render_ma_frame(deg_df, style, label, *, evidence_role='comparison'):
+    """Redraw a data-backed MA plot while retaining manual gene labels."""
+    import math
+
+    from figure_engine import NatureFigureDirector
+
+    expression = _ma_expression_column(deg_df)
+    if expression is None:
+        raise FigureStudioError(
+            'MA 图对应的 DEG 结果缺少 mean_expression、baseMean 或组均值列。'
+        )
+    frame = deg_df.copy()
+    frame['mean_expression'] = expression
+    custom_genes = tuple(
+        item.strip() for item in re.split(r'[,\n;]+', style['label_genes']) if item.strip()
+    )
+    director = NatureFigureDirector()
+    spec = director.spec_from_params(
+        'ma', {}, width='single', title=style['title'] or label,
+        evidence_role=evidence_role,
+        fc_threshold=math.log2(style['fc_threshold']),
+        fdr_threshold=style['pvalue_threshold'],
+        label_n=0 if custom_genes else 6,
+        label_strategy='none' if custom_genes else 'top_significant',
+        label_genes=custom_genes, show_legend=True,
+    )
+    figure = director.render(spec, frame)
+    _apply_common_style(figure, figure.axes[0], style)
+    return figure, 'data_redraw'
+
+
+def _render_bulk_ma(data_path, style, label):
+    deg_df = pd.read_csv(data_path)
+    required = {'gene', 'log2FC', 'padj'}
+    if not required.issubset(deg_df.columns):
+        raise FigureStudioError('MA 图对应的 DEG 结果缺少 gene、log2FC 或 padj 列。')
+    deg_df = deg_df.copy()
+    deg_df['log2FC'] = pd.to_numeric(deg_df['log2FC'], errors='coerce')
+    deg_df['padj'] = pd.to_numeric(deg_df['padj'], errors='coerce').fillna(1.0)
+    return _render_ma_frame(deg_df, style, label, evidence_role='comparison')
+
+
+def _render_sc_ma(data_path, style, label, context):
+    return _render_ma_frame(
+        _load_sc_deg_frame(data_path, context), style, label,
+        evidence_role=context.get('evidence_role', 'discovery'),
+    )
+
+
 def _dense_matrix(values):
     return values.toarray() if hasattr(values, 'toarray') else np.asarray(values)
 
@@ -626,10 +1006,9 @@ def _render_bulk_correlation(data_path, style, label):
     return fig, 'data_redraw'
 
 
-def _render_bulk_enrichment(data_path, style, label, plot_type='enrichment_dotplot'):
+def _render_enrichment_frame(result_df, style, label, plot_type='enrichment_dotplot'):
     from modules.bulk_enrichment import _enrichment_figure
 
-    result_df = pd.read_csv(data_path)
     if result_df.empty:
         raise FigureStudioError('富集结果表为空，无法重新绘制。')
     database = str(result_df.get('Database', pd.Series(['GO_BP'])).iloc[0])
@@ -690,6 +1069,28 @@ def _render_bulk_enrichment(data_path, style, label, plot_type='enrichment_dotpl
     axes_style = {**style, 'title': ''}
     _apply_common_style(fig, fig.axes[0], axes_style)
     return fig, 'data_redraw'
+
+
+def _render_bulk_enrichment(data_path, style, label, plot_type='enrichment_dotplot'):
+    result_df = pd.read_csv(data_path)
+    return _render_enrichment_frame(result_df, style, label, plot_type)
+
+
+def _render_sc_enrichment(data_path, style, label, context, plot_type='enrichment_dotplot'):
+    if plot_type == 'gsea_running':
+        raise FigureStudioError(
+            'GSEA 富集运行曲线无法从汇总通报表重建；请打开同一对比的 GSEA dotplot 图进行重绘。'
+        )
+    result_df = pd.read_csv(data_path)
+    if result_df.empty:
+        raise FigureStudioError('富集结果表为空，无法重新绘制。')
+    for key in ('cluster', 'direction', 'method'):
+        value = context.get(key)
+        if value and key in result_df.columns:
+            result_df = result_df[result_df[key].astype(str) == str(value)]
+    if result_df.empty:
+        raise FigureStudioError('未找到该富集图对应的 cluster 或方向数据。')
+    return _render_enrichment_frame(result_df, style, label, plot_type)
 
 
 def _font_for_pillow(size):
@@ -763,6 +1164,18 @@ def render_source(source, style, png_path=None, svg_path=None):
     style = normalize_style(style)
     if source['edit_mode'] == 'bulk_volcano':
         fig, mode = _render_bulk_volcano(source['data_path'], style, source['label'])
+    elif source['edit_mode'] == 'sc_volcano':
+        fig, mode = _render_sc_volcano(
+            source['data_path'], style, source['label'],
+            context=source.get('sc_context') or {},
+        )
+    elif source['edit_mode'] == 'bulk_ma':
+        fig, mode = _render_bulk_ma(source['data_path'], style, source['label'])
+    elif source['edit_mode'] == 'sc_ma':
+        fig, mode = _render_sc_ma(
+            source['data_path'], style, source['label'],
+            context=source.get('sc_context') or {},
+        )
     elif source['edit_mode'] == 'bulk_heatmap':
         fig, mode = _render_bulk_heatmap(
             source['data_path'], style, source['label'],
@@ -774,6 +1187,12 @@ def render_source(source, style, png_path=None, svg_path=None):
     elif source['edit_mode'] in {'bulk_enrichment', 'bulk_enrichment_overview'}:
         fig, mode = _render_bulk_enrichment(
             source['data_path'], style, source['label'],
+            plot_type=source.get('plot_type', 'enrichment_dotplot'),
+        )
+    elif source['edit_mode'] == 'sc_enrichment':
+        fig, mode = _render_sc_enrichment(
+            source['data_path'], style, source['label'],
+            context=source.get('sc_context') or {},
             plot_type=source.get('plot_type', 'enrichment_dotplot'),
         )
     else:
@@ -838,8 +1257,8 @@ def save_figure_version(project_id, source, style, label=''):
         # Persist the concrete capability (rather than the generic render
         # outcome) so a saved volcano/heatmap version remains editable later.
         edit_mode=(source.get('edit_mode') if source.get('edit_mode') in {
-            'bulk_volcano', 'bulk_heatmap', 'bulk_correlation',
-            'bulk_enrichment', 'bulk_enrichment_overview'
+            'bulk_volcano', 'sc_volcano', 'bulk_ma', 'sc_ma', 'bulk_heatmap', 'bulk_correlation',
+            'bulk_enrichment', 'bulk_enrichment_overview', 'sc_enrichment'
         } else mode),
         label=_clean_text(label) or _clean_text(normalized.get('title')) or source['label'],
         style_json=json.dumps(normalized, ensure_ascii=False),

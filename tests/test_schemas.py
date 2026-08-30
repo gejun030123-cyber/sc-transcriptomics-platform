@@ -15,8 +15,9 @@ class TestModuleMetadata:
     """测试模块元数据定义。"""
 
     def test_sc_module_count(self):
-        """单细胞模块有 18 个。"""
+        """主单细胞流程不再展示兼容用的批量 CSV 导出。"""
         assert len(SC_MODULE_LIST) == 18
+        assert all(item['name'] != 'sc_csv_export' for item in SC_MODULE_LIST)
 
     def test_bulk_module_count(self):
         """Bulk 模块有 8 个。"""
@@ -244,7 +245,7 @@ class TestParseFormParams:
             'annotation_comment': '人工确认肾单位边界',
             'state_score_threshold': 0.4,
             'negative_marker_weight': 0.7,
-            'doublet_score_threshold': 0.25,
+            'lineage_mixture_threshold': 0.25,
             'ambient_score_threshold': 0.4,
         })
         assert values['maturity_time_key'] == 'culture_day'
@@ -252,8 +253,15 @@ class TestParseFormParams:
         assert values['annotation_comment'] == '人工确认肾单位边界'
         assert values['state_score_threshold'] == 0.4
         assert values['negative_marker_weight'] == 0.7
-        assert values['doublet_score_threshold'] == 0.25
+        assert values['lineage_mixture_threshold'] == 0.25
         assert values['ambient_score_threshold'] == 0.4
+
+        colorectal = filter_active_params(schema, {
+            'method': 'multi_evidence',
+            'marker_set': 'Colorectal',
+            'maturity_time_key': 'culture_day',
+        })
+        assert colorectal['maturity_time_key'] == 'culture_day'
 
     def test_celltypist_reference_controls_are_active(self):
         """CellTypist is an explicit local reference option, not a default method."""

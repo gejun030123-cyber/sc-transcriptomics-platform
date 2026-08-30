@@ -44,3 +44,23 @@ def test_build_input_options_uses_upload_for_first_step(tmp_path):
     assert recommended['source'] == 'upload'
     assert recommended['path'] == str(source.resolve())
     assert options[0]['recommended'] is True
+
+
+def test_build_input_options_prefers_batch_corrected_output_for_clustering(tmp_path):
+    """聚类默认请求校正表示时，应优先选择 batch_correct 输出。"""
+    from routes.analysis import build_input_options
+
+    dimred_path = tmp_path / 'dimred_output.h5ad'
+    corrected_path = tmp_path / 'batch_correct_output.h5ad'
+    dimred_path.write_bytes(b'dimred')
+    corrected_path.write_bytes(b'corrected')
+    tasks = [
+        _task('dimred', dimred_path, 'task-dimred', '2026-07-14T12:00:00'),
+        _task('batch_correct', corrected_path, 'task-batch', '2026-07-14T11:00:00'),
+    ]
+
+    options, recommended = build_input_options('clustering', tasks, [])
+
+    assert recommended['module_name'] == 'batch_correct'
+    assert recommended['path'] == str(corrected_path.resolve())
+    assert options[0]['recommended'] is True

@@ -54,6 +54,8 @@ class NatureStyle:
     categorical_palette = (
         '#4C78A8', '#D08A5B', '#6F9D72', '#8A73A8', '#4C9099',
         '#B65C5C', '#8B8278', '#7C8FB3', '#B88AA7', '#8096A0',
+        '#A98262', '#5F8B62', '#A66B7D', '#6A8298', '#B59A5B',
+        '#6F7886', '#9A7D68', '#78908B', '#8C6F89', '#A86F62',
     )
     marker_cycle = ('o', 's', '^', 'D', 'P', 'X', 'v', '<', '>')
     heatmap_colors = ('#355F8A', '#90AEC5', '#E7EEF2', '#FFFFFF',
@@ -62,6 +64,7 @@ class NatureStyle:
 
     _single_heights: Dict[str, float] = {
         'pca': 78.0,
+        'embedding': 78.0,
         'volcano': 79.0,
         'heatmap': 116.0,
         'gsea': 102.0,
@@ -84,6 +87,7 @@ class NatureStyle:
     }
     _double_heights: Dict[str, float] = {
         'pca': 108.0,
+        'embedding': 108.0,
         'volcano': 112.0,
         'heatmap': 128.0,
         'gsea': 116.0,
@@ -223,3 +227,14 @@ class NatureStyle:
         from matplotlib.colors import LinearSegmentedColormap
 
         return LinearSegmentedColormap.from_list('nature_fdr', self.fdr_colors)
+
+    def expression_cmap(self):
+        """Sequential map for expression, QC and pseudotime embeddings."""
+        from matplotlib.colors import LinearSegmentedColormap
+
+        cmap = LinearSegmentedColormap.from_list(
+            'nature_expression',
+            ('#E7EFF2', '#9BC4C9', self.signal_teal, self.signal_blue, self.signal_red),
+        )
+        cmap.set_bad('#D8DCE2')
+        return cmap

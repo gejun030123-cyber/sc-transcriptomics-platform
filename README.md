@@ -1,19 +1,20 @@
 # 单细胞与 Bulk RNA-seq AI 分析平台
 
-这是一个基于 Flask、Scanpy、Matplotlib 和 OmicVerse 风格规范的 Web 端转录组分析平台。平台同时覆盖单细胞转录组和 Bulk RNA-seq，支持传统按模块执行的分析流程，也支持用户通过 AI 对话触发分析、检查结果、调整参数，并围绕特定目标创建候选分支进行参数搜索。
+这是一个基于 Flask、Scanpy、Matplotlib 和 OmicVerse 风格规范的 Web 端转录组与基因组分析平台。平台同时覆盖单细胞转录组、Bulk RNA-seq 和 WES 外显子组，支持传统按模块执行的分析流程，也支持用户通过 AI 对话触发分析、检查结果、调整参数，并围绕特定目标创建候选分支进行参数搜索。
 
 项目当前定位不是单纯的流程封装，而是一个可交互的分析工作台：
 
 - 用户可以上传数据，在网页中按模块执行 scRNA-seq 或 Bulk RNA-seq 分析。
 - AI 助手可以读取项目状态、理解已完成步骤、调用分析工具并提出参数调整方案。
 - 对“分群不满意”“必须找到最接近某种细胞类型的分群”等需求，平台提供 marker 评分、候选分支、参数 sweep 和人工采纳机制。
-- 所有分析结果会落到项目目录下，包含 h5ad 中间文件、CSV 表格和科研级静态图。
+- 所有分析结果会落到项目目录下，包含 h5ad 中间文件、科研级静态图与必要的统计审计；单细胞 DEG 与富集的完整表只作为受控内部输入，不在界面导出。
 
 ## 核心能力
 
 ### Web 分析工作台
 
 - 项目管理：创建项目、上传数据、查看项目状态和历史任务；主线任务完成后项目状态会自动同步为 `completed`，存在运行中任务时为 `processing`，全部失败时为 `failed`。
+- AI 主工作台：项目内 `/projects/<pid>/workspace` 页面聚合单细胞、Bulk RNA、WES 分析入口、最近任务和数据文件，并预留 Bulk ATAC-seq 工作流。
 - 异步任务：分析任务通过后台 worker 执行，前端可查看进度、日志和失败信息。
 - 参数面板：每个模块有结构化参数 schema，包含中文标签、默认值、类型和帮助说明。
 - 结果管理：任务结果写入数据库，支持图表查看、CSV/XLSX 表格下载和 h5ad 中间文件下载；模块写出的每个结果文件都会登记到任务结果清单。
@@ -30,12 +31,12 @@
 ```text
 qc -> normalize -> hvg -> dimred -> batch_correct -> clustering
   -> qc_reassess / annotation / subcluster / sc_timecourse / deg
-  -> trajectory / proportion / cell_communication
+  -> trajectory / proportion / cell_communication / virtual_ko
 ```
 
 | 模块 | 主要功能 | 典型输出 |
 | --- | --- | --- |
-| `qc` | 线粒体、核糖体、血红蛋白比例标记；Scrublet 双细胞检测；细胞周期评分；复杂度指标；批次自适应 QC | QC violin、counts vs genes scatter、novelty plot、cell-cycle plot、过滤前后 QC 对比、doublet score 直方图 |
+| `qc` | 线粒体、核糖体、血红蛋白比例标记；双细胞检测（默认 scDblFinder，要求 `pyscdblfinder>=0.2.0`，缺失时停止而不回退；Scrublet 以显式参数独立运行并保留 simulated score 证据）；细胞周期评分；复杂度指标；批次自适应 QC | QC violin、counts vs genes scatter、novelty plot、cell-cycle plot、过滤前后 QC 对比、实际 caller 的 doublet score 直方图；Scrublet 额外输出 observed vs simulated doublet 分布图 |
 | `normalize` | `log1p` 或 Pearson residuals 标准化，保留 counts layer | 标准化后 h5ad、library size 图、表达值分布图 |
 | `hvg` | 高变异基因选择，支持批次感知、force include、排除 MT/CC 基因、细胞周期评分和回归 | HVG scatter、HVG rank plot、HVG 标记 |
 | `dimred` | PCA、UMAP，可选 t-SNE/MDE，支持自动 PC 选择 | PCA variance、PCA scatter、UMAP QC 着色图 |
@@ -43,12 +44,15 @@ qc -> normalize -> hvg -> dimred -> batch_correct -> clustering
 | `clustering` | 多分辨率 Leiden/Louvain 聚类，支持主分辨率、自动分辨率评分 | 各分辨率 UMAP、多分辨率 UMAP、cluster 标签 UMAP、cluster 细胞数图、cluster 批次组成图、分辨率 Sankey |
 | `subcluster` | 对指定 cluster 进行子簇重聚类、差异表达和通路富集 | 子簇 UMAP、marker 表、热图、富集结果 |
 | `qc_reassess` | 聚类后按簇评估 doublet、MT、ribo、细胞数，支持自动移除低质量簇 | 低质量簇表、按簇 QC 汇总图、doublet/MT UMAP、QC 指标 UMAP 面板、低质量簇高亮图 |
-| `annotation` | 分层 cell lineage/type/subtype、独立 cell state；marker 自动打分、负向 marker 互斥、多证据复核；类器官自动计算前体/成熟/增殖模块和成熟度指数，并读取时间元数据；可选本地人类 CellTypist 参考交叉验证（不覆盖 Marker 标签）；注释版本/备注可追溯；doublet/环境 RNA 仅作复核证据 | 细胞类型 UMAP、细胞类型组成图、marker score heatmap、marker dotplot、marker 表达验证图、annotation score UMAP、成熟度 UMAP、CellTypist 参考 UMAP、逐簇复核表 |
+| `annotation` | 分层 cell lineage/type/subtype、独立 multi-label cell state；`Colorectal` 面板先判 broad lineage 再细分 goblet/TA/absorptive/inflammatory 等上皮亚型；逐簇保存候选、正负 Marker、决策原因；Doublet 继承 QC 实际运行的 caller，Marker 混合不冒充 Doublet；环境 RNA 仅检查异源谱系 Marker；可选本地 CellTypist 参考（不覆盖 Marker 标签） | 细胞类型 UMAP、细胞类型组成图、marker score heatmap、marker dotplot、marker 表达验证图、annotation score UMAP、成熟度 UMAP、CellTypist 参考 UMAP、逐簇复核表 |
 | `sc_timecourse` | 按真实时间点进行样本级细胞组成和伪 bulk 基因动态分析，区分描述性趋势与统计推断 | 时间点 UMAP、组成曲线/热图、动态基因表和趋势图 |
-| `deg` | Wilcoxon、t-test、logreg 等 cluster/celltype 差异表达 | DEG CSV、完整 DEG CSV、火山图、显著 DEG 数量图、top marker UMAP 面板、dotplot、marker heatmap、基因表达 UMAP |
+| `deg` | cluster/celltype marker（探索性） | 火山图、显著 DEG 数量图、top marker UMAP 面板、dotplot、marker heatmap、基因表达 UMAP |
 | `trajectory` | Diffusion Map、DPT、PAGA 拟时序 | pseudotime UMAP、pseudotime 分布图、PAGA 图、基因随拟时序变化图 |
 | `proportion` | 细胞比例统计和组间比较，支持卡方、Fisher、置换检验 | 堆叠柱图、比例 heatmap、饼图、比例统计表 |
 | `cell_communication` | 基于 LIANA 的配体-受体通讯分析 | 通讯热图、气泡图、通讯网络图、交互表 |
+| `virtual_ko` | 基于 CellOracle 的 GRN 推断（Ridge 回归）与 in silico 基因敲除扰动模拟；内置人类 promoter base GRN（hg19/hg38）或上传自定义 base GRN；在独立 celloracle 环境（Python 3.9/3.10）中运行 | GRN 边表 CSV、每个基因的状态偏移 CSV、Top 受调控基因 CSV、quiver 向量场、模拟流场网格、细胞分群+流场、偏移分布图（PNG+SVG）、含模拟结果的 h5ad |
+
+`annotation` 还提供可选的脱敏 LLM 辅助注释：仅向配置的模型发送 cluster 级 marker 摘要（不含表达矩阵、细胞条码、样本元数据或项目路径），返回结果只作为候选证据，须人工复核后采纳。
 
 ### Bulk RNA-seq 分析
 
@@ -75,6 +79,23 @@ bulk_deg_integration
 | `bulk_enrichment` | ORA/GSEA，支持 GO、KEGG、WikiPathways、Reactome 等数据库 | 富集表、barplot、dotplot、GSEA 曲线 |
 | `bulk_timecourse` | 多时间点差异检测、spline F-test、轨迹聚类 | 时间趋势图、cluster profile |
 | `bulk_deg_integration` | 多组 DEG 整合，支持 UpSet、Venn、一致性评分、logFC 矩阵和表达式筛选 | UpSet/Venn、logFC heatmap、共同/特异基因表 |
+
+### WES 外显子组分析
+
+平台在单细胞与 Bulk 表达分析之外，补充科研级 WES（全外显子组测序）能力，面向人类短读长双端测序的 germline SNV/InDel 与肿瘤 somatic SNV/InDel。WES 不进入线性 `PIPELINE_ORDER`，而是接入独立的 `WORKFLOW_REGISTRY`，由 `modules/workflows/` 提供统一的输入登记、预检、运行追踪和产物收集：
+
+| Workflow | 说明 |
+| --- | --- |
+| `wes_germline` | GATK HaplotypeCaller gVCF 胚系 SNV/InDel（单样本/小家系） |
+| `wes_somatic` | Mutect2 + 官方过滤链；支持 tumor-normal 与受限 tumor-only 模式 |
+| `wes_vcf_normalize` | 已调用 VCF 的标准化与 VEP offline 注释（germline/somatic 模式） |
+
+- 三类合法输入入口：FASTQ（含 SRA 本地 `fasterq-dump` 转换）、已处理 BAM/CRAM、已调用 VCF。
+- 执行后端为固定版本 nf-core/sarek + Nextflow local executor；平台负责启动、查询、取消、`-resume` 和产物收集，Web 端不提供任意命令执行。
+- 参考资源必须登记并通过 checksum 校验；`WES_REQUIRE_VALIDATED_REFERENCES` 默认开启，未验证的 reference bundle 无法进入生产运行。上传的 capture BED 一律登记为 `test_only`，需管理员审核后才能用于生产分析。
+- 服务器 WES 数据通过 `WES_SOURCE_ROOTS` 白名单只读接入，拒绝符号链接；FASTQ、BAM、CRAM 和全量 VCF 不会发送给外部 AI。
+- 项目内提供 WES 面板（`/projects/<pid>/wes`）：样本与 manifest 登记、capture kit 管理、运行状态、SRA 转换任务和产物安全下载。
+- 首期边界：不做 CNV、SV、MSI、TMB、突变特征、ACMG 自动分级和大队列 joint genotyping；胚系与 somatic 使用独立 workflow contract，变异结果不混表、不共用过滤结论。详见 [WES 分析方案](docs/WES_ANALYSIS_PLAN.md) 与 [P2/P3 Runbook](docs/WES_P2_P3_RUNBOOK.md)。
 
 ### AI 对话与目标驱动 Agent
 
@@ -131,10 +152,10 @@ resolution 0.8 的单核细胞群太混，帮我设计几个候选参数。
 - `.csv`、`.txt`、`.tsv`：表达矩阵或样本表。
 - `.xlsx`、`.xls`：Bulk 表达矩阵。
 - `.mtx.gz` / 10x 文件组合：上传 `barcodes.tsv(.gz)`、`features.tsv(.gz)` 或 `genes.tsv(.gz)`、`matrix.mtx(.gz)` 后可转换为 `.h5ad`。
-- 多批次 10x ZIP：上传两个或更多分别包含 `filtered_feature_bc_matrix` 的 ZIP，平台会解压、添加 `obs["batch"]`，并合并为一个标准 `.h5ad`。
+- 多批次 10x ZIP：上传两个或更多分别包含 `filtered_feature_bc_matrix` 的 ZIP，上传页会为每个 ZIP 提供「样本 ID / 批次名称 / 条件」标记（条件如 对照组、疾病组，可自定义）；平台解压后写入 `obs["sample_id"]`、`obs["condition"]`、`obs["batch"]`，再合并为一个标准 `.h5ad`。未填写条件时 condition 留空，后续需补标后才能运行样本级推断。
 - 服务器目录批量 10x：管理员配置 `SC_BATCH_SOURCE_ROOTS` 后，可从网页递归扫描大量 10x 目录、下载并填写样本 manifest（`sample_id,matrix_dir,condition,replicate,batch`），再合并为标准 `.h5ad`。目录名不会被自动当作生物学分组。
 
-批量单细胞 CSV 导出在完成常规分析后提供：`sc_csv_export` 导出细胞元数据、样本设计、样本级 pseudobulk counts/log2(CPM+1)、样本×聚类比例和比较注册表。若只需要交付前两类结果，选择 `proportions_expression`，结果包仅创建 `01_group_proportions` 与 `02_gene_expression`，不会产生 DEG、GO 或比较注册表。当前只有一份对照和一份实验样本时，使用 `sc_cell_deg`：默认每个 `A-vs-B` 同时输出 `all_cells`（全部细胞）和 `per_cluster`（各 Leiden 簇）的完整单细胞级 `log2FC` 与 `p.adjust` CSV，供火山图和热图使用；随后运行 `sc_cell_go`。它默认使用服务器本地 GMT/TXT 基因集，不上传 DEG，且可分别执行 BP、CC、MF；按簇 GO 在同一文件内以 `cluster` 列区分。两者均明确标记为探索性细胞级结果。`sc_pseudobulk_deg` 保留给以后具有独立生物学重复的样本级分析。
+单细胞 DEG 按统计单位分开：`deg` 只用于 cluster marker；`sc_cell_deg` 用于同一样本不同簇、不同样本同一簇或条件间的细胞级探索性比较；具有独立生物学重复的正式条件结论使用 `sc_pseudobulk_deg`。细胞级 log2FC 始终由原始 `counts` 重建 log1p 表达，Pearson residual 不直接用于 fold change。富集页面必须选择一个已完成的 DEG 任务，系统读取其受控内部结果并核对 AnnData 版本，不按目录中“最新 CSV”猜测来源。默认交付图和 JSON 统计审计；完整 DEG/富集表只供内部下游使用，不在界面导出。详细设计与延期项见 [人类单细胞 DEG 与富集规划](docs/sc-deg-enrichment-plan.md)。
 
 使用同一个“结果包文件夹”（默认 `sc_batch_results`）时，所有输出会整理为：
 
@@ -190,6 +211,50 @@ python app.py
 http://localhost:5000
 ```
 
+### 受控外网访问（NAT123）
+
+如果需要通过 NAT123 将平台提供给其他网络的实验室成员使用，先在服务器的
+`.env` 中设置共享访问密码（不要把密码提交到 Git）：
+
+```dotenv
+PLATFORM_ACCESS_PASSWORD=请替换为长度较长的随机密码
+PLATFORM_ACCESS_SESSION_HOURS=12
+```
+
+重启平台进程后，所有网页、上传/下载路径和 `/api/` 接口都会要求先在
+`/login` 输入该密码；登录状态保存在 Flask 签名会话中。NAT123 映射时选择
+“非 80 网站”，内网地址填写 `127.0.0.1`，内网端口填写 `5000`，然后使用 NAT123
+生成的外网域名和端口访问。
+
+NAT123 会把服务发布到公网，访问密码只是共享访问门槛，不等同于按用户隔离的
+项目权限。涉及真实人类基因组数据时，应优先使用学校 VPN/WireGuard，并为正式
+部署增加 HTTPS、用户登录和项目权限；不要直接把未设置
+`PLATFORM_ACCESS_PASSWORD` 的平台映射到公网。
+
+平台进程与 NAT123 隧道是两个独立的 systemd 服务。修改代码后只需重启平台，
+无需重启 NAT123，外网地址也不会改变：
+
+```bash
+./scripts/platform-service.sh restart  # 重启并等待本地 HTTP 就绪
+./scripts/platform-service.sh status   # 查看平台状态
+./scripts/platform-service.sh logs     # 跟踪平台日志，Ctrl+C 退出
+```
+
+若 5000 端口仍由手工执行的 `python app.py` 占用，脚本会拒绝启动第二个实例，
+也不会自动杀死旧进程，以免中断正在运行的分析。
+
+频繁开发时，可在服务器 `.env` 中临时开启自动重载：
+
+```dotenv
+PLATFORM_AUTO_RELOAD=1
+```
+
+先执行一次 `./scripts/platform-service.sh restart` 使开关生效。此后修改 Python、
+HTML、CSS 或 JavaScript 文件会自动重载应用进程，浏览器刷新即可看到效果；Flask
+交互式调试器仍保持关闭。安装/升级依赖或修改 `.env` 后仍应执行完整重启。
+自动重载会中断进程内正在执行的分析任务，因此只应在无人运行分析的开发时段
+开启；跑正式分析前将该值改为 `0` 并重启平台。
+
 运行后可访问 `/api/system/dependencies` 查看依赖状态。每个模块同时返回 `missing`（缺少即不可运行的依赖）和 `optional_missing`（只影响某项扩展能力的依赖），因此页面或部署检查不应仅依据整组依赖是否全部安装来判断模块是否可用。
 
 ### 图像输出与下载
@@ -236,11 +301,14 @@ AI_API_TOKEN=""
 
 说明：
 
+- 启动后可直接打开 `/settings/ai`（首页和 AI 主工作台均有入口）更换协议、API 地址、API Key 和模型；保存后立即生效，无需重启。API Key 只在服务端保存，页面仅显示脱敏值。
+- “测试连接”会使用当前表单参数发起一次轻量服务检查，不会保存配置；确认成功后再点击“保存并应用”。“恢复环境变量默认值”会删除平台页面保存的覆盖项。
 - `AI_API_KEY` 为空时，`/api/chat` 会返回未配置错误。
 - `AI_API_URL` 中包含 `anthropic` 或 `claude` 时走 Anthropic Messages 格式，否则走 OpenAI compatible Chat Completions 格式。
 - Anthropic-compatible 调用使用内置 HTTP 客户端，不强依赖本地安装 `anthropic` SDK。
 - `AI_API_TOKEN` 为空时跳过本地 API token 认证；设置后需要请求头 `Authorization: Bearer <token>`。
 - 写操作工具不会直接执行，会先返回 `proposed_tools`，前端确认后再调用 `/api/chat/approve`。
+- AI 查询任务结果时，若存在 PNG/JPG/SVG 等图片，`/api/chat` 会返回 `attachments`；AI 主工作台和项目详情页会直接显示缩略图，可点击查看原图或下载。
 
 ## 使用流程
 
@@ -251,10 +319,10 @@ AI_API_TOKEN=""
 3. 执行 `qc`、`normalize`、`hvg`、`dimred`。
 4. 执行 `clustering` 并查看多分辨率 UMAP、Sankey 和带标签 cluster UMAP。
 5. 执行 `qc_reassess` 检查低质量簇。
-6. 执行 `annotation`，选择 `PBMC`、`Immune`、`Blood`、`TME` 或自定义 marker。
-7. 执行 `deg`，检查 marker heatmap、火山图和完整 DEG CSV。
+6. 执行 `annotation`：结直肠/肠类器官选择 `Colorectal`，未知组织先用 `Universal`，其他场景选择 `Organoid`、`PBMC`、`Immune`、`Blood`、`TME` 或自定义 marker。
+7. 执行 `deg`，检查 marker heatmap、火山图和统计审计。
 8. 根据项目需要继续 `trajectory`、`proportion`、`cell_communication`。
-9. 若需交给下游结果平台，依次运行 `sc_cell_deg`（每个条件比较独立的单细胞级 DEG CSV）、`sc_cell_go`（每个比较一份 GO CSV）和最后的 `sc_csv_export`（统一 CSV 数据包）；有生物学重复时可另选 `sc_pseudobulk_deg`。
+9. 单样本/探索性项目运行 `sc_cell_deg`，有生物学重复的正式条件比较运行 `sc_pseudobulk_deg`；随后在 `sc_cell_go` 明确选择对应的 DEG 任务运行 Human ORA/GSEA。默认无需整理 CSV 数据包。
 
 ### Bulk 网页流程
 
@@ -265,6 +333,14 @@ AI_API_TOKEN=""
 5. 执行 `bulk_deg`，设置比较组、统计方法和阈值。
 6. 执行 `bulk_heatmap` 或 `bulk_enrichment`。
 7. 多比较场景执行 `bulk_deg_integration`。
+
+### WES 网页流程
+
+1. 管理员在服务器 `.env` 中配置 `WES_SOURCE_ROOTS` 及参考资源路径，需要真正启动运行时开启 `WES_EXECUTOR_ENABLED`。
+2. 打开项目详情页的 WES 面板，按入口类型登记样本 manifest（FASTQ / BAM / CRAM / VCF）。
+3. 选择 workflow（胚系 / tumor-normal / 受限 tumor-only）和已验证的参考 bundle、capture kit，完成运行前预检。
+4. 启动 Nextflow 运行；平台跟踪状态、PID、日志和退出码，支持取消与 `-resume`。
+5. 完成后在面板查看和下载 filtered VCF、注释表、QC 与报告；所有产物经安全路径校验后提供下载。
 
 ### AI 对话流程
 
@@ -282,6 +358,10 @@ AI_API_TOKEN=""
 | 接口 | 方法 | 说明 |
 | --- | --- | --- |
 | `/api/chat` | `POST` | AI 对话入口 |
+| `/settings/ai` | `GET` | AI API 设置页面 |
+| `/api/settings/ai` | `GET/POST` | 查看或保存 AI API 配置（Key 脱敏返回） |
+| `/api/settings/ai/test` | `POST` | 测试未保存的 AI API 参数 |
+| `/api/settings/ai/reset` | `POST` | 恢复环境变量默认 AI 配置 |
 | `/api/chat/approve` | `POST` | 执行用户确认后的 AI 工具 |
 | `/api/chat/history/<pid>` | `GET` | 获取项目聊天历史 |
 | `/api/tasks/<task_id>/status` | `GET` | 查看分析任务状态 |
@@ -289,7 +369,9 @@ AI_API_TOKEN=""
 | `/api/projects/<pid>/adata-info` | `GET` | 获取当前 AnnData 信息 |
 | `/api/result-file/<file_id>` | `GET` | 下载 PNG、SVG、CSV 或其他结果文件 |
 | `/projects/<pid>/figure-studio` | `GET` | 打开非破坏性图形工作台 |
-| `/projects/<pid>/upload/import-10x-batches` | `POST` | 接收两个或更多 `batch_zip`，合并为带 `batch` 列的 h5ad |
+| `/projects/<pid>/workspace` | `GET` | AI 主工作台页面 |
+| `/projects/<pid>/wes` | `GET` | 项目 WES 面板（workflow、运行、参考资源、SRA 任务） |
+| `/projects/<pid>/upload/import-10x-batches` | `POST` | 接收两个或更多 `batch_zip`（可带 `sample_id`/`condition` 表单），合并为带 `sample_id`/`condition`/`batch` 列的 h5ad |
 | `/projects/<pid>/upload/discover-10x-directory` | `POST` | 在允许的服务器目录内扫描 10x 矩阵并生成 manifest 模板 |
 | `/projects/<pid>/upload/import-10x-manifest` | `POST` | 校验已填写的 sample manifest 后异步合并任意多个 10x 样本 |
 | `/api/projects/<pid>/pipeline-runs` | `POST/GET` | 创建或列出批量 pipeline run |
@@ -344,6 +426,9 @@ python -m pytest \
 # 单细胞/Bulk 模块和可视化基础测试
 python -m pytest tests/test_p2_modules.py tests/test_p3_modules.py tests/test_visualization.py -q
 
+# WES workflow、AI 设置和工作台相关测试
+python -m pytest tests/test_wes_workflows.py tests/test_ai_settings.py tests/test_workspace.py -q
+
 # 语义一致性检查
 python -m pytest tests/test_semantic.py tests/test_semantic_full.py -q
 ```
@@ -367,8 +452,11 @@ routes/
   results.py                # 结果展示和下载
   api.py                    # 常规 REST API
   chat.py                   # AI 对话 API
+  ai_settings.py            # AI API 配置页面与设置接口
   branches.py               # Agent session、candidate branch、score、accept API
   figure_studio.py          # 图形工作台页面、预览、上传和版本下载
+  workspace.py              # AI 主工作台页面
+  wes.py                    # 项目 WES 面板与安全产物下载
   auth.py                   # Bearer token 鉴权装饰器
 
 modules/
@@ -380,6 +468,7 @@ modules/
   inspect_utils.py          # AnnData 检查工具
   expression_parser.py      # Bulk 多比较表达式解析
   ai_adapter.py             # Anthropic/OpenAI compatible AI 适配器
+  ai_config.py              # 环境变量与平台页面配置的运行时合并
   ai_tools.py               # AI 工具执行后端
   agent_orchestrator.py     # 目标驱动 Agent 编排
   agent_jobs.py             # 参数 sweep 异步 job
@@ -388,7 +477,11 @@ modules/
   native_figures.py         # 原生静态科研图构建器
   figure_studio.py          # 图形来源解析、预览和版本保存
   cell_markers.py           # 内置 marker 定义
+  llm_annotation.py         # 脱敏 cluster 级 LLM 辅助注释适配器
+  virtual_ko.py             # CellOracle GRN 与 in silico 敲除模块
+  celloracle_worker.py      # 独立 celloracle 环境的子进程 worker
   evaluators/               # 候选分支评分器
+  workflows/                # WES 外部工作流：Sarek/Nextflow、预检、运行与产物
   reporting/                # manifest、项目报告、pipeline 和复核证据
   qc.py ... deg.py          # 单细胞分析模块
   bulk_qc.py ...            # Bulk 分析模块
@@ -405,8 +498,9 @@ figure_engine/              # 确定性的 Nature Figure Engine
 
 templates/                  # Jinja2 页面模板
 tests/                      # 单元、集成、语义和 Agent 测试
-scripts/                    # 参考流程和工具脚本
+scripts/                    # 参考流程、工具脚本和平台服务管理
 docs/                       # 设计、计划和审批文档
+deploy/                     # systemd 服务文件（平台进程与 NAT123 隧道）
 genesets/                   # 通路基因集资源
 data/                       # 本地项目数据，默认不纳入 git
 ```
@@ -440,6 +534,10 @@ Git 仓库只保存源代码、模板、测试和维护文档。以下内容只�
 | `AI_API_URL` | 默认兼容 Anthropic 的 URL | AI API endpoint；DeepSeek 可用 `https://api.deepseek.com/anthropic` |
 | `AI_MODEL` | `mimo-v2.5-pro` | AI 模型名；DeepSeek 常用 `deepseek-chat` |
 | `AI_API_TOKEN` | 空 | 本地 API Bearer token |
+| `WES_SOURCE_ROOTS` | 空（关闭） | WES 服务器只读数据根目录白名单，多个根用 `:` 分隔 |
+| `WES_EXECUTOR_ENABLED` | 关闭 | 是否允许启动 Nextflow WES 运行；关闭时仍可准备和审阅 run |
+| `WES_NEXTFLOW_GENOME` | `GATK.GRCh38` | Sarek/iGenomes 参考键；配套资源路径见 `WES_NEXTFLOW_*` 变量 |
+| `CELLORACLE_PYTHON` | 独立 celloracle 环境 | virtual_ko 使用的 Python 3.9/3.10 解释器路径 |
 
 ## 功能边界
 

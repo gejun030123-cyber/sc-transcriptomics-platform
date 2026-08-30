@@ -9,6 +9,7 @@ every analysis module.
 import base64
 import io
 import json
+import math
 import os
 from typing import Any
 
@@ -71,6 +72,19 @@ def _numeric(values):
         return np.asarray(values, dtype=float)
     except (TypeError, ValueError):
         return None
+
+
+def _sample_tick_labels(labels, max_labels=18):
+    """Keep the first/last category while thinning dense axis labels."""
+    labels = [str(value) for value in labels]
+    if len(labels) <= max_labels:
+        indices = list(range(len(labels)))
+    else:
+        stride = max(1, int(math.ceil(len(labels) / max_labels)))
+        indices = list(range(0, len(labels), stride))
+        if indices[-1] != len(labels) - 1:
+            indices.append(len(labels) - 1)
+    return indices, [labels[index] for index in indices]
 
 
 def _trace_color(trace, index):
@@ -141,6 +155,29 @@ def render_plotly_payload(payload: dict, output_stem: str, label: str = ""):
     traces = payload.get("data", []) or []
     width = min(10.5, max(7.0, float(layout.get('width', 900)) / 100))
     height = min(8.0, max(4.8, float(layout.get('height', 560)) / 100))
+    # Legacy Plotly payloads do not carry the content-aware canvas sizing used
+    # by native figures.  Reserve additional horizontal/vertical space before
+    # drawing categorical axes so long cluster/sample labels do not collide.
+    vertical_labels = [
+        str(value)
+        for trace in traces
+        if (trace or {}).get('type', 'scatter') == 'bar'
+        and (trace or {}).get('orientation', 'v') != 'h'
+        for value in ((trace or {}).get('x', []) or [])
+    ]
+    horizontal_labels = [
+        str(value)
+        for trace in traces
+        if (trace or {}).get('type', 'scatter') == 'bar'
+        and (trace or {}).get('orientation', 'v') == 'h'
+        for value in ((trace or {}).get('x', []) or [])
+    ]
+    if vertical_labels:
+        width = max(width, min(16.0, 6.8 + 0.42 * len(set(vertical_labels))))
+        if max(map(len, vertical_labels), default=0) > 16:
+            height = max(height, 5.8)
+    if horizontal_labels:
+        height = max(height, min(16.0, 4.8 + 0.28 * len(set(horizontal_labels))))
     fig, ax = plt.subplots(figsize=(width, height), dpi=150)
     fig.patch.set_facecolor(NATURE_BG)
     ax.set_facecolor(NATURE_BG)
@@ -149,6 +186,7 @@ def render_plotly_payload(payload: dict, output_stem: str, label: str = ""):
     has_colorbar = False
     violin_positions = []
     violin_labels = []
+    horizontal_tick_labels = []
     bar_traces = [trace for trace in traces
                   if (trace or {}).get('type', 'scatter') == 'bar'
                   and (trace or {}).get('orientation', 'v') != 'h']
@@ -195,7 +233,8 @@ def render_plotly_payload(payload: dict, output_stem: str, label: str = ""):
             numeric_y = _numeric(y)
             orientation = (trace.get("orientation") or "v").lower()
             if orientation == "h":
-                ax.barh([str(item) for item in x], numeric_y, color=color, alpha=0.84,
+                horizontal_tick_labels = [str(item) for item in x]
+                ax.barh(horizontal_tick_labels, numeric_y, color=color, alpha=0.84,
                         label=name or None)
             else:
                 positions = np.arange(len(x))
@@ -281,11 +320,20 @@ def render_plotly_payload(payload: dict, output_stem: str, label: str = ""):
                 fontsize=13, color="#6b7280")
     title = _title(layout, label or "分析图")
     if violin_positions:
-        ax.set_xticks(violin_positions, violin_labels)
+        tick_cap = 12 if max(map(len, violin_labels), default=0) > 16 else 18
+        selected, shown = _sample_tick_labels(violin_labels, max_labels=tick_cap)
+        ax.set_xticks([violin_positions[index] for index in selected], shown)
         ax.tick_params(axis='x', labelrotation=28, labelsize=8)
     elif bar_tick_labels:
+        tick_cap = 12 if max(map(len, bar_tick_labels), default=0) > 16 else 18
+        selected, shown = _sample_tick_labels(bar_tick_labels, max_labels=tick_cap)
         centers = np.arange(len(bar_tick_labels))
-        ax.set_xticks(centers, bar_tick_labels, rotation=30, ha='right')
+        ax.set_xticks(centers[selected], shown, rotation=30, ha='right')
+    if horizontal_tick_labels:
+        tick_cap = 12 if max(map(len, horizontal_tick_labels), default=0) > 16 else 18
+        selected, shown = _sample_tick_labels(horizontal_tick_labels, max_labels=tick_cap)
+        ax.set_yticks(selected, shown)
+        ax.tick_params(axis='y', labelsize=8)
     ax.set_title(title, fontsize=14, fontweight="semibold", color=NATURE_TEXT,
                  loc='left', pad=12)
     if not has_colorbar:

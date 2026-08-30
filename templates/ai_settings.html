@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}AI API 设置 - 生信分析平台{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/ai_settings.css') }}">
+{% endblock %}
+
+{% block content %}
+<div class="ai-settings-page">
+    <div class="ai-settings-heading">
+        <div>
+            <a href="/" class="text-decoration-none small">← 返回控制台</a>
+            <h1>AI API 设置</h1>
+            <p>在这里更换 AI 服务商、API 地址、密钥和模型；保存后 AI 主工作台立即使用新配置，无需重启服务。</p>
+        </div>
+        <span id="ai-settings-state" class="badge rounded-pill text-bg-secondary">读取中…</span>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-xl-8">
+            <section class="card ai-settings-card">
+                <div class="card-body p-4">
+                    <h2>连接参数</h2>
+                    <p class="text-muted small">支持 OpenAI 兼容接口和 Anthropic Messages 兼容接口。</p>
+                    <form id="ai-settings-form" novalidate>
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label for="ai-provider" class="form-label">接口协议</label>
+                                <select id="ai-provider" class="form-select">
+                                    <option value="auto">自动识别（推荐）</option>
+                                    <option value="openai">OpenAI 兼容</option>
+                                    <option value="anthropic">Anthropic Messages</option>
+                                </select>
+                            </div>
+                            <div class="col-md-6">
+                                <label for="ai-model" class="form-label">模型名</label>
+                                <input id="ai-model" class="form-control" maxlength="200" required placeholder="例如 mimo-v2.5-pro">
+                            </div>
+                            <div class="col-12">
+                                <label for="ai-api-url" class="form-label">API 地址</label>
+                                <input id="ai-api-url" class="form-control" maxlength="500" required placeholder="https://api.example.com/v1 或 /anthropic">
+                                <div class="form-text">OpenAI 兼容接口填写 base URL（通常以 /v1 结尾）；Anthropic 可填写服务商提供的根地址。</div>
+                            </div>
+                            <div class="col-12">
+                                <label for="ai-api-key" class="form-label">API Key</label>
+                                <input id="ai-api-key" type="password" class="form-control" maxlength="1000" autocomplete="new-password" placeholder="留空表示沿用当前密钥">
+                                <div class="form-text">页面只显示脱敏结果；留空保存不会覆盖现有 Key。需要更换时直接粘贴新 Key。</div>
+                            </div>
+                            <div class="col-12">
+                                <div class="form-check">
+                                    <input id="ai-clear-key" class="form-check-input" type="checkbox">
+                                    <label for="ai-clear-key" class="form-check-label">清除当前 API Key（清除后工作台将无法调用 AI）</label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="ai-settings-actions mt-4">
+                            <button type="submit" class="btn btn-primary" id="ai-save">保存并应用</button>
+                            <button type="button" class="btn btn-outline-secondary" id="ai-test">测试连接</button>
+                            <button type="button" class="btn btn-link text-danger ms-auto" id="ai-reset">恢复环境变量默认值</button>
+                        </div>
+                    </form>
+                    <div id="ai-settings-message" class="alert d-none mt-3 mb-0" role="status"></div>
+                </div>
+            </section>
+        </div>
+
+        <div class="col-xl-4">
+            <section class="card ai-settings-card ai-settings-summary">
+                <div class="card-body p-4">
+                    <h2>当前生效配置</h2>
+                    <dl class="row mb-0 small">
+                        <dt class="col-5">服务商</dt><dd class="col-7" id="summary-provider">—</dd>
+                        <dt class="col-5">模型</dt><dd class="col-7 text-break" id="summary-model">—</dd>
+                        <dt class="col-5">API 地址</dt><dd class="col-7 text-break" id="summary-url">—</dd>
+                        <dt class="col-5">API Key</dt><dd class="col-7" id="summary-key">—</dd>
+                    </dl>
+                    <div class="alert alert-light border small mt-4 mb-0">
+                        密钥保存在平台服务端的 SQLite 配置表中，接口响应不会返回明文 Key。生产部署建议同时启用平台访问 Token 和 HTTPS。
+                    </div>
+                </div>
+            </section>
+            <section class="ai-settings-help mt-3">
+                <h3>切换流程</h3>
+                <ol>
+                    <li>选择协议，填写地址和模型名。</li>
+                    <li>粘贴新 API Key，点击“测试连接”。</li>
+                    <li>测试成功后点击“保存并应用”，返回 AI 主工作台即可使用。</li>
+                </ol>
+            </section>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/ai_settings.js') }}"></script>
+{% endblock %}

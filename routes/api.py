@@ -9,6 +9,7 @@ import psutil
 from flask import Blueprint, jsonify, request, send_file
 from models import AnalysisTask, Project, ResultFile
 from config import Config
+from modules.workflows.capture_uploads import store_capture_bed_upload
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,31 @@ api_bp = Blueprint('api', __name__)
 
 
 PRESETS_GLOBAL_DIR = os.path.join(Config.DATA_DIR, 'presets', '_global')
+
+
+@api_bp.route('/projects/<pid>/wes/capture-kits/upload', methods=['POST'])
+def upload_wes_capture_kit(pid):
+    """Register a user-provided calling BED as a non-production profile."""
+    if not Project.get_by_id(pid):
+        return jsonify({'error': 'Project not found'}), 404
+    uploaded = request.files.get('calling_bed') or request.files.get('bed') or request.files.get('file')
+    try:
+        result = store_capture_bed_upload(
+            project_id=pid,
+            file_storage=uploaded,
+            capture_kit_id=request.form.get('capture_kit_id', ''),
+            name=request.form.get('name', ''),
+            version=request.form.get('version', ''),
+            assembly=request.form.get('assembly', 'GRCh38'),
+        )
+    except (OSError, ValueError) as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify({
+        'message': 'BED 已上传并登记为 test_only，需管理员审核后才能用于生产分析',
+        'profile': result['profile'],
+        'checksum': result['checksum'],
+        'size_bytes': result['size_bytes'],
+    }), 201
 
 
 def _validate_file_path(file_path):
@@ -739,6 +765,490 @@ def delete_preset(preset_id):
     return jsonify({'error': '预设不存在'}), 404
 
 
+# ============ WES Workflow API ============
+
+@api_bp.route('/projects/<pid>/wes/sra/upload', methods=['POST'])
+def upload_wes_sra(pid):
+    """Upload one local SRA archive and queue asynchronous FASTQ conversion."""
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    try:
+        from modules.workflows.sra import store_sra_upload
+        result = store_sra_upload(
+            project_id=pid,
+            file_storage=request.files.get('sra'),
+            sample_id=request.form.get('sample_id', ''),
+            patient_id=request.form.get('patient_id', ''),
+            role=request.form.get('role', ''),
+            capture_kit_id=request.form.get('capture_kit_id', ''),
+        )
+    except (OSError, ValueError) as exc:
+        return jsonify({'error': str(exc)}), 422
+    job = result['job']
+    return jsonify({
+        'message': 'SRA 已上传，FASTQ 转换任务已进入后台队列',
+        'job': job,
+        'source_asset': result['source_asset'],
+    }), 202
+
+
+@api_bp.route('/projects/<pid>/wes/sra/jobs', methods=['GET'])
+def list_wes_sra_jobs(pid):
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    from modules.workflows.sra import list_sra_jobs
+    return jsonify({'jobs': list_sra_jobs(pid)})
+
+
+@api_bp.route('/projects/<pid>/wes/sra/jobs/<job_id>', methods=['GET'])
+def get_wes_sra_job(pid, job_id):
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    from modules.workflows.sra import get_sra_job
+    job = get_sra_job(job_id, pid)
+    if not job:
+        return jsonify({'error': 'SRA 转换任务不存在'}), 404
+    return jsonify({'job': job})
+
+
+@api_bp.route('/projects/<pid>/wes/data/upload', methods=['POST'])
+def upload_wes_input_data(pid):
+    """Upload one complete FASTQ/BAM/CRAM input set for the WES wizard."""
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    input_type = str(request.form.get('input_type', '') or '').strip().lower()
+    files = {
+        field: request.files.get(field)
+        for field in ('fastq_1', 'fastq_2', 'bam', 'bai', 'cram', 'crai')
+    }
+    try:
+        from modules.workflows.input_uploads import store_wes_input_upload
+        result = store_wes_input_upload(
+            project_id=pid,
+            sample_id=request.form.get('sample_id', ''),
+            patient_id=request.form.get('patient_id', ''),
+            role=request.form.get('role', ''),
+            input_type=input_type,
+            files=files,
+            capture_kit_id=request.form.get('capture_kit_id', ''),
+        )
+    except (OSError, ValueError) as exc:
+        return jsonify({'error': str(exc)}), 422
+    return jsonify({
+        'message': 'WES 输入文件上传并登记成功',
+        **result,
+    }), 201
+
+
+@api_bp.route('/projects/<pid>/wes/workflows', methods=['GET'])
+def list_wes_workflows(pid):
+    """List declarative WES workflows without exposing shell commands."""
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    from modules.workflows.registry import list_workflows
+    return jsonify({'workflows': list_workflows('wes')})
+
+
+@api_bp.route('/projects/<pid>/wes/manifests', methods=['GET'])
+def list_wes_manifests(pid):
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    from modules.workflows.storage import list_manifests
+    return jsonify({'manifests': list_manifests(pid)})
+
+
+@api_bp.route('/projects/<pid>/wes/references', methods=['GET'])
+def list_wes_references(pid):
+    """List the administrator-managed reference assets visible to WES."""
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    from modules.workflows.references import list_reference_assets
+    return jsonify({'references': list_reference_assets(
+        assembly=request.args.get('assembly', '').strip(),
+        bundle_version=request.args.get('bundle_version', '').strip(),
+        status=request.args.get('status', '').strip(),
+    )})
+
+
+@api_bp.route('/projects/<pid>/wes/capture-kits', methods=['GET'])
+def list_wes_capture_kits(pid):
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    from modules.workflows.references import list_capture_kit_profiles
+    return jsonify({'capture_kits': list_capture_kit_profiles(
+        assembly=request.args.get('assembly', '').strip(),
+        include_retired=request.args.get('include_retired', '').lower() == 'true',
+    )})
+
+
+@api_bp.route('/projects/<pid>/wes/references/readiness', methods=['GET'])
+def wes_reference_readiness(pid):
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    workflow_key = request.args.get('workflow_key', '').strip()
+    reference_bundle_id = request.args.get('reference_bundle_id', '').strip()
+    capture_bed_id = request.args.get('capture_bed_id', '').strip()
+    capture_bed_path = request.args.get('capture_bed_path', '').strip()
+    if not workflow_key or not reference_bundle_id:
+        return jsonify({'error': '需要 workflow_key 和 reference_bundle_id'}), 400
+    from modules.workflows.references import launch_reference_readiness
+    readiness = launch_reference_readiness(
+        reference_bundle_id=reference_bundle_id,
+        capture_bed_id=capture_bed_id,
+        capture_bed_path=capture_bed_path,
+        workflow_key=workflow_key,
+    )
+    return jsonify({'readiness': readiness}), 200 if readiness['valid'] else 422
+
+
+@api_bp.route('/projects/<pid>/wes/runs', methods=['GET'])
+def list_wes_runs(pid):
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    from modules.workflows.runs import list_workflow_runs
+    from modules.workflows.nextflow import NextflowExecutor
+    runs = list_workflow_runs(pid)
+    for item in runs:
+        if item.get('status') in {'running', 'cancel_requested'}:
+            NextflowExecutor.poll(item['id'], pid)
+    return jsonify({'runs': list_workflow_runs(pid)})
+
+
+@api_bp.route('/projects/<pid>/wes/runs/<run_id>', methods=['GET'])
+def get_wes_run(pid, run_id):
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    from modules.workflows.runs import get_workflow_run
+    from modules.workflows.nextflow import NextflowExecutor
+    run = get_workflow_run(run_id, pid)
+    if not run:
+        return jsonify({'error': 'WES run 不存在'}), 404
+    if run.get('status') in {'running', 'cancel_requested'}:
+        run = NextflowExecutor.poll(run_id, pid)
+    return jsonify({'run': run})
+
+
+@api_bp.route('/projects/<pid>/wes/runs/<run_id>/artifacts', methods=['GET'])
+def wes_run_artifacts(pid, run_id):
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    from modules.workflows.runs import get_workflow_run
+    from modules.workflows.artifacts import collect_workflow_artifacts, list_workflow_artifacts
+    run = get_workflow_run(run_id, pid)
+    if not run:
+        return jsonify({'error': 'WES run 不存在'}), 404
+    collection = None
+    if run.get('status') == 'completed' and (
+            request.args.get('refresh', '').lower() == 'true' or
+            not list_workflow_artifacts(run_id, pid)):
+        collection = collect_workflow_artifacts(run_id, pid, strict=True)
+        run = get_workflow_run(run_id, pid)
+    return jsonify({
+        'run': run,
+        'artifacts': list_workflow_artifacts(run_id, pid),
+        'collection': collection,
+    })
+
+
+@api_bp.route('/projects/<pid>/wes/runs/prepare', methods=['POST'])
+def prepare_wes_run(pid):
+    """Create a reproducible, reviewable launch bundle without starting Nextflow."""
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    payload = request.get_json(silent=True) or {}
+    workflow_key = str(payload.get('workflow_key', '') or '').strip()
+    manifest_id = str(payload.get('manifest_id', '') or '').strip()
+    if not workflow_key or not manifest_id:
+        return jsonify({'error': '需要 workflow_key 和 manifest_id'}), 400
+
+    from modules.workflows.registry import get_workflow
+    from modules.workflows.storage import get_manifest
+    from modules.workflows.sarek import write_launch_bundle
+    from modules.workflows.nextflow import NextflowExecutor, WorkflowNotConfiguredError
+    from modules.workflows.runs import create_workflow_run
+
+    workflow = get_workflow(workflow_key)
+    if not workflow:
+        return jsonify({'error': f'未知 WES workflow: {workflow_key}'}), 422
+    manifest = get_manifest(manifest_id, pid)
+    if not manifest:
+        return jsonify({'error': 'manifest_id 不存在或不属于当前项目'}), 422
+
+    run_id = 'wesrun_' + uuid.uuid4().hex[:16]
+    run_root = os.path.join(Config.project_dir(pid), 'workflow_runs', run_id)
+    work_dir = os.path.join(run_root, 'work')
+    results_dir = os.path.join(run_root, 'results')
+    launch_dir = os.path.join(run_root, 'launch')
+    logs_dir = os.path.join(run_root, 'logs')
+    for directory in (work_dir, results_dir, launch_dir, logs_dir):
+        os.makedirs(directory, exist_ok=True)
+    samplesheet_path = os.path.join(launch_dir, 'samplesheet.csv')
+    stdout_path = os.path.join(logs_dir, 'stdout.log')
+    stderr_path = os.path.join(logs_dir, 'stderr.log')
+    manifest_samples = (manifest.get('manifest') or {}).get('samples') or []
+    input_types = {
+        str(sample.get('input_type') or '').strip().lower()
+        for sample in manifest_samples
+        if str(sample.get('input_type') or '').strip()
+    }
+    if len(input_types) != 1:
+        return jsonify({'error': 'WES manifest 必须只包含一种已校验的 input_type'}), 422
+    input_type = next(iter(input_types))
+    executor = NextflowExecutor()
+    try:
+        launch = executor.prepare(
+            workflow, pid, run_id, manifest_id, work_dir, results_dir,
+            samplesheet_path=samplesheet_path,
+            profile=Config.WES_NEXTFLOW_PROFILE,
+            stdout_path=stdout_path, stderr_path=stderr_path,
+            intervals_path=(manifest.get('manifest') or {}).get('capture_bed_path', ''),
+            input_type=input_type,
+            reference_bundle_id=(manifest.get('manifest') or {}).get('reference_bundle_id', ''),
+            capture_bed_id=(manifest.get('manifest') or {}).get('capture_bed_id', ''),
+        )
+    except (ValueError, WorkflowNotConfiguredError) as exc:
+        return jsonify({'error': f'WES 固定运行参数无效: {exc}'}), 422
+    try:
+        bundle = write_launch_bundle(
+            run_root, workflow=workflow.to_dict(), run_id=run_id, project_id=pid,
+            manifest_record=manifest, launch=launch.to_dict(), parameters=launch.parameters,
+            profile=Config.WES_NEXTFLOW_PROFILE,
+        )
+    except (OSError, ValueError) as exc:
+        return jsonify({'error': f'WES launch bundle 生成失败: {exc}'}), 422
+    launch_payload = launch.to_dict()
+    launch_payload['bundle'] = bundle
+    record = create_workflow_run(
+        pid, workflow_key, manifest_id, run_id=run_id, status='prepared',
+        launch=launch_payload,
+        executor=workflow.executor, workflow_release=workflow.release,
+        profile=Config.WES_NEXTFLOW_PROFILE, run_dir=run_root,
+        stdout_path=stdout_path, stderr_path=stderr_path,
+        provenance={'workflow_release': workflow.release, 'executor': workflow.executor,
+                    'profile': Config.WES_NEXTFLOW_PROFILE,
+                    'manifest_checksum': manifest.get('checksum', ''),
+                    'bundle_checksums': bundle.get('checksums', {})},
+    )
+    return jsonify({
+        'run': record,
+        'launch': launch_payload,
+        'message': '已生成可审阅的 WES LaunchSpec 和 samplesheet；尚未启动 Nextflow。',
+    }), 201
+
+
+@api_bp.route('/projects/<pid>/wes/runs/<run_id>/launch', methods=['POST'])
+def launch_wes_run(pid, run_id):
+    """Start one prepared run after an explicit human confirmation."""
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    payload = request.get_json(silent=True) or {}
+    if payload.get('confirm') is not True:
+        return jsonify({'error': '启动 WES run 需要 confirm=true'}), 400
+    from modules.workflows.runs import get_workflow_run
+    from modules.workflows.registry import get_workflow
+    from modules.workflows.nextflow import NextflowExecutor, WorkflowNotConfiguredError
+    run = get_workflow_run(run_id, pid)
+    if not run:
+        return jsonify({'error': 'WES run 不存在'}), 404
+    if run.get('status') != 'prepared':
+        return jsonify({'error': f"当前状态不可启动: {run.get('status')}", 'run': run}), 409
+    workflow = get_workflow(run.get('workflow_key'))
+    launch = run.get('launch') or {}
+    if not workflow or not launch:
+        return jsonify({'error': 'WES run 缺少可执行的 launch bundle'}), 422
+    executor = NextflowExecutor()
+    try:
+        spec = executor.prepare(
+            workflow, pid, run_id, run['manifest_id'], launch.get('work_dir', ''),
+            launch.get('results_dir', ''), samplesheet_path=launch.get('samplesheet_path', ''),
+            profile=launch.get('profile') or Config.WES_NEXTFLOW_PROFILE,
+            stdout_path=launch.get('stdout_path', ''), stderr_path=launch.get('stderr_path', ''),
+            intervals_path=launch.get('intervals_path', ''),
+            params_file_path=launch.get('params_file_path', ''),
+            input_type=launch.get('input_type', ''),
+            reference_bundle_id=launch.get('reference_bundle_id', ''),
+            capture_bed_id=launch.get('capture_bed_id', ''),
+        )
+        runtime = executor.launch(spec, project_id=pid)
+    except (ValueError, WorkflowNotConfiguredError) as exc:
+        return jsonify({'error': str(exc), 'run': run}), 409
+    return jsonify({'run': runtime.get('run'), 'runtime': {
+        key: value for key, value in runtime.items() if key != 'process'
+    }, 'message': 'Nextflow 已启动；可通过 run 查询状态和日志。'}), 202
+
+
+@api_bp.route('/projects/<pid>/wes/runs/<run_id>/cancel', methods=['POST'])
+def cancel_wes_run(pid, run_id):
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    payload = request.get_json(silent=True) or {}
+    if payload.get('confirm') is not True:
+        return jsonify({'error': '取消 WES run 需要 confirm=true'}), 400
+    from modules.workflows.nextflow import NextflowExecutor
+    run = NextflowExecutor.cancel(run_id, pid)
+    if not run:
+        return jsonify({'error': 'WES run 不存在'}), 404
+    return jsonify({'run': run, 'message': '已请求停止 WES 进程；下一次状态查询会确认最终状态。'}), 202
+
+
+@api_bp.route('/projects/<pid>/wes/runs/<run_id>/resume', methods=['POST'])
+def resume_wes_run(pid, run_id):
+    """Resume a failed/interrupted/cancelled local run with Nextflow -resume."""
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    payload = request.get_json(silent=True) or {}
+    if payload.get('confirm') is not True:
+        return jsonify({'error': '恢复 WES run 需要 confirm=true'}), 400
+    from modules.workflows.runs import get_workflow_run
+    from modules.workflows.registry import get_workflow
+    from modules.workflows.nextflow import NextflowExecutor, WorkflowNotConfiguredError
+    run = get_workflow_run(run_id, pid)
+    if not run:
+        return jsonify({'error': 'WES run 不存在'}), 404
+    if run.get('status') not in {'failed', 'interrupted', 'cancelled'}:
+        return jsonify({'error': f"当前状态不可恢复: {run.get('status')}", 'run': run}), 409
+    workflow = get_workflow(run.get('workflow_key'))
+    launch = run.get('launch') or {}
+    if not workflow or not launch:
+        return jsonify({'error': 'WES run 缺少可恢复的 launch bundle'}), 422
+    executor = NextflowExecutor()
+    try:
+        spec = executor.prepare(
+            workflow, pid, run_id, run['manifest_id'], launch.get('work_dir', ''),
+            launch.get('results_dir', ''), samplesheet_path=launch.get('samplesheet_path', ''),
+            profile=launch.get('profile') or Config.WES_NEXTFLOW_PROFILE,
+            stdout_path=launch.get('stdout_path', ''), stderr_path=launch.get('stderr_path', ''),
+            intervals_path=launch.get('intervals_path', ''),
+            params_file_path=launch.get('params_file_path', ''),
+            input_type=launch.get('input_type', ''),
+            resume=True,
+            reference_bundle_id=launch.get('reference_bundle_id', ''),
+            capture_bed_id=launch.get('capture_bed_id', ''),
+        )
+        runtime = executor.launch(
+            spec, project_id=pid,
+            expected_statuses=(run.get('status'),),
+        )
+    except (ValueError, WorkflowNotConfiguredError) as exc:
+        return jsonify({'error': str(exc), 'run': run}), 409
+    return jsonify({'run': runtime.get('run'), 'runtime': {
+        key: value for key, value in runtime.items() if key != 'process'
+    }, 'message': '已使用 Nextflow -resume 启动；可继续查询状态和日志。'}), 202
+
+
+@api_bp.route('/projects/<pid>/wes/runs/<run_id>/logs', methods=['GET'])
+def wes_run_logs(pid, run_id):
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    from modules.workflows.runs import get_workflow_run
+    run = get_workflow_run(run_id, pid)
+    if not run:
+        return jsonify({'error': 'WES run 不存在'}), 404
+    stream = request.args.get('stream', 'stdout').strip().lower()
+    if stream not in {'stdout', 'stderr'}:
+        return jsonify({'error': 'stream 必须为 stdout 或 stderr'}), 400
+    try:
+        tail_bytes = max(1, min(int(request.args.get('tail_bytes', '65536')), 1024 * 1024))
+    except ValueError:
+        return jsonify({'error': 'tail_bytes 必须是整数'}), 400
+    path = run.get('stdout_path') if stream == 'stdout' else run.get('stderr_path')
+    run_dir = os.path.realpath(str(run.get('run_dir') or ''))
+    try:
+        real_log_path = os.path.realpath(str(path or ''))
+    except (OSError, ValueError):
+        return jsonify({'error': '日志路径无效'}), 400
+    if not run_dir or not real_log_path.startswith(run_dir + os.sep):
+        return jsonify({'error': '日志路径不在当前 WES run 目录内'}), 403
+    path = real_log_path
+    if not path or not os.path.isfile(path):
+        return jsonify({'run_id': run_id, 'stream': stream, 'text': ''})
+    try:
+        with open(path, 'rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - tail_bytes))
+            content = handle.read().decode('utf-8', errors='replace')
+    except OSError as exc:
+        return jsonify({'error': f'日志读取失败: {exc}'}), 500
+    return jsonify({'run_id': run_id, 'stream': stream, 'text': content})
+
+
+@api_bp.route('/projects/<pid>/wes/preflight', methods=['POST'])
+def wes_preflight(pid):
+    """Validate and version a WES manifest; does not launch a workflow."""
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    payload = request.get_json(silent=True) or {}
+    workflow_key = str(payload.get('workflow_key', '') or '').strip()
+    if not workflow_key:
+        return jsonify({'error': '缺少 workflow_key'}), 400
+
+    manifest = payload.get('manifest')
+    if manifest is None:
+        manifest_path = str(payload.get('manifest_path', '') or '').strip()
+        if not manifest_path:
+            return jsonify({'error': '需要 manifest 或 manifest_path'}), 400
+        if not os.path.isabs(manifest_path):
+            manifest_path = os.path.join(Config.project_dir(pid), manifest_path)
+        in_project = _validate_project_file_path(manifest_path, pid)
+        if not in_project:
+            try:
+                manifest_path = Config.validate_wes_source_path(manifest_path)
+            except ValueError:
+                return jsonify({'error': 'manifest_path 必须位于项目目录或管理员配置的 WES_SOURCE_ROOTS'}), 400
+        try:
+            from modules.workflows.preflight import load_manifest_file
+            manifest = load_manifest_file(manifest_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return jsonify({'error': f'manifest 读取失败: {exc}'}), 400
+
+    # Lab users select a stable capture-kit profile; the server resolves its
+    # immutable path.  Legacy/ad-hoc manifests still have to provide a path
+    # explicitly and remain blocked at production launch unless catalogued.
+    capture_profile = None
+    if isinstance(manifest, dict):
+        capture_id = str(manifest.get('capture_bed_id', '') or '').strip()
+        if capture_id:
+            from modules.workflows.references import get_capture_kit_profile
+            capture_profile = get_capture_kit_profile(capture_id)
+            calling = ((capture_profile or {}).get('assets') or {}).get('calling')
+            if calling:
+                supplied = str(manifest.get('capture_bed_path', '') or '').strip()
+                catalog_path = calling.get('file_path', '')
+                if supplied and os.path.realpath(supplied) != os.path.realpath(catalog_path):
+                    return jsonify({'valid': False, 'errors': [
+                        'capture_bed_path 与所选 capture kit profile 不一致'
+                    ], 'warnings': []}), 422
+                manifest = dict(manifest)
+                manifest['capture_bed_path'] = catalog_path
+
+    from modules.workflows.preflight import validate_manifest
+    result = validate_manifest(
+        manifest,
+        project_dir=Config.project_dir(pid),
+        workflow_key=workflow_key,
+        require_files=bool(payload.get('check_files', True)),
+        source_roots=Config.wes_source_roots(),
+        content_checks=bool(payload.get('check_content', False)),
+    )
+    if capture_profile and not capture_profile.get('production_allowed'):
+        result.warnings.append(
+            f"capture kit profile {capture_profile['capture_kit_id']} 仅为 "
+            f"{capture_profile.get('status')}，可以预检但不能启动真实 run"
+        )
+    response = result.to_dict()
+    if not result.valid:
+        return jsonify(response), 422
+
+    from modules.workflows.storage import register_manifest
+    registered = register_manifest(pid, result.normalized_manifest, status='validated',
+                                  validation=response)
+    response['manifest_id'] = registered['id']
+    response['manifest_version'] = registered['version']
+    response['manifest_checksum'] = registered['checksum']
+    response['message'] = 'WES manifest 已通过预检查并登记；尚未启动外部工作流。'
+    return jsonify(response), 201
+
+
 # ============ Pipeline Run API ============
 
 @api_bp.route('/projects/<pid>/pipeline-runs', methods=['POST'])
@@ -825,7 +1335,7 @@ def create_pipeline_run(pid):
         for key, val in params.items():
             if key not in ('qc', 'normalize', 'hvg', 'dimred', 'batch_correct',
                           'clustering', 'subcluster', 'qc_reassess', 'annotation', 'deg',
-                          'sc_cell_deg', 'sc_cell_go', 'sc_pseudobulk_deg', 'trajectory', 'sc_timecourse', 'proportion', 'cell_communication', 'sc_csv_export',
+                          'sc_cell_deg', 'sc_cell_go', 'sc_pseudobulk_deg', 'trajectory', 'sc_timecourse', 'proportion', 'cell_communication',
                           'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca',
                           'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
                           'bulk_deg_integration', 'convert_10x'):

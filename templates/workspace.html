@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }} - AI 主工作台{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/workspace.css') }}">
+{% endblock %}
+
+{% block content %}
+<div class="workspace-page">
+    <div class="workspace-topbar">
+        <div class="workspace-title">
+            <a class="btn btn-sm btn-outline-secondary" href="/projects/{{ project.id }}" title="返回项目详情">←</a>
+            <div>
+                <h1>{{ project.name }} <span class="badge text-bg-light align-middle" style="font-size:.62rem;">AI 工作台</span></h1>
+                <p>{{ project.description or '用自然语言组织分析、确认执行并追踪结果。' }}</p>
+            </div>
+        </div>
+        <div class="workspace-top-actions">
+            <span class="workspace-status"><span id="workspace-status-dot" class="workspace-status-dot"></span><span id="workspace-model-status">正在读取 AI 配置…</span></span>
+            <span class="badge text-bg-light" style="font-size:.68rem;">运行中 {{ active_task_count }} 个任务</span>
+            <a class="btn btn-sm btn-outline-secondary" href="/settings/ai">AI API 设置</a>
+            <a class="btn btn-sm btn-outline-primary" href="/projects/{{ project.id }}/upload">上传数据</a>
+        </div>
+    </div>
+
+    <div class="workspace-grid">
+        <aside class="workspace-panel workspace-sidebar" aria-label="会话与项目资产">
+            <div class="workspace-panel-header">
+                <h2>工作台导航</h2>
+                <small>当前项目</small>
+            </div>
+            <div class="workspace-sidebar-body">
+                <div class="workspace-nav-label">会话</div>
+                <div class="workspace-session">
+                    <span class="workspace-session-icon">AI</span>
+                    <span class="text-truncate">当前分析会话</span>
+                </div>
+
+                <div class="workspace-nav-label mt-3">快捷动作</div>
+                <button type="button" class="workspace-quick-action" data-workspace-prompt="查看当前项目状态，告诉我下一步建议">查看项目状态</button>
+                <button type="button" class="workspace-quick-action" data-workspace-prompt="检查当前数据文件和实验设计，指出缺少的字段或参考资源">检查数据设计</button>
+                <button type="button" class="workspace-quick-action" data-workspace-prompt="请根据当前项目情况给出一份分析计划，先不要执行">生成分析计划</button>
+                <button type="button" class="workspace-quick-action" data-workspace-prompt="列出当前可用的分析模块，并说明它们的前置条件">查看可用模块</button>
+
+                <div class="workspace-divider"></div>
+                <div class="workspace-nav-label">已上传文件 <span class="badge text-bg-light">{{ uploads|length }}</span></div>
+                {% if uploads %}
+                    {% for file in uploads[:10] %}
+                    <div class="workspace-file" title="{{ file.name }}">
+                        <span class="workspace-file-name">{{ file.name }}</span>
+                        <span class="workspace-file-size">{{ file.size_mb }} MB</span>
+                    </div>
+                    {% endfor %}
+                    {% if uploads|length > 10 %}<div class="workspace-empty">还有 {{ uploads|length - 10 }} 个文件</div>{% endif %}
+                {% else %}
+                    <div class="workspace-empty">尚未上传数据</div>
+                {% endif %}
+            </div>
+        </aside>
+
+        <main class="workspace-panel workspace-chat" aria-label="AI 对话与执行时间线">
+            <div class="workspace-chat-header">
+                <div>
+                    <h2>AI 分析执行台</h2>
+                    <p>先理解项目，再提出计划；写操作始终需要确认。</p>
+                </div>
+                <div class="workspace-chat-model" id="workspace-model-badge">模型读取中</div>
+            </div>
+            <div class="workspace-messages" id="workspace-messages">
+                <div class="workspace-welcome">
+                    <h3>从你的分析目标开始</h3>
+                    <p>我可以读取项目状态、检查输入、解释已有结果，并在你确认后提交分析任务。WES 已提供准备与结果入口；在参考资源和科学验证通过前，执行器仍保持关闭。</p>
+                </div>
+            </div>
+            <div class="workspace-quickbar" aria-label="对话快捷操作">
+                <button type="button" class="workspace-chip" data-workspace-prompt="查看当前项目状态，告诉我下一步建议">项目状态</button>
+                <button type="button" class="workspace-chip" data-workspace-prompt="检查当前 h5ad 的聚类、嵌入和注释列">检查 h5ad</button>
+                <button type="button" class="workspace-chip" data-workspace-prompt="帮我规划一个目标驱动的参数优化实验，但先不要执行">参数优化</button>
+                <button type="button" class="workspace-chip" data-workspace-prompt="请先读取当前数据特征，为下一步分析推荐方法、分组和完整参数，先不要执行">方法推荐</button>
+            </div>
+            <div class="workspace-composer">
+                <textarea id="workspace-input" class="workspace-input form-control" rows="1" placeholder="描述你的分析目标，Enter 发送，Shift+Enter 换行"></textarea>
+                <button type="button" id="workspace-send" class="workspace-send btn btn-primary" onclick="workspaceSend()">发送</button>
+            </div>
+        </main>
+
+        <aside class="workspace-panel workspace-context" aria-label="项目上下文和分析窗口">
+            <div class="workspace-panel-header">
+                <div>
+                    <h2>项目上下文</h2>
+                    <small>当前分析：<span id="workspace-active-assay">单细胞 RNA</span></small>
+                </div>
+                <button type="button" id="workspace-clear" class="btn btn-sm btn-outline-secondary" title="清空当前项目聊天">清空</button>
+            </div>
+            <div class="workspace-context-tabs">
+                <button type="button" class="workspace-context-tab active" data-context-tab="assays">分析窗口</button>
+                <button type="button" class="workspace-context-tab" data-context-tab="context">状态</button>
+                <button type="button" class="workspace-context-tab" data-context-tab="tasks">任务</button>
+            </div>
+            <div class="workspace-context-body">
+                <div class="workspace-context-view active" data-view="assays">
+                    <div class="workspace-nav-label">可用与预留能力</div>
+                    {% for assay in assays %}
+                    <div class="workspace-card {{ assay.accent }}" data-assay="{{ assay.key }}" data-title="{{ assay.title }}" data-prompt="{{ assay.prompt }}">
+                        <h3>
+                            <span>{{ assay.title }}</span>
+                            <span class="workspace-card-badge {{ assay.status }}">{{ '可用' if assay.status == 'available' else '规划中' }}</span>
+                        </h3>
+                        <p>{{ assay.description }}</p>
+                        <div class="workspace-card-actions">
+                            <button type="button" class="btn btn-sm {{ 'btn-outline-primary' if assay.status == 'available' else 'btn-outline-warning' }}" data-select-assay="{{ assay.key }}">
+                                {{ '在 AI 中开始' if assay.status == 'available' else '查看准备要求' }}
+                            </button>
+                            {% if assay.href %}<a class="btn btn-sm btn-light" href="/projects/{{ assay.href }}">专家模式</a>{% endif %}
+                        </div>
+                    </div>
+                    {% endfor %}
+                    <div class="alert alert-light border small py-2 px-2 mt-3 mb-0" style="font-size:.68rem;">
+                        WES 可登记输入、审阅运行和查看结果；ATAC 仍是预留位。WES 写操作仍需明确确认。
+                    </div>
+                </div>
+
+                <div class="workspace-context-view" data-view="context">
+                    <div class="workspace-card indigo">
+                        <h3>当前分析基线</h3>
+                        <p id="workspace-baseline">正在读取…</p>
+                    </div>
+                    <div class="workspace-card">
+                        <h3>Agent 状态</h3>
+                        <p id="workspace-agent-jobs">正在读取…</p>
+                    </div>
+                    <div class="workspace-card amber">
+                        <h3>数据安全提示</h3>
+                        <p>外部模型默认只接收结构化摘要，不上传 FASTQ、BAM、CRAM 或全量 VCF。</p>
+                    </div>
+                </div>
+
+                <div class="workspace-context-view" data-view="tasks">
+                    <div class="workspace-nav-label">最近任务</div>
+                    {% if recent_tasks %}
+                        {% for task in recent_tasks %}
+                        <div class="workspace-task">
+                            <a class="workspace-task-title text-decoration-none" href="/projects/{{ project.id }}/task/{{ task.id }}">{{ task.module_label }}</a>
+                            <div class="workspace-task-meta"><span>{{ task.status_label }}</span><span>{{ task.progress }}%</span></div>
+                            {% if task.status in ['pending', 'running'] %}<div class="workspace-task-progress"><span style="width:{{ task.progress }}%"></span></div>{% endif %}
+                            {% if task.progress_message %}<div class="text-muted mt-1" style="font-size:.63rem;">{{ task.progress_message }}</div>{% endif %}
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="workspace-empty">暂无分析任务</div>
+                    {% endif %}
+                </div>
+            </div>
+        </aside>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+window.WORKSPACE_CONFIG = { projectId: {{ project.id|tojson }} };
+</script>
+<script src="{{ url_for('static', filename='js/workspace.js') }}"></script>
+{% endblock %}

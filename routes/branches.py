@@ -296,7 +296,7 @@ def run_branch(pid, branch_id):
         try:
             current_input = branch.parent_adata_path
             for mod_name in modules_list:
-                params = cleaned_params_by_module.get(mod_name, {})
+                params = dict(cleaned_params_by_module.get(mod_name, {}) or {})
                 cls = MODULE_REGISTRY[mod_name]
 
                 task = AnalysisTask(
@@ -305,6 +305,8 @@ def run_branch(pid, branch_id):
                     params_json=json.dumps(params, ensure_ascii=False),
                     branch_id=branch.id,
                 )
+                params.setdefault('_analysis_id', task.id)
+                task.params_json = json.dumps(params, ensure_ascii=False)
                 task.save()
                 task.mark_running()
                 current_task = task
@@ -334,6 +336,7 @@ def run_branch(pid, branch_id):
                     raise ValueError(f"模块 {mod_name}：{error_message}")
 
                 register_task_outputs(task, branch.project_id, branch_dir, result)
+                output_adata = result.get('output_adata') or output_adata
                 task.mark_completed(output_adata, json.dumps(summary, ensure_ascii=False, default=str))
                 current_input = output_adata
                 current_task = None

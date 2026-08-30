@@ -7,13 +7,14 @@
         <p class="text-muted mb-0">{{ project.description }}</p>
     </div>
     <div>
+        <a href="/projects/{{ project.id }}/workspace" class="btn btn-primary btn-sm">进入 AI 主工作台</a>
         <a href="/projects/{{ project.id }}/upload" class="btn btn-primary btn-sm">上传数据</a>
         <a href="/projects/{{ project.id }}/results" class="btn btn-outline-primary btn-sm">全部结果</a>
     </div>
 </div>
 
 <div class="row mb-4">
-    <div class="col-md-6">
+    <div class="col-md-4">
         <a href="/projects/{{ project.id }}/sc-analysis" class="text-decoration-none">
             <div class="card p-4 h-100" style="border-left: 4px solid #1a237e;">
                 <h5 class="text-dark mb-2">单细胞转录组分析</h5>
@@ -21,11 +22,19 @@
             </div>
         </a>
     </div>
-    <div class="col-md-6">
+    <div class="col-md-4">
         <a href="/projects/{{ project.id }}/bulk-analysis" class="text-decoration-none">
             <div class="card p-4 h-100" style="border-left: 4px solid #e53935;">
                 <h5 class="text-dark mb-2">Bulk RNA-seq 分析</h5>
                 <p class="text-muted small mb-0">质控 → 标准化 → 差异表达 → PCA/UMAP → 热图（支持 Excel 导入）</p>
+            </div>
+        </a>
+    </div>
+    <div class="col-md-4">
+        <a href="/projects/{{ project.id }}/wes" class="text-decoration-none">
+            <div class="card p-4 h-100" style="border-left: 4px solid #f59e0b;">
+                <h5 class="text-dark mb-2">WES 外显子组分析</h5>
+                <p class="text-muted small mb-0">输入预检 → Sarek 运行 → 工件归档 → 科学验证</p>
             </div>
         </a>
     </div>
@@ -301,6 +310,18 @@ function loadAdataInfo() {
     background: #eef2ff; color: #334155; border: 1px solid #c7d2fe;
     max-width: 100%;
 }
+.chat-message-attachments {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 7px; max-width: 92%; margin-top: 7px;
+}
+.chat-attachment-card {
+    background: #fff; border: 1px solid #e1e5ee; border-radius: 8px;
+    overflow: hidden; padding-bottom: 5px;
+}
+.chat-attachment-card > a:first-child { display: block; }
+.chat-attachment-card img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #f4f6fa; }
+.chat-attachment-caption { color: #46516a; font-size: 10px; font-weight: 600; padding: 4px 6px 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-attachment-download { color: #4054bd; display: inline-block; font-size: 10px; padding: 0 6px; }
 .chat-tool-call {
     background: #e3f2fd; padding: 7px 10px; border-radius: 8px;
     font-size: 11px; color: #1565c0; margin-bottom: 8px;
@@ -562,7 +583,7 @@ async function loadChatHistory() {
         if (!r.ok || data.error || !data.messages || data.messages.length === 0) return;
         document.getElementById('chat-messages').innerHTML = '';
         for (const msg of data.messages) {
-            addMessage(msg.role, msg.content || '');
+            addMessage(msg.role, msg.content || '', msg.attachments || []);
         }
     } catch (e) {
         addSystemNotice('历史记录加载失败: ' + e.message);
@@ -775,13 +796,36 @@ function formatChatTime() {
     return new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
 }
 
-function addMessage(role, content) {
+function addMessageAttachments(container, attachments) {
+    if (!container || !Array.isArray(attachments)) return;
+    const gallery = document.createElement('div');
+    gallery.className = 'chat-message-attachments';
+    for (const attachment of attachments) {
+        if (!attachment || typeof attachment.url !== 'string' || !attachment.url.startsWith('/api/projects/')) continue;
+        const card = document.createElement('div');
+        card.className = 'chat-attachment-card';
+        const link = document.createElement('a');
+        link.href = attachment.url; link.target = '_blank'; link.rel = 'noopener'; link.title = '打开原图';
+        const image = document.createElement('img');
+        image.src = attachment.url; image.alt = attachment.label || '分析结果图'; image.loading = 'lazy';
+        link.appendChild(image);
+        const caption = document.createElement('div');
+        caption.className = 'chat-attachment-caption'; caption.textContent = attachment.label || attachment.category || '分析结果图';
+        const download = document.createElement('a');
+        download.href = attachment.url; download.download = ''; download.className = 'chat-attachment-download'; download.textContent = '下载';
+        card.appendChild(link); card.appendChild(caption); card.appendChild(download); gallery.appendChild(card);
+    }
+    if (gallery.children.length) container.appendChild(gallery);
+}
+
+function addMessage(role, content, attachments) {
     const div = document.createElement('div');
     div.className = 'chat-msg ' + role;
     const label = role === 'user' ? '你' : (role === 'system' ? '系统' : 'AI');
     div.innerHTML =
         '<div class="chat-meta">' + label + ' · ' + formatChatTime() + '</div>' +
         '<div class="chat-bubble">' + escapeHtml(content) + '</div>';
+    addMessageAttachments(div, attachments);
     document.getElementById('chat-messages').appendChild(div);
     div.scrollIntoView({ behavior: 'smooth' });
 }
@@ -958,8 +1002,8 @@ async function sendChat() {
         }
 
         // 显示回复
-        if (data.reply) {
-            addMessage('assistant', data.reply);
+        if (data.reply || (data.attachments && data.attachments.length)) {
+            addMessage('assistant', data.reply || '分析结果图片已生成：', data.attachments || []);
         }
     } catch (e) {
         hideTyping();

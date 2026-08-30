@@ -8,9 +8,12 @@ import tempfile
 # filesystem.  Tests intentionally override the application setting so a
 # developer's production RUNTIME_TMP_DIR is never mixed with test artifacts.
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 默认测试临时目录必须位于仓库内可写、且不经过符号链接的位置：
+# data 是指向实验室数据卷的符号链接（只读挂载时 pytest 解析真实路径后会
+# 因只读而失败），因此测试产物默认放在仓库根目录的 .test_tmp/ 下。
 _test_tmp_root = os.path.abspath(os.environ.get(
     'PYTEST_RUNTIME_TMP_DIR',
-    os.path.join(_project_root, 'data', 'runtime_tmp', 'pytest'),
+    os.path.join(_project_root, '.test_tmp', 'pytest'),
 ))
 _test_numba_cache = os.path.abspath(os.environ.get(
     'PYTEST_NUMBA_CACHE_DIR', os.path.join(_test_tmp_root, 'numba_cache'),
@@ -18,7 +21,19 @@ _test_numba_cache = os.path.abspath(os.environ.get(
 _test_mpl_cache = os.path.abspath(os.environ.get(
     'PYTEST_MPLCONFIGDIR', os.path.join(_test_tmp_root, 'mplconfig'),
 ))
-for _directory in (_test_tmp_root, _test_numba_cache, _test_mpl_cache):
+# Tests that do not use the project fixture still open the platform database.
+# Keep that default database on the test volume; the production .env continues
+# to point at the lab data disk.  This also makes pytest work in a restricted
+# CI/sandbox where the lab mount is readable but not writable.
+_test_data_root = os.path.abspath(os.environ.get(
+    'PYTEST_PLATFORM_DATA_DIR', os.path.join(_test_tmp_root, 'platform-data'),
+))
+_test_db_path = os.path.abspath(os.environ.get(
+    'PYTEST_PLATFORM_DB_PATH', os.path.join(_test_tmp_root, 'platform-test.db'),
+))
+os.environ.setdefault('DATA_DIR', _test_data_root)
+os.environ.setdefault('DB_PATH', _test_db_path)
+for _directory in (_test_tmp_root, _test_numba_cache, _test_mpl_cache, _test_data_root):
     os.makedirs(_directory, exist_ok=True)
 
 os.environ['RUNTIME_TMP_DIR'] = _test_tmp_root

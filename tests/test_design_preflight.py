@@ -75,3 +75,97 @@ def test_proportion_preflight_marks_missing_sample_replicates_exploratory():
     assert result["status"] == "exploratory"
     sample_check = next(check for check in result["checks"] if check["name"] == "样本级组成设计")
     assert sample_check["status"] == "warning"
+def _sc_deg_adata():
+    """Single-cell AnnData without biological sample/condition metadata."""
+    return ad.AnnData(
+        X=np.ones((12, 3)),
+        obs=pd.DataFrame({
+            "batch": ["b1"] * 6 + ["b2"] * 6,
+            "leiden": ["0", "1"] * 6,
+            "celltype": ["T", "B"] * 6,
+        }, index=[f"cell_{i}" for i in range(12)]),
+        var=pd.DataFrame(index=["g1", "g2", "g3"]),
+    )
+
+
+def test_sc_cell_deg_preflight_blocks_missing_condition_column():
+    from modules.design_preflight import build_design_preflight
+
+    result = build_design_preflight(
+        _sc_deg_adata(), "sc_cell_deg",
+        {"comparison_type": "condition", "condition_key": "condition"},
+    )
+
+    assert result["status"] == "blocked"
+    assert any(check["name"] == "条件列" and check["status"] == "blocked"
+               for check in result["checks"])
+    assert any("缺少条件列" in message for message in result["blockers"])
+    assert "当前可用分组列" in result["blockers"][0] or "可用分组列" in result["blockers"][0]
+
+
+def test_sc_cell_deg_preflight_blocks_missing_sample_column_for_sample_modes():
+    from modules.design_preflight import build_design_preflight
+
+    result = build_design_preflight(
+        _sc_deg_adata(), "sc_cell_deg",
+        {"comparison_type": "between_samples_all_cells", "sample_key": "sample_id"},
+    )
+
+    assert result["status"] == "blocked"
+    assert any(check["name"] == "样本列" and check["status"] == "blocked"
+               for check in result["checks"])
+
+
+def test_sc_pseudobulk_preflight_blocks_missing_sample_and_condition():
+    from modules.design_preflight import build_design_preflight
+
+    result = build_design_preflight(
+        _sc_deg_adata(), "sc_pseudobulk_deg",
+        {"sample_key": "sample_id", "condition_key": "condition",
+         "cluster_key": "leiden"},
+    )
+
+    assert result["status"] == "blocked"
+    names = {check["name"] for check in result["checks"] if check["status"] == "blocked"}
+    assert {"样本列", "条件列"} <= names
+    assert any("缺少样本列" in message for message in result["blockers"])
+    assert any("缺少条件列" in message for message in result["blockers"])
+
+
+def test_sc_pseudobulk_preflight_warns_when_sample_key_is_technical_batch():
+    from modules.design_preflight import build_design_preflight
+
+    result = build_design_preflight(
+        _sc_deg_adata(), "sc_pseudobulk_deg",
+        {"sample_key": "batch", "condition_key": "condition",
+         "cluster_key": "leiden"},
+    )
+
+    sample_checks = [check for check in result["checks"] if check["name"] == "样本列"]
+    assert any(check["status"] == "warning" and "技术 batch" in check["message"]
+               for check in sample_checks)
+    assert result["status"] == "blocked"  # condition still missing
+
+
+def test_sc_pseudobulk_preflight_passes_with_real_sample_design():
+    from modules.design_preflight import build_design_preflight
+
+    adata = ad.AnnData(
+        X=np.ones((20, 3)),
+        obs=pd.DataFrame({
+            "sample_id": ["S1"] * 5 + ["S2"] * 5 + ["S3"] * 5 + ["S4"] * 5,
+            "condition": ["Ctrl"] * 10 + ["Treat"] * 10,
+            "leiden": ["0", "1"] * 10,
+        }, index=[f"cell_{i}" for i in range(20)]),
+        var=pd.DataFrame(index=["g1", "g2", "g3"]),
+    )
+
+    result = build_design_preflight(
+        adata, "sc_pseudobulk_deg",
+        {"sample_key": "sample_id", "condition_key": "condition",
+         "cluster_key": "leiden", "analysis_scope": "per_cluster"},
+    )
+
+    assert result["status"] == "ready"
+    assert result["recommended_params"]["sample_key"] == "sample_id"
+

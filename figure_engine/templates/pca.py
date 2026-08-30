@@ -42,7 +42,7 @@ def _confidence_ellipse(ax, x, y, color, level=0.95):
 
 
 class NaturePCA:
-    """固定的 PCA publication 模板。"""
+    """固定的样本级 PCA publication 模板。"""
 
     plot_type = 'pca'
 

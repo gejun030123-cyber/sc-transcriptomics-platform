@@ -1,0 +1,15 @@
+[Unit]
+Description=NAT123 Tunnel Client for SC Transcriptomics Platform
+After=network-online.target sc-transcriptomics-platform.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oelab
+WorkingDirectory=/home/oelab/data/sc-transcriptomics-platform/vendor/nat123/client
+ExecStart=/usr/bin/mono /home/oelab/data/sc-transcriptomics-platform/vendor/nat123/client/nat123linux.sh service
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

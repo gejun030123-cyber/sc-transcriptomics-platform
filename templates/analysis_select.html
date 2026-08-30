@@ -220,6 +220,36 @@
                     {% elif not enrichment_deg_sources %}
                     <small class="text-danger d-block mt-1">未找到可用 DEG 结果。请先完成差异表达分析，或使用下方自定义基因列表。</small>
                     {% endif %}
+                    {% elif module.name == 'sc_cell_go' and param.key == 'deg_source_task_id' %}
+                    <select name="{{ param.key }}" class="form-select">
+                        <option value="">-- 请选择一个已完成的 DEG 任务 --</option>
+                        {% for source in sc_enrichment_deg_sources %}
+                        <option value="{{ source.task_id }}" data-clusters="{{ source.clusters|tojson|forceescape }}" {% if source.task_id == param.default %}selected{% endif %}>
+                            {{ source.label }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                    {% if sc_enrichment_deg_sources %}
+                    <small class="text-primary d-block mt-1">富集会绑定该任务记录的内部 DEG 表，并核对 AnnData 版本；不会按 CSV 修改时间自动选择来源。</small>
+                    {% else %}
+                    <small class="text-danger d-block mt-1">未找到已完成且可用的单细胞 DEG 任务。请先运行细胞级探索性比较或样本级 pseudobulk DEG。</small>
+                    {% endif %}
+                    {% elif module.name == 'sc_cell_go' and param.key == 'target_clusters' %}
+                    <div id="sc-go-cluster-picker" class="border rounded p-2" style="max-height:180px;overflow-y:auto;">
+                        <span class="text-muted small">请先选择 DEG 来源任务。</span>
+                    </div>
+                    {% elif module.name == 'virtual_ko' and param.key == 'base_grn_file' %}
+                    <select name="{{ param.key }}" class="form-select">
+                        <option value="">-- 选择上传的 base GRN 文件 --</option>
+                        {% for bf in base_grn_files %}
+                        <option value="{{ bf.path }}" {% if bf.path == param.default %}selected{% endif %}>{{ bf.name }}</option>
+                        {% endfor %}
+                    </select>
+                    {% if base_grn_files %}
+                    <small class="text-primary d-block mt-1">检测到 {{ base_grn_files|length }} 个可用的 base GRN 文件（.parquet/.csv/.pickle/.pkl 等）。</small>
+                    {% else %}
+                    <small class="text-danger d-block mt-1">uploads 中未找到 base GRN 文件。可先在上传页上传，或将“base GRN 来源”切换为内置人类 promoter base GRN。</small>
+                    {% endif %}
                     {% elif param.type == 'select' %}
                     <select name="{{ param.key }}" class="form-select">
                         {% for opt in param.options %}
@@ -243,6 +273,17 @@
                     {% elif param.type == 'multiselect' %}
                     <div class="multiselect-group border rounded p-2" data-key="{{ param.key }}" data-api="{{ param.api }}" style="max-height:180px;overflow-y:auto;">
                         <span class="text-muted small multiselect-loading">加载中...</span>
+                    </div>
+                    {% elif param.type == 'static_multiselect' %}
+                    {% set selected_values = param.default.split(',') if param.default else [] %}
+                    <div class="multiselect-group border rounded p-2" data-key="{{ param.key }}" style="max-height:180px;overflow-y:auto;">
+                        {% for opt in param.options %}
+                        <label class="d-block small mb-1" style="cursor:pointer;">
+                            <input type="checkbox" name="{{ param.key }}" value="{{ opt }}" class="form-check-input me-1"
+                                   {% if opt in selected_values %}checked{% endif %}>
+                            {{ param.option_labels.get(opt, opt) if param.option_labels else opt }}
+                        </label>
+                        {% endfor %}
                     </div>
                     {% elif param.type == 'textarea' %}
                     <textarea name="{{ param.key }}" class="form-control" id="param-{{ param.key }}"
@@ -282,11 +323,11 @@
                     <small class="text-danger d-block mt-1">未找到可用的单个 DEG 比较，请先完成差异表达分析。</small>
                     {% endif %}
                     {% else %}
-                    <input type="text" name="{{ param.key }}" class="form-control{% if param.key in ('groupby', 'group_column', 'batch_key', 'cluster_key', 'color_by') %} groupby-field{% endif %}"
+                    <input type="text" name="{{ param.key }}" class="form-control{% if param.key in ('groupby', 'group_column', 'batch_key', 'cluster_key', 'color_by', 'sample_key', 'condition_key', 'timepoint_key', 'celltype_key', 'scope_key') %} groupby-field{% endif %}"
                            value="{{ param.default }}" data-key="{{ param.key }}"
-                           {% if param.key in ('groupby', 'group_column', 'batch_key', 'cluster_key', 'color_by') %}list="obs-columns-datalist"{% endif %}
-                           placeholder="{% if param.key in ('groupby', 'group_column', 'color_by') %}输入分组列名，选择文件后自动填充{% elif param.key == 'batch_key' %}输入批次列名{% else %}{{ param.default }}{% endif %}">
-                    {% if param.key in ('groupby', 'group_column', 'batch_key', 'cluster_key', 'color_by') %}
+                           {% if param.key in ('groupby', 'group_column', 'batch_key', 'cluster_key', 'color_by', 'sample_key', 'condition_key', 'timepoint_key', 'celltype_key', 'scope_key') %}list="obs-columns-datalist"{% endif %}
+                           placeholder="{% if param.key in ('groupby', 'group_column', 'color_by') %}输入分组列名，选择文件后自动填充{% elif param.key == 'batch_key' %}输入批次列名{% elif param.key in ('sample_key', 'condition_key', 'timepoint_key', 'celltype_key') %}选择文件后自动填充{% elif param.key == 'scope_key' %}输入范围列名（如 sample_id），留空=全部{% else %}{{ param.default }}{% endif %}">
+                    {% if param.key in ('groupby', 'group_column', 'batch_key', 'cluster_key', 'color_by', 'sample_key', 'condition_key', 'timepoint_key', 'celltype_key', 'scope_key') %}
                     <select class="form-select form-select-sm mt-1 obs-column-select"
                             data-target-key="{{ param.key }}">
                         <option value="">-- 从 obs 列选择并填入 {{ param.label }} --</option>
@@ -650,7 +691,16 @@ document.querySelectorAll('.multiselect-group').forEach(async (group) => {
 });
 
 // 表单提交时注入 _visualization 和 _filters 配置
-document.querySelector('.param-form').addEventListener('submit', function() {
+document.querySelector('.param-form').addEventListener('submit', function(e) {
+    // 样本级 pseudobulk 与细胞级比较必须满足设计前提；preflight 为
+    // blocked 时直接运行必定失败，因此在浏览器端拦截并给出原因。
+    if (latestDesignPreflight && latestDesignPreflight.status === 'blocked'
+        && ['sc_cell_deg', 'sc_pseudobulk_deg'].includes(MODULE_NAME)) {
+        const blockers = (latestDesignPreflight.blockers || []).join('\n');
+        e.preventDefault();
+        alert('分析前检查未通过，任务无法运行：\n' + (blockers || '存在未满足的前提条件。'));
+        return;
+    }
     // 可视化配置
     let vizHidden = this.querySelector('input[name="_visualization"]');
     if (!vizHidden) {
@@ -719,6 +769,58 @@ const groupbyFields = document.querySelectorAll('.groupby-field');
 const obsColumnSelects = document.querySelectorAll('.obs-column-select');
 let activeObsColumnField = null;
 
+function updateSCEnrichmentClusterPicker() {
+    const sourceSelect = document.querySelector('select[name="deg_source_task_id"]');
+    const picker = document.getElementById('sc-go-cluster-picker');
+    if (!sourceSelect || !picker) return;
+    const selected = new Set(
+        Array.from(picker.querySelectorAll('input:checked')).map(input => input.value)
+    );
+    const option = sourceSelect.options[sourceSelect.selectedIndex];
+    let clusters = [];
+    try {
+        clusters = option && option.dataset.clusters ? JSON.parse(option.dataset.clusters) : [];
+    } catch (e) {
+        clusters = [];
+    }
+    picker.replaceChildren();
+    if (!sourceSelect.value) {
+        const hint = document.createElement('span');
+        hint.className = 'text-muted small';
+        hint.textContent = '请先选择 DEG 来源任务。';
+        picker.appendChild(hint);
+        return;
+    }
+    if (!clusters.length) {
+        const hint = document.createElement('span');
+        hint.className = 'text-warning small';
+        hint.textContent = '未从该 DEG 任务读取到 cluster；留空将按全部范围运行。';
+        picker.appendChild(hint);
+        return;
+    }
+    clusters.forEach(cluster => {
+        const label = document.createElement('label');
+        label.className = 'd-block small mb-1';
+        label.style.cursor = 'pointer';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.name = 'target_clusters';
+        checkbox.value = String(cluster);
+        checkbox.className = 'form-check-input me-1';
+        checkbox.checked = selected.has(String(cluster));
+        label.appendChild(checkbox);
+        label.appendChild(document.createTextNode(
+            String(cluster) === 'All' ? 'All（全体细胞范围）' : String(cluster)
+        ));
+        picker.appendChild(label);
+    });
+}
+
+document.querySelector('select[name="deg_source_task_id"]')?.addEventListener(
+    'change', updateSCEnrichmentClusterPicker,
+);
+updateSCEnrichmentClusterPicker();
+
 function renderObsColumnPicker(columns, errorMessage = '') {
     const picker = document.getElementById('obs-column-picker');
     const chips = document.getElementById('obs-column-chips');
@@ -775,7 +877,7 @@ function renderObsColumnPicker(columns, errorMessage = '') {
         button.title = '填入当前选中的分组参数';
         button.addEventListener('click', () => {
             const target = activeObsColumnField || Array.from(groupbyFields).find(
-                field => ['groupby', 'group_column', 'color_by'].includes(field.dataset.key)
+                field => ['groupby', 'group_column', 'color_by', 'scope_key'].includes(field.dataset.key)
             );
             if (!target) return;
             target.value = name;
@@ -1554,6 +1656,9 @@ document.getElementById('btn-reset-defaults').addEventListener('click', function
             el.value = el.defaultValue || '';
         }
     });
+    // 恢复默认后刷新“按条件显示/隐藏参数”与设计预检，避免残留旧联动状态
+    if (typeof updateConditionalParams === 'function') updateConditionalParams();
+    if (typeof scheduleDesignPreflight === 'function') scheduleDesignPreflight();
 });
 
 // === 嵌入式 AI 分析协作助手 ===

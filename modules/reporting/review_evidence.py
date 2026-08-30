@@ -3,7 +3,10 @@
 import os
 
 
-SC_REVIEW_MODULES = {"qc", "batch_correct", "clustering", "annotation", "deg", "proportion"}
+SC_REVIEW_MODULES = {
+    "qc", "dimred", "batch_correct", "clustering", "annotation", "deg", "proportion",
+    "sc_cell_deg", "sc_pseudobulk_deg", "sc_cell_go",
+}
 
 
 def _as_dict(obj):
@@ -72,10 +75,116 @@ def _qc_evidence(summary, names):
     else:
         checks.append(_check("细胞保留率", "pass", "QC 过滤比例处于常见复核范围。", f"{pct_removed}%"))
 
+    reason_summary = summary.get("removal_reasons") or summary
+    if reason_summary.get("unique_removed_total") is not None:
+        checks.append(_check(
+            "删除原因拆分", "pass",
+            "已记录低 UMI、低基因、高 MT/基因数/ribo/HB、doublet 等非互斥原因，并单独记录重叠。",
+            {
+                "unique_removed_total": reason_summary.get("unique_removed_total"),
+                "reason_overlap_cells": reason_summary.get("reason_overlap_cells", 0),
+            },
+        ))
+    else:
+        checks.append(_check("删除原因拆分", "review", "未记录逐项删除原因，无法判断 QC 与 Doublet 各自贡献。"))
+
+    doublets = summary.get("doublets") or summary.get("scrublet") or {}
+    doublet_method = str(doublets.get("method") or summary.get("effective_doublets_method") or "doublet").strip()
+    caller_label = {
+        "scrublet": "Scrublet",
+        "scdblfinder": "scDblFinder",
+        "sccomposite": "scComposite",
+        "doubletfinder": "DoubletFinder",
+    }.get(doublet_method.lower(), doublet_method)
+    if doublets.get("available") and doublets.get("by_batch"):
+        by_batch = doublets.get("by_batch")
+        detected_rates = [
+            item.get("detected_doublet_rate", item.get("doublet_rate"))
+            for item in by_batch.values() if isinstance(item, dict)
+        ]
+        low_rate = any(
+            rate is not None and float(rate) < 0.005 for rate in detected_rates
+        )
+        status = "review" if low_rate else "pass"
+        if doublet_method.lower() == "scrublet":
+            message = (
+                "Detected doublet rate is unusually low; inspect simulated score "
+                "distribution and automatic threshold."
+                if low_rate else
+                "已记录每个 batch 的评估细胞数、自动阈值、检测率、simulated doublet "
+                "score 分位数/直方图、detectable fraction 与估计总体 doublet rate。"
+            )
+        else:
+            message = (
+                "Detected doublet rate is unusually low; inspect caller-specific "
+                "scores and classifications."
+                if low_rate else
+                "已记录每个 batch 的评估细胞数、预测 doublet 数和 caller-specific "
+                "score/classification 证据。"
+            )
+        checks.append(_check(f"{caller_label} 统计", status, message, by_batch))
+    elif doublets.get("available"):
+        detected_rate = doublets.get("detected_doublet_rate", doublets.get("doublet_rate"))
+        low_rate = detected_rate is not None and float(detected_rate) < 0.005
+        status = "review" if low_rate else "pass"
+        if doublet_method.lower() == "scrublet":
+            message = (
+                "Detected doublet rate is unusually low; inspect simulated score "
+                "distribution and automatic threshold."
+                if low_rate else
+                "已记录全局 Scrublet 阈值、检测率与 simulated doublet score 证据。"
+            )
+        else:
+            message = (
+                "Detected doublet rate is unusually low; inspect caller-specific "
+                "scores and classifications."
+                if low_rate else
+                "已记录全局 caller-specific doublet 证据。"
+            )
+        checks.append(_check(f"{caller_label} 统计", status, message, doublets))
+    else:
+        checks.append(_check("双细胞统计", "review", "未找到双细胞预测统计。"))
+
+    method_provenance = summary.get("doublet_method_provenance") or {}
+    if method_provenance:
+        fallback = bool(method_provenance.get("fallback"))
+        checks.append(_check(
+            "双细胞方法溯源",
+            "warning" if fallback else "pass",
+            (
+                "请求的方法与实际方法不一致；本结果不应作为该 caller 的分析结论。"
+                if fallback else
+                "已记录用户请求的方法与实际运行的方法。"
+            ),
+            method_provenance,
+        ))
+
+    gene_change = summary.get("gene_count_change") or {}
+    if gene_change:
+        provenance = gene_change.get("gene_filter_provenance") or {}
+        provenance_status = provenance.get("status", "pass")
+        checks.append(_check(
+            "Gene 数变化", provenance_status,
+            gene_change.get("explanation", "已记录 QC 前后 adata.n_vars 变化来源。"),
+            gene_change,
+        ))
+
     if summary.get("novelty_median") is not None:
         checks.append(_check("复杂度指标", "pass", "已记录 novelty score 中位数。", summary.get("novelty_median")))
     else:
         checks.append(_check("复杂度指标", "review", "未记录 novelty score，中间结果仍需结合 QC 图复核。"))
+
+    n_ribo_genes = summary.get("n_ribo_genes_found")
+    if n_ribo_genes is None:
+        checks.append(_check("核糖体基因注释", "review", "未记录识别到的 RPL/RPS 基因数，无法确认 ribo% 是否可解释。"))
+    elif _number(n_ribo_genes, 0) == 0:
+        checks.append(_check(
+            "核糖体基因注释", "warning",
+            "未识别到 RPL/RPS 基因；ribo% 为 0 可能是注释失败，而非真实低核糖体比例。",
+            int(n_ribo_genes),
+        ))
+    else:
+        checks.append(_check("核糖体基因注释", "pass", "已识别到 RPL/RPS 基因并计算 ribo%。", int(n_ribo_genes)))
 
     if _has_file(names, "qc_filter_summary"):
         checks.append(_check("过滤前后图", "pass", "已生成过滤前后 QC 对比图。"))
@@ -90,20 +199,79 @@ def _qc_evidence(summary, names):
     return {"title": "QC 审批证据", "checks": checks}
 
 
+def _dimred_evidence(summary, names):
+    analytical_qc = summary.get("analytical_qc") or {}
+    checks = []
+    if not analytical_qc:
+        checks.append(_check("分析质量", "review", "未记录 Analytical QC，需要结合 PCA/UMAP 和参数人工复核。"))
+    else:
+        pca_input = next(
+            (item for item in analytical_qc.get("checks", []) if item.get("name") == "pca_input"),
+            None,
+        )
+        if pca_input:
+            status = "pass" if pca_input.get("status") == "pass" else "review"
+            checks.append(_check("PCA 输入策略", status, pca_input.get("message", "")))
+        for warning in analytical_qc.get("warnings", [])[:3]:
+            checks.append(_check("分析质量预警", "warning", warning))
+        if not analytical_qc.get("warnings"):
+            checks.append(_check("分析质量", "pass", "已生成独立的 Analytical QC 信息。"))
+
+    if _has_file(names, "umap", "batch"):
+        checks.append(_check("Batch UMAP", "pass", "已生成按 batch/sample 着色的 UMAP。"))
+    else:
+        checks.append(_check("Batch UMAP", "review", "未发现 Batch UMAP，需确认批次结构。"))
+
+    batch_mixing = summary.get("batch_mixing") or analytical_qc.get("batch_mixing")
+    if isinstance(batch_mixing, dict) and batch_mixing.get("status"):
+        checks.append(_check(
+            "Batch mixing quality",
+            batch_mixing.get("status", "review"),
+            batch_mixing.get("message", "需结合批次混合指标复核。"),
+            batch_mixing.get("value"),
+        ))
+    elif summary.get("batch_key"):
+        checks.append(_check(
+            "Batch mixing quality", "review",
+            "Batch UMAP 仅证明图已生成，尚未完成批次混合质量评价。",
+        ))
+    return {"title": "降维审批证据", "checks": checks}
+
+
 def _clustering_evidence(summary, names):
     cluster_keys = [k for k in summary if k.startswith("n_clusters_")]
     cluster_counts = [_number(summary.get(k), 0) for k in cluster_keys]
     primary = summary.get("primary_resolution") or summary.get("best_resolution")
+    primary_count = _number(summary.get("primary_cluster_count"))
     checks = []
 
     if not cluster_counts:
         checks.append(_check("Cluster 数量", "review", "summary 中没有 cluster 数量，需确认聚类是否完成。"))
     elif max(cluster_counts) < 2:
         checks.append(_check("Cluster 数量", "warning", "仅得到 1 个 cluster，通常不足以支持后续注释/DEG。", int(max(cluster_counts))))
-    elif max(cluster_counts) > 50:
-        checks.append(_check("Cluster 数量", "review", "cluster 数量较多，需确认是否过度分裂。", int(max(cluster_counts))))
+    elif (primary_count if primary_count is not None else max(cluster_counts)) > 50:
+        checks.append(_check(
+            "Cluster 数量", "review",
+            "主分辨率 cluster 数量较多，需确认是否过度分裂。",
+            int(primary_count if primary_count is not None else max(cluster_counts)),
+        ))
     else:
-        checks.append(_check("Cluster 数量", "pass", "cluster 数量处于可复核范围。", int(max(cluster_counts))))
+        count_value = primary_count if primary_count is not None else max(cluster_counts)
+        message = (
+            f"主分辨率 {primary} 共 {int(count_value)} 个 cluster。"
+            if primary is not None and primary_count is not None else
+            "cluster 数量处于可复核范围。"
+        )
+        checks.append(_check("Cluster 数量", "pass", message, int(count_value)))
+
+    counts_by_resolution = summary.get("cluster_counts_by_resolution") or {}
+    if counts_by_resolution:
+        checks.append(_check(
+            "各分辨率 Cluster 数",
+            "pass",
+            "已分别记录每个候选分辨率的 cluster 数，避免把最高分辨率误当作主结果。",
+            counts_by_resolution,
+        ))
 
     if primary:
         checks.append(_check("主分辨率", "pass", "已记录主分辨率，可作为下游默认 cluster。", primary))
@@ -124,6 +292,21 @@ def _clustering_evidence(summary, names):
         checks.append(_check("批次组成", "pass", "已有 cluster 批次组成图，可复核 batch 支配风险。"))
     else:
         checks.append(_check("批次组成", "review", "未发现 cluster 批次组成图，需结合 batch UMAP 复核。"))
+
+    overlap = summary.get("batch_overlap") or {}
+    if overlap.get("warnings"):
+        checks.append(_check(
+            "Batch-Cluster 重合",
+            "warning",
+            "；".join(overlap["warnings"]),
+            overlap.get("batch_dominated_cell_fraction"),
+        ))
+    elif overlap.get("valid"):
+        checks.append(_check(
+            "Batch-Cluster 重合",
+            "pass",
+            "未发现达到阈值的单一 batch 支配 cluster。",
+        ))
 
     return {"title": "聚类审批证据", "checks": checks}
 
@@ -237,16 +420,29 @@ def _annotation_evidence(summary, names):
             ))
 
     quality = summary.get("quality_evidence") or {}
-    suspect_doublet = _number(quality.get("n_suspect_doublet"), 0)
+    suspect_doublet = _number(
+        quality.get("n_qc_predicted_doublet", quality.get("n_suspect_doublet")), 0
+    )
+    mixture_signal = _number(quality.get("n_lineage_mixture_review"), 0)
     ambient_signal = _number(quality.get("n_ambient_signal"), 0)
     if suspect_doublet:
         checks.append(_check(
             "Doublet 证据", "warning",
-            "发现疑似双细胞/混合谱系信号；仅标记复核，不自动删除。",
-            int(suspect_doublet),
+            "继承 QC 实际双细胞 caller 的 predicted_doublet；annotation 未使用统一阈值重新判定。",
+            {"count": int(suspect_doublet), "source": quality.get("doublet_source")},
         ))
     else:
-        checks.append(_check("Doublet 证据", "pass", "未发现超过阈值的双谱系信号。"))
+        checks.append(_check(
+            "Doublet 证据", "pass",
+            "当前注释输入中没有 QC 双细胞 caller 保留的 predicted_doublet；Marker 混合未当作 Doublet。",
+            quality.get("doublet_source"),
+        ))
+    if mixture_signal:
+        checks.append(_check(
+            "谱系混合证据", "review",
+            "存在两个 Marker 模块同时较高的细胞；这是注释歧义/混合谱系复核信号，不是 Doublet 判定。",
+            int(mixture_signal),
+        ))
     if ambient_signal:
         checks.append(_check(
             "环境 RNA 证据", "review",
@@ -268,13 +464,21 @@ def _annotation_evidence(summary, names):
         checks.append(_check("注释版本", "review", "未记录 annotation_version，无法区分不同注释批次。"))
 
     state_evidence = summary.get("cell_state_evidence") or {}
-    state_counts = state_evidence.get("state_counts") or {}
-    if state_counts:
+    dominant_counts = (
+        state_evidence.get("dominant_state_counts")
+        or state_evidence.get("state_counts") or {}
+    )
+    multi_label_counts = state_evidence.get("multi_label_state_counts") or {}
+    if dominant_counts:
         checks.append(_check(
             "细胞状态分离",
             "pass",
-            "细胞状态与 cell_type 分开保存；一个细胞可同时带有多个状态标记。",
-            state_counts,
+            "细胞状态与 cell_type 分开保存；dominant state 仅用于浏览，multi-label 状态允许重叠。",
+            {
+                "dominant": dominant_counts,
+                "multi_label": multi_label_counts,
+                "n_multiple": state_evidence.get("n_cells_with_multiple_states", 0),
+            },
         ))
     else:
         checks.append(_check("细胞状态分离", "review", "未生成独立 cell_state 证据。"))
@@ -333,6 +537,64 @@ def _deg_evidence(summary, names):
         checks.append(_check("显著 DEG 数量图", "review", "未发现显著 DEG 数量概览图。"))
 
     return {"title": "DEG 审批证据", "checks": checks}
+
+
+def _sc_cell_deg_evidence(summary, names):
+    checks = []
+    comparison_type = str(summary.get("comparison_type") or "")
+    n_units = int(_number(summary.get("n_runnable_units"), 0) or 0)
+    if n_units:
+        checks.append(_check("比较单元", "pass", f"已完成 {n_units} 个 {comparison_type or '细胞级'} 比较单元。", n_units))
+    else:
+        checks.append(_check("比较单元", "warning", "没有满足最少细胞数的可运行比较单元。", n_units))
+    checks.append(_check(
+        "统计单位", "review",
+        "结果以细胞为单位，仅供 marker/可视化探索；细胞不是独立生物学重复。"
+    ))
+    if _has_file(names, "cell-level deg statistical audit"):
+        checks.append(_check("统计审计", "pass", "已记录比较契约、细胞数和表达尺度。"))
+    else:
+        checks.append(_check("统计审计", "review", "未发现细胞级 DEG 审计文件。"))
+    return {"title": "细胞级 DEG 审批证据", "checks": checks}
+
+
+def _sc_pseudobulk_deg_evidence(summary, names):
+    checks = []
+    method = str(summary.get("method_requested") or "")
+    status = str(summary.get("statistical_status") or "")
+    failed = int(_number(summary.get("n_model_failed_units"), 0) or 0)
+    if status == "biological_replicate_model":
+        checks.append(_check("统计单位", "pass", "DESeq2 以生物学样本 pseudobulk 为统计单位。"))
+    else:
+        checks.append(_check("统计单位", "review", "当前为显式 Welch log2CPM 近似分析，未拟合负二项样本级模型。"))
+    if failed:
+        checks.append(_check("模型拟合", "warning", f"有 {failed} 个比较单元的 DESeq2 模型未成功拟合；未自动回退。", failed))
+    else:
+        checks.append(_check("模型拟合", "pass", "未记录 DESeq2 拟合失败单元。"))
+    if _has_file(names, "pseudobulk deg statistical audit"):
+        checks.append(_check("设计审计", "pass", f"已记录 {method or 'pseudobulk'} 的批次/条件设计和单元状态。"))
+    else:
+        checks.append(_check("设计审计", "review", "未发现 pseudobulk 统计审计文件。"))
+    return {"title": "Pseudobulk DEG 审批证据", "checks": checks}
+
+
+def _sc_cell_go_evidence(summary, names):
+    checks = []
+    explicit = summary.get("source_selection") == "explicit_task_binding"
+    checks.append(_check(
+        "DEG 溯源", "pass" if explicit else "warning",
+        "富集已绑定明确的 DEG 任务。" if explicit else "富集使用旧版目录发现；请复核 DEG 来源。",
+        summary.get("source_task_id") or None,
+    ))
+    if summary.get("source_level") == "pseudobulk":
+        checks.append(_check("证据层级", "pass", "通路分析来自样本级 pseudobulk DEG。"))
+    else:
+        checks.append(_check("证据层级", "review", "通路分析来自细胞级探索性 DEG，应以样本级结果验证。"))
+    if _has_file(names, "enrichment audit"):
+        checks.append(_check("通路审计", "pass", "已记录基因集、阈值、背景基因和比较状态。"))
+    else:
+        checks.append(_check("通路审计", "review", "未发现通路富集审计文件。"))
+    return {"title": "单细胞通路富集审批证据", "checks": checks}
 
 
 def _proportion_evidence(summary, names):
@@ -478,6 +740,27 @@ def _batch_correct_evidence(summary, names):
             "缺少或未观察到明确的邻居混合改善；请查看前后 UMAP 与批次组成图。",
         ))
 
+    weighted_max_after = _number(after.get("weighted_max_batch_fraction"))
+    dominated_after = _number(after.get("batch_dominated_cluster_count_90pct"), 0)
+    if (
+        (same_after is not None and same_after >= 0.8)
+        or (weighted_max_after is not None and weighted_max_after >= 0.8)
+        or dominated_after > 0
+    ):
+        residual_status = "warning" if (
+            (same_after is not None and same_after >= 0.9)
+            or (weighted_max_after is not None and weighted_max_after >= 0.9)
+        ) else "review"
+        checks.append(_check(
+            "残余 Batch 结构", residual_status,
+            "校正后仍存在 batch-associated structure；不要仅凭改善幅度判定整合充分，需结合生物标签和 cluster 组成复核。",
+            {
+                "same_batch_fraction": same_after,
+                "weighted_max_batch_fraction": weighted_max_after,
+                "batch_dominated_clusters": int(dominated_after),
+            },
+        ))
+
     bio_before = _number(before.get("asw_bio"))
     bio_after = _number(after.get("asw_bio"))
     bio_delta = _number(delta.get("asw_bio"))
@@ -526,10 +809,14 @@ def build_review_evidence(module_name, summary, result_files=None):
     names = _result_file_names(result_files or [])
     builders = {
         "qc": _qc_evidence,
+        "dimred": _dimred_evidence,
         "batch_correct": _batch_correct_evidence,
         "clustering": _clustering_evidence,
         "annotation": _annotation_evidence,
         "deg": _deg_evidence,
+        "sc_cell_deg": _sc_cell_deg_evidence,
+        "sc_pseudobulk_deg": _sc_pseudobulk_deg_evidence,
+        "sc_cell_go": _sc_cell_go_evidence,
         "proportion": _proportion_evidence,
     }
     card = builders[module_name](summary, names)
@@ -550,6 +837,8 @@ def build_result_interpretation(module_name, summary, result_files=None):
         'batch_correct': '批次校正', 'clustering': '聚类', 'subcluster': '子簇精细分析',
         'annotation': '细胞注释', 'deg': '差异表达', 'trajectory': '轨迹分析',
         'sc_timecourse': '单细胞时序动态', 'proportion': '细胞比例', 'cell_communication': '细胞通讯',
+        'sc_cell_deg': '细胞级探索性比较', 'sc_pseudobulk_deg': '样本级 pseudobulk 差异表达',
+        'sc_cell_go': '单细胞通路富集',
     }.get(module_name, module_name)
     if evidence:
         cautions = [check['message'] for check in evidence['checks'] if check['status'] != 'pass']

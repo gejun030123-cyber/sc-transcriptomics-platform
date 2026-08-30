@@ -156,12 +156,15 @@ def _run_sweep_loop(job, goal_id, candidates, base_checkpoint, project_id, resul
                 if not cls:
                     raise ValueError(f'未知模块: {mod_name}')
 
+                params_for_module = dict(params.get(mod_name, {}) or {})
                 task = AnalysisTask(
                     project_id=project_id,
                     module_name=mod_name,
-                    params_json=json.dumps(params.get(mod_name, {}), ensure_ascii=False),
+                    params_json=json.dumps(params_for_module, ensure_ascii=False),
                     branch_id=branch.id,
                 )
+                params_for_module.setdefault('_analysis_id', task.id)
+                task.params_json = json.dumps(params_for_module, ensure_ascii=False)
                 task.save()
                 task.mark_running()
                 current_task = task
@@ -174,7 +177,7 @@ def _run_sweep_loop(job, goal_id, candidates, base_checkpoint, project_id, resul
                     task_progress_log.append({'time': now, 'pct': pct, 'msg': f'[{_module}] {message}'})
                     _task.update_progress(pct, message, json.dumps(task_progress_log, ensure_ascii=False))
 
-                module = cls(project_dir=branch_dir, params=params.get(mod_name, {}), progress_callback=progress_cb)
+                module = cls(project_dir=branch_dir, params=params_for_module, progress_callback=progress_cb)
                 result = module.run(current_input)
 
                 output_adata = result.get('output_adata')
@@ -182,6 +185,7 @@ def _run_sweep_loop(job, goal_id, candidates, base_checkpoint, project_id, resul
                     raise ValueError(f'模块 {mod_name} 未返回 output_adata')
 
                 register_task_outputs(task, project_id, branch_dir, result)
+                output_adata = result.get('output_adata') or output_adata
                 task.mark_completed(output_adata, json.dumps(result.get('summary', {}), ensure_ascii=False))
                 current_input = output_adata
                 current_task = None

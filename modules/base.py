@@ -1,12 +1,12 @@
+import re
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
+
 from modules.figure_style import (
     NATURE_BG,
     NATURE_FONT_FAMILY,
     NATURE_PALETTE,
     normalize_visualization_params,
-    nature_continuous_cmap,
-    stable_category_colors,
 )
 
 # Result files are persisted in the database and exposed by the result routes.
@@ -100,6 +100,51 @@ class BaseAnalysis(ABC):
                 self.progress(-1, f"过滤 {col} {op} {val}: 移除 {n_filtered} 个样本")
         return adata
 
+    def apply_scope(self, adata, module_name=None):
+        """将分析限制在指定 obs 列（如 sample_id）的选定值对应的细胞上。
+
+        这是跨模块统一的“在哪个样品/条件下比较”入口：``scope_key`` 指定
+        obs 列（例如 sample_id、condition、timepoint），``scope_values`` 为
+        逗号/分号/换行分隔的取值列表。留空 scope_key 表示分析全部细胞。
+        模块应尽早调用本方法，使后续分组、比较和统计都只基于该子集。
+        """
+        scope_key = str(self.params.get('scope_key', '') or '').strip()
+        raw_values = str(self.params.get('scope_values', '') or '').strip()
+        if not scope_key:
+            return adata
+        if scope_key not in adata.obs.columns:
+            raise ValueError(
+                f"分析范围列 '{scope_key}' 不在 adata.obs 中；"
+                "请选择 sample_id/condition 等真实 obs 列，或留空分析全部细胞。"
+            )
+        values = [
+            item.strip() for item in re.split(r'[,;\n]+', raw_values) if item.strip()
+        ]
+        if not values:
+            raise ValueError(
+                f"已填写分析范围列 '{scope_key}'，但未选择具体取值"
+                "（scope_values 至少需要一个值）。"
+            )
+        obs_values = adata.obs[scope_key].astype(str)
+        present = [value for value in values if value in set(obs_values)]
+        missing = [value for value in values if value not in present]
+        if missing:
+            self.progress(
+                -1,
+                f"分析范围 '{scope_key}' 中不存在取值: {missing}；已忽略。",
+            )
+        if not present:
+            raise ValueError(
+                f"scope_values 中的取值都不存在于 '{scope_key}'：{values}"
+            )
+        n_before = adata.n_obs
+        adata = adata[obs_values.isin(present)].copy()
+        self.progress(
+            -1,
+            f"分析范围限制: {scope_key} ∈ {present}，"
+            f"保留 {adata.n_obs}/{n_before} 个细胞。",
+        )
+        return adata
     def get_plotly_layout(self, title='', **overrides):
         """根据 self.params['_visualization'] 生成统一的 Plotly layout dict。"""
         viz = normalize_visualization_params(self.params.get('_visualization', {}))
@@ -172,16 +217,43 @@ class BaseAnalysis(ABC):
 
         raw_viz = self.params.get('_visualization', {})
         viz = normalize_visualization_params(raw_viz)
+        nature_spec = getattr(fig, '_nature_spec_object', None)
         if raw_viz.get('static_formats') or raw_viz.get('export_formats'):
             formats = viz.get('static_formats', ('png', 'svg'))
         elif formats is None:
-            formats = viz.get(
-                'static_formats', ('png', 'svg')
+            formats = (
+                tuple(nature_spec.formats)
+                if nature_spec is not None
+                else viz.get('static_formats', ('png', 'svg'))
             )
         formats = [fmt.lower() for fmt in formats
                    if fmt.lower() in ('png', 'svg', 'pdf', 'tiff')]
         if not formats:
             return []
+
+        # Figures created by the deterministic engine already carry an exact
+        # physical-size/style contract.  Reapplying the legacy post-processor
+        # or tight bounding boxes would invalidate that contract, so route them
+        # through the same exporter and readiness audit used by Bulk RNA-seq.
+        if nature_spec is not None:
+            from figure_engine import export_registered_figure
+
+            stem, _ = os.path.splitext(filename)
+            results_dir = os.path.join(self.project_dir, 'results')
+            os.makedirs(results_dir, exist_ok=True)
+            qa_path = os.path.join(results_dir, f'{stem}_nature_readiness.json')
+            result_files, _ = export_registered_figure(
+                fig, os.path.join(plots_dir, stem),
+                nature_spec.with_updates(formats=tuple(formats)),
+                category=category, label=label, formats=tuple(formats),
+                qa_path=qa_path,
+            )
+            try:
+                import matplotlib.pyplot as plt
+                plt.close(fig)
+            except Exception:
+                pass
+            return result_files
 
         # Normalize the native Scanpy/Matplotlib canvas for publication output.
         # This changes the figure itself before both PNG and SVG are written, so
@@ -189,12 +261,26 @@ class BaseAnalysis(ABC):
         try:
             # Native builders choose their own aspect ratio (for example a
             # multi-resolution UMAP grid or a long cluster composition panel).
-            # Callers can preserve that aspect explicitly; otherwise the
-            # requested visualization dimensions are applied to the canvas.
+            # Callers can preserve that aspect explicitly; content-aware native
+            # canvases are also kept intact when the UI defaults would shrink
+            # their label area.
             if ('figure_width' in raw_viz or 'figure_height' in raw_viz) and not preserve_aspect:
                 current_width, current_height = fig.get_size_inches()
                 width = max(6.5, float(viz.get('figure_width', current_width * 100)) / 100)
                 height = max(4.8, float(viz.get('figure_height', current_height * 100)) / 100)
+                # Several native single-cell figures size their canvas from the
+                # number/length of labels (heatmaps, composition bars and
+                # marker dot-plots).  Shrinking those canvases to the generic
+                # 800x500 UI default leaves the font size unchanged while
+                # removing the space allocated to each label, which produces
+                # the visible text collisions on the result page.  The user
+                # dimensions remain the lower bound for compact figures, but a
+                # content-aware canvas is never compressed below its layout.
+                if current_width > width or current_height > height:
+                    # Preserve both dimensions together; independently taking
+                    # max(width) and max(height) would subtly distort a wide
+                    # panel and move labels relative to the plotted data.
+                    width, height = float(current_width), float(current_height)
                 fig.set_size_inches(width, height, forward=True)
             font_size = max(9, float(viz.get('font_size', 12)))
             font_family = viz.get('font_family', NATURE_FONT_FAMILY)
@@ -279,119 +365,77 @@ class BaseAnalysis(ABC):
             pass
         return result_files
 
-    def build_publication_umap(self, adata, color_key, title='', basis='X_umap'):
-        """Build a compact, publication-oriented UMAP Matplotlib figure.
+    def build_publication_embedding(self, adata, color_key, title='', basis='X_umap',
+                                    x_label=None, y_label=None):
+        """Build a deterministic cell-level embedding with Nature Figure Engine.
 
-        Scanpy's default figure is excellent for exploration, but its point size
-        and legend/colorbar scale poorly when embedded in a web result card. This
-        renderer keeps the shared Nature palette while adapting marker size and
-        layout to the number of cells.
+        Categorical ``obs`` values use the fixed cell-type palette. Numeric
+        ``obs`` values and genes use the shared continuous expression scale.
+        The dense cell layer is rasterized while text remains editable.
         """
-        import math
         import numpy as np
         import pandas as pd
-        import matplotlib.pyplot as plt
+        from figure_engine import NatureFigureDirector
 
-        coords = np.asarray(adata.obsm[basis])[:, :2]
+        if basis not in adata.obsm:
+            raise KeyError(f"AnnData.obsm 缺少嵌入坐标: {basis}")
+        coordinates = np.asarray(adata.obsm[basis])[:, :2]
+        values = None
+        value_type = 'categorical'
+        category_order = []
+        if color_key in adata.obs.columns:
+            series = adata.obs[color_key]
+            values = series.to_numpy()
+            key_hint = str(color_key).strip().lower()
+            discrete_hint = (
+                key_hint in {'batch', 'phase', 'leiden', 'louvain', 'celltype', 'cell_type'}
+                or 'cluster' in key_hint or key_hint.endswith('_group')
+            )
+            if pd.api.types.is_numeric_dtype(series) and not discrete_hint:
+                value_type = 'continuous'
+            else:
+                values = series.astype(str).to_numpy()
+                if isinstance(series.dtype, pd.CategoricalDtype):
+                    category_order = [str(value) for value in series.cat.categories]
+                else:
+                    category_order = list(dict.fromkeys(values.tolist()))
+        elif color_key in adata.var_names:
+            expression = adata[:, [color_key]].X
+            if hasattr(expression, 'toarray'):
+                expression = expression.toarray()
+            values = np.asarray(expression, dtype=float).reshape(-1)
+            value_type = 'continuous'
+
+        axis_prefix = basis.removeprefix('X_').upper()
+        x_label = x_label or f'{axis_prefix} 1'
+        y_label = y_label or f'{axis_prefix} 2'
         viz = normalize_visualization_params(self.params.get('_visualization', {}))
-        n_obs = max(1, int(coords.shape[0]))
-        point_size = float(viz.get('umap_point_size', 5))
-        marker_size = max(7, min(30, point_size * math.sqrt(10000 / n_obs)))
-        opacity = float(viz.get('umap_opacity', 0.78))
-        font_size = max(9, float(viz.get('font_size', 12)))
-        font_family = viz.get('font_family', 'Arial')
-        bg_color = viz.get('bg_color', 'white')
-        is_dark = str(bg_color).lower() in {'#1a1a2e', '#111827', '#0f172a'}
-        text_color = '#F8FAFC' if is_dark else '#172033'
-        axis_color = '#CBD5E1' if is_dark else '#4b5563'
-        fig, ax = plt.subplots(figsize=(9, 6.8), dpi=150)
-
-        values = adata.obs[color_key] if color_key in adata.obs.columns else None
-        is_numeric = values is not None and pd.api.types.is_numeric_dtype(values)
-        if values is None:
-            ax.scatter(coords[:, 0], coords[:, 1], s=marker_size,
-                       c=NATURE_PALETTE[0],
-                       alpha=opacity, linewidths=0, rasterized=True)
-        elif is_numeric:
-            scatter = ax.scatter(
-                coords[:, 0], coords[:, 1], s=marker_size,
-                c=np.asarray(values, dtype=float), cmap=nature_continuous_cmap(),
-                alpha=opacity,
-                linewidths=0, rasterized=True,
-            )
-            colorbar = fig.colorbar(scatter, ax=ax, fraction=0.035, pad=0.025,
-                                    aspect=32)
-            colorbar.ax.tick_params(labelsize=max(8, font_size - 2), width=0.6)
-            colorbar.set_label(str(color_key), fontsize=font_size - 1,
-                               labelpad=6)
-        else:
-            categorical = values.astype('category')
-            color_map = stable_category_colors(
-                [str(category) for category in categorical.cat.categories],
-                existing=adata.uns.get(f'{color_key}_colors', []),
-            )
-            for category in categorical.cat.categories:
-                mask = np.asarray(categorical == category)
-                if not mask.any():
-                    continue
-                ax.scatter(
-                    coords[mask, 0], coords[mask, 1], s=marker_size,
-                    color=color_map.get(str(category), '#9aa3b2'),
-                    alpha=opacity, linewidths=0, rasterized=True,
-                    label=str(category),
-                )
-            n_categories = len(categorical.cat.categories)
-            if n_categories and not viz.get('umap_label_categories', False):
-                legend = ax.legend(
-                    loc='center left', bbox_to_anchor=(1.01, 0.5),
-                    frameon=False, fontsize=max(8, font_size - 2),
-                    markerscale=1.25, borderaxespad=0,
-                    ncol=2 if n_categories > 16 else 1,
-                )
-                legend.set_title(str(color_key), prop={'size': font_size - 1})
-            elif n_categories:
-                # Labels are useful for cluster UMAPs, while avoiding a tall
-                # legend leaves the embedding readable in manuscript panels.
-                for category in categorical.cat.categories:
-                    mask = np.asarray(categorical == category)
-                    if not mask.any():
-                        continue
-                    ax.text(
-                        float(np.median(coords[mask, 0])),
-                        float(np.median(coords[mask, 1])),
-                        str(category), ha='center', va='center',
-                        fontsize=max(8, font_size - 2), color=text_color,
-                        fontfamily=font_family,
-                        bbox={'boxstyle': 'round,pad=0.18', 'facecolor': 'white',
-                              'edgecolor': '#D0D5DD', 'alpha': 0.86, 'linewidth': 0.5},
-                        zorder=5,
-                    )
-
-        ax.set_title(title, fontsize=font_size + 2, fontweight='semibold',
-                     color=text_color, pad=12, family=font_family)
-        ax.set_xlabel('UMAP 1', fontsize=font_size, color=text_color, family=font_family)
-        ax.set_ylabel('UMAP 2', fontsize=font_size, color=text_color, family=font_family)
-        ax.tick_params(labelsize=max(8, font_size - 2), colors=axis_color, width=0.6)
-        ax.set_facecolor(bg_color)
-        ax.grid(False)
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-        if viz.get('umap_hide_axes', True):
-            ax.set_xticks([])
-            ax.set_yticks([])
-        ax.margins(0.035)
-        fig.patch.set_facecolor(bg_color)
-        has_external_legend = (
-            values is not None and not is_numeric
-            and not viz.get('umap_label_categories', False)
+        n_categories = len(category_order) if value_type == 'categorical' else 0
+        width = 'double' if n_categories > 12 else 'single'
+        director = NatureFigureDirector()
+        spec = director.spec_from_params(
+            'embedding', self.params, width=width,
+            title=title or f'{axis_prefix} by {color_key}',
+            evidence_role='discovery',
         )
-        fig.subplots_adjust(
-            left=0.09,
-            right=0.82 if has_external_legend else 0.94,
-            bottom=0.1,
-            top=0.88,
+        return director.render(spec, {
+            'coordinates': coordinates,
+            'values': values,
+            'value_type': value_type,
+            'value_label': str(color_key),
+            'category_order': category_order,
+            'x_label': x_label,
+            'y_label': y_label,
+            'direct_labels': viz.get('umap_label_categories', False),
+            'hide_axes': viz.get('umap_hide_axes', True),
+        })
+
+    def build_publication_umap(self, adata, color_key, title='', basis='X_umap'):
+        """Backward-compatible wrapper for the shared embedding renderer."""
+        return self.build_publication_embedding(
+            adata, color_key, title=title, basis=basis,
+            x_label='UMAP 1', y_label='UMAP 2',
         )
-        return fig
 
     def export_results(self, adata, output_dir, export_format='h5ad',
                        include_layers=None, include_obsm=None, compression='gzip'):
@@ -454,6 +498,30 @@ class BaseAnalysis(ABC):
         plots_dir = os.path.join(self.project_dir, 'plots')
         os.makedirs(plots_dir, exist_ok=True)
         return plots_dir
+
+    def remove_plot_artifacts(self, *filenames):
+        """Remove stale plot artifacts through the shared output boundary.
+
+        Modules should not need to know how the project output directory is
+        laid out.  Cleanup remains deliberately explicit and limited to the
+        filenames supplied by the caller.
+        """
+        import os
+
+        plots_dir = self.ensure_plots_dir()
+        removed = []
+        for filename in filenames:
+            if not filename:
+                continue
+            path = os.path.join(plots_dir, os.path.basename(str(filename)))
+            if not os.path.exists(path):
+                continue
+            try:
+                os.remove(path)
+                removed.append(path)
+            except OSError as exc:
+                raise OSError(f"无法清理旧图 {path}: {exc}") from exc
+        return removed
 
     def save_plotly_json(self, fig, plots_dir, filename, category, label):
         """将 Plotly figure 保存为 JSON 并返回 result_file dict。"""

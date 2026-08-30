@@ -18,6 +18,7 @@ from .upset import NatureUpSet
 from .volcano import NatureVolcano
 from .wgcna import NatureWGCNA
 from .diagnostics import NatureDiagnostic
+from .embedding import NatureEmbedding
 
 __all__ = [
     'NaturePCA', 'NatureVolcano', 'NatureHeatmap',
@@ -28,4 +29,5 @@ __all__ = [
     'NatureMA', 'NatureCorrelationHeatmap', 'NatureGSVA', 'NatureSSGSEA',
     'NatureUpSet', 'NatureWGCNA',
     'NatureDiagnostic',
+    'NatureEmbedding',
 ]

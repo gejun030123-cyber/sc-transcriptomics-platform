@@ -1,6 +1,10 @@
 """Dependency health checks for platform capabilities."""
 
 import importlib.util
+import os
+import shutil
+
+from config import Config
 
 
 DEPENDENCY_GROUPS = {
@@ -28,6 +32,9 @@ DEPENDENCY_GROUPS = {
         ("inmoose", "inmoose"),
         ("patsy", "patsy"),
     ],
+    "wes": [
+        ("pysam", "pysam"),
+    ],
     "optional": [
         ("liana", "liana"),
         ("harmonypy", "harmonypy"),
@@ -42,6 +49,11 @@ DEPENDENCY_GROUPS = {
         ("anthropic", "anthropic"),
     ],
 }
+
+WES_EXTERNAL_TOOLS = (
+    "nextflow", "docker", "samtools", "bcftools", "gatk", "bwa-mem2", "vep", "multiqc",
+    "hap.py", "som.py",
+)
 
 MODULE_DEPENDENCIES = {
     "qc": ["scanpy", "omicverse"],
@@ -58,6 +70,7 @@ MODULE_DEPENDENCIES = {
     "sc_timecourse": ["anndata", "pandas", "scipy"],
     "proportion": ["anndata", "pandas", "scipy"],
     "cell_communication": ["scanpy", "liana"],
+    "virtual_ko": ["anndata", "pandas", "numpy"],
     "sc_batch_import": ["anndata", "pandas", "scanpy"],
     "sc_cell_deg": ["scanpy", "pandas"],
     "sc_cell_go": ["pandas", "gseapy"],
@@ -87,6 +100,7 @@ MODULE_OPTIONAL_DEPENDENCIES = {
     ],
     "subcluster": [("gseapy", "子簇通路富集")],
     "annotation": [("celltypist", "CellTypist 参考交叉验证")],
+    "virtual_ko": [("celloracle", "CellOracle 虚拟敲除（经独立 Python 3.9/3.10 环境调用）")],
     "bulk_deg": [("inmoose", "DESeq2/edgeR/limma 兼容统计方法")],
     "bulk_enrichment": [("gseapy", "兼容旧版 Enrichr 富集路径")],
     "sc_pseudobulk_deg": [
@@ -97,6 +111,20 @@ MODULE_OPTIONAL_DEPENDENCIES = {
 
 def _installed(import_name):
     return importlib.util.find_spec(import_name) is not None
+
+
+def _external_tool_path(name):
+    """Resolve configured executors before falling back to the process PATH."""
+    configured = {
+        "nextflow": Config.WES_NEXTFLOW_BIN,
+        "hap.py": Config.WES_HAPPY_BIN,
+        "som.py": Config.WES_SOMPY_BIN,
+    }
+    candidate = configured.get(name, name)
+    if os.path.sep in candidate:
+        path = os.path.abspath(candidate)
+        return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+    return shutil.which(candidate)
 
 
 def dependency_status():
@@ -127,9 +155,14 @@ def dependency_status():
             "optional_missing": optional_missing,
         }
 
+    external = {}
+    for name in WES_EXTERNAL_TOOLS:
+        path = _external_tool_path(name)
+        external[name] = {"installed": bool(path), "path": path}
     return {
         "groups": groups,
         "modules": modules,
+        "external_tools": external,
         "summary": {
             "total": sum(len(v) for v in DEPENDENCY_GROUPS.values()),
             "missing": sum(1 for ok in packages.values() if not ok),

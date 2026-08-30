@@ -378,3 +378,209 @@ def test_upload_preview_and_save_are_project_scoped(figure_client):
     version = saved.get_json()['version']
     assert figure_client.get(version['png_url']).status_code == 200
     assert figure_client.get(f'/projects/other_project/figure-studio/versions/{version["id"]}/png').status_code == 302
+
+
+def test_sc_cell_deg_volcano_is_data_redraw_with_manual_genes(test_project):
+    """SC cell-level volcano opens the figure studio with gene-label controls."""
+    import pandas as pd
+
+    from config import Config
+    from models import AnalysisTask, ResultFile
+    from modules.figure_studio import resolve_source
+
+    project_dir = Config.project_dir(test_project)
+    deg_dir = os.path.join(
+        project_dir, 'results', 'sc_pkg',
+        '03_differential_expression', '.internal',
+    )
+    os.makedirs(deg_dir, exist_ok=True)
+    deg_csv = os.path.join(
+        deg_dir,
+        'sc_cell_level_task_abc_deg_all_cells_Treatment_vs_Control.csv',
+    )
+    pd.DataFrame({
+        'comparison_id': ['Treatment_vs_Control'] * 8,
+        'comparison': ['Treatment vs Control'] * 8,
+        'deg_scope': ['all_cells'] * 8,
+        'cluster': ['All'] * 8,
+        'gene': [f'G{index}' for index in range(8)],
+        'log2FC': [2.0, 1.5, -2.0, -1.5, 0.1, 0.2, -0.1, -0.2],
+        'p.adjust': [0.01, 0.03, 0.01, 0.03, 0.8, 0.9, 0.85, 0.7],
+    }).to_csv(deg_csv, index=False)
+
+    task = AnalysisTask(
+        project_id=test_project, module_name='sc_cell_deg', status='completed',
+        params_json='{"export_prefix":"sc_cell_level"}',
+    )
+    task.save()
+    plots_dir = Config.plots_dir(test_project)
+    os.makedirs(plots_dir, exist_ok=True)
+    png_path = os.path.join(
+        plots_dir,
+        'sc_cell_deg_volcano_sc_cell_level_Treatment_vs_Control_all_cells_All.png',
+    )
+    _write_png(png_path)
+    result_file = ResultFile.create(
+        task.id, test_project, 'png', 'plot', 'SC volcano', png_path,
+    )
+
+    source = resolve_source(test_project, 'result_file', result_file.id)
+    assert source['edit_mode'] == 'sc_volcano'
+    assert source['data_path'] == deg_csv
+    assert source['sc_context']['comparison_id'] == 'Treatment_vs_Control'
+    assert source['sc_context']['cluster'] == 'All'
+
+
+def test_sc_cell_go_dotplot_binds_pathway_selection(test_project):
+    """SC GO dotplot opens the figure studio with the pathway picker bound."""
+    import pandas as pd
+
+    from config import Config
+    from models import AnalysisTask, ResultFile
+    from modules.figure_studio import resolve_source
+
+    project_dir = Config.project_dir(test_project)
+    go_dir = os.path.join(
+        project_dir, 'results', 'go_pkg',
+        '04_go_enrichment',
+    )
+    os.makedirs(go_dir, exist_ok=True)
+    go_csv = os.path.join(
+        go_dir,
+        'sc_cell_go_go_GO_Biological_Process_2023_all_cells_Treatment_vs_Control.csv',
+    )
+    pd.DataFrame({
+        'comparison_id': ['Treatment_vs_Control'] * 4,
+        'deg_scope': ['all_cells'] * 4,
+        'cluster': ['All'] * 4,
+        'direction': ['Up'] * 4,
+        'gene_set': ['GO_Biological_Process_2023'] * 4,
+        'method': ['ORA'] * 4,
+        'Term': ['T1', 'T2', 'T3', 'T4'],
+        'Adjusted P-value': [0.01, 0.02, 0.03, 0.04],
+        'Overlap': ['3/100', '2/100', '4/100', '5/100'],
+        'Genes': ['A;B;C', 'A;B', 'A;B;C;D', 'A;B;C;D;E'],
+    }).to_csv(go_csv, index=False)
+
+    task = AnalysisTask(
+        project_id=test_project, module_name='sc_cell_go', status='completed',
+    )
+    task.save()
+    plots_dir = Config.plots_dir(test_project)
+    os.makedirs(plots_dir, exist_ok=True)
+    png_path = os.path.join(
+        plots_dir,
+        'sc_cell_go_GO_Biological_Process_2023_all_cells_Treatment_vs_Control_All_Up_dotplot.png',
+    )
+    _write_png(png_path)
+    result_file = ResultFile.create(
+        task.id, test_project, 'png', 'plot', 'SC GO dotplot', png_path,
+    )
+
+    source = resolve_source(test_project, 'result_file', result_file.id)
+    assert source['edit_mode'] == 'sc_enrichment'
+    assert source['data_path'] == go_csv
+    assert source['plot_type'] == 'enrichment_dotplot'
+    assert source['sc_context']['direction'] == 'Up'
+
+
+def test_sc_cell_go_artifact_dotplot_binds_pathway_selection(test_project):
+    """Current task-artifact outputs retain the Figure Studio pathway picker."""
+    import pandas as pd
+
+    from config import Config
+    from models import AnalysisTask, ResultFile
+    from modules.figure_studio import resolve_source
+
+    artifact_dir = os.path.join(
+        Config.results_dir(test_project), 'task_artifacts', 'sc_cell_go', 'task-abc',
+    )
+    os.makedirs(artifact_dir, exist_ok=True)
+    go_csv = os.path.join(
+        artifact_dir,
+        '000_sc_cell_go_go_GO_Biological_Process_2023_all_cells_Treatment_vs_Control.csv',
+    )
+    pd.DataFrame({
+        'comparison_id': ['Treatment_vs_Control'] * 2,
+        'deg_scope': ['all_cells'] * 2,
+        'cluster': ['All'] * 2,
+        'direction': ['Up'] * 2,
+        'gene_set': ['GO_Biological_Process_2023'] * 2,
+        'method': ['ORA'] * 2,
+        'Term': ['Selected pathway (GO:0000001)', 'Other pathway (GO:0000002)'],
+        'Adjusted P-value': [0.01, 0.02],
+        'Overlap': ['3/100', '2/100'],
+        'Genes': ['A;B;C', 'A;B'],
+    }).to_csv(go_csv, index=False)
+
+    task = AnalysisTask(
+        project_id=test_project, module_name='sc_cell_go', status='completed',
+    )
+    task.save()
+    png_path = os.path.join(
+        artifact_dir,
+        '004_sc_cell_go_GO_Biological_Process_2023_all_cells_Treatment_vs_Control_All_Up_dotplot.png',
+    )
+    _write_png(png_path)
+    result_file = ResultFile.create(
+        task.id, test_project, 'png', 'enrichment', 'SC GO artifact dotplot', png_path,
+    )
+
+    source = resolve_source(test_project, 'result_file', result_file.id)
+    assert source['edit_mode'] == 'sc_enrichment'
+    assert source['data_path'] == go_csv
+    assert source['plot_type'] == 'enrichment_dotplot'
+    assert source['sc_context']['cluster'] == 'All'
+    assert source['sc_context']['direction'] == 'Up'
+
+
+def test_sc_pseudobulk_artifact_volcano_and_ma_are_data_backed(test_project):
+    """Current SC task artifacts expose the shared DEG gene-selection controls."""
+    import pandas as pd
+
+    from config import Config
+    from models import AnalysisTask, ResultFile
+    from modules.figure_studio import render_preview_data_uri, resolve_source
+
+    artifact_dir = os.path.join(
+        Config.results_dir(test_project), 'task_artifacts', 'sc_pseudobulk_deg', 'task-abc',
+    )
+    os.makedirs(artifact_dir, exist_ok=True)
+    deg_csv = os.path.join(artifact_dir, '000_sc_pseudobulk_deg_Treatment_vs_Control.csv')
+    pd.DataFrame({
+        'comparison_id': ['Treatment_vs_Control'] * 3,
+        'deg_scope': ['all_cells'] * 3,
+        'cluster': ['All'] * 3,
+        'gene': ['G1', 'G2', 'G3'],
+        'log2FC': [2.0, -1.5, 0.1],
+        'padj': [0.01, 0.02, 0.9],
+        'base_mean_count': [40.0, 25.0, 12.0],
+    }).to_csv(deg_csv, index=False)
+    task = AnalysisTask(
+        project_id=test_project, module_name='sc_pseudobulk_deg', status='completed',
+        params_json='{"export_prefix":"sc_pseudobulk"}',
+    )
+    task.save()
+    volcano_path = os.path.join(
+        artifact_dir,
+        '003_sc_pseudobulk_volcano_sc_pseudobulk_Treatment_vs_Control_All.png',
+    )
+    ma_path = os.path.join(
+        artifact_dir,
+        '004_sc_pseudobulk_ma_sc_pseudobulk_Treatment_vs_Control_All.png',
+    )
+    _write_png(volcano_path)
+    _write_png(ma_path)
+    volcano_file = ResultFile.create(
+        task.id, test_project, 'png', 'volcano', 'SC pseudobulk Volcano', volcano_path,
+    )
+    ma_file = ResultFile.create(
+        task.id, test_project, 'png', 'ma', 'SC pseudobulk MA', ma_path,
+    )
+
+    volcano = resolve_source(test_project, 'result_file', volcano_file.id)
+    ma = resolve_source(test_project, 'result_file', ma_file.id)
+    assert volcano['edit_mode'] == 'sc_volcano'
+    assert ma['edit_mode'] == 'sc_ma'
+    assert volcano['data_path'] == ma['data_path'] == deg_csv
+    assert render_preview_data_uri(ma, {'label_genes': 'G2'})['edit_mode'] == 'data_redraw'

@@ -324,12 +324,106 @@ def test_bulk_ora_accepts_custom_human_gmt_and_snapshots_source(tmp_path, monkey
     assert any(item['file_path'] == str(snapshot) for item in output['result_files'])
 
 
+def test_bulk_batch_enrichment_is_task_scoped_and_keeps_database_fdr_separate(
+        tmp_path, monkeypatch):
+    """A batch must integrate only its explicit child tables, never history."""
+    import modules.bulk_enrichment as enrichment
+
+    geneset, deg = _write_tiny_inputs(tmp_path)
+    _disable_enrichment_figures(monkeypatch)
+    monkeypatch.setattr(enrichment, '_resolve_geneset_path', lambda *args: str(geneset))
+    monkeypatch.setattr(enrichment, '_write_integrated_overview_figures', lambda *args, **kwargs: [])
+
+    historical = tmp_path / 'results' / 'enrichment_ora_reactome_old_results.csv'
+    historical.parent.mkdir(exist_ok=True)
+    pd.DataFrame({
+        'Comparison': ['Old'], 'Database': ['Reactome'], 'Method': ['ORA'],
+        'Direction': ['All'], 'Term': ['must not be included'],
+        'Adjusted P-value': [0.001],
+    }).to_csv(historical, index=False)
+
+    output = enrichment.BulkEnrichmentAnalysis(
+        project_dir=str(tmp_path),
+        params={
+            'method': 'ORA', 'batch_databases': True,
+            'databases': 'GO_BP,KEGG', '_analysis_id': 'batch-001',
+            'organism': 'Human', 'pvalue_cutoff': 0.4,
+            'input_source': str(deg), 'input_comparison': 'Treat vs Ctrl',
+            'ora_min_size': 1, 'ora_max_size': 4,
+        },
+        progress_callback=lambda *_: None,
+    ).run(str(deg))
+
+    results_dir = tmp_path / 'results' / 'enrichment_batches' / 'batch_001'
+    integrated = pd.read_csv(
+        results_dir / 'enrichment_batch_batch_001_integrated_results.csv'
+    )
+    go_table = pd.read_csv(results_dir / 'enrichment_ora_go_bp_treat_vs_ctrl_results.csv')
+    kegg_table = pd.read_csv(results_dir / 'enrichment_ora_kegg_treat_vs_ctrl_results.csv')
+
+    assert output['summary']['n_databases_completed'] == 2
+    assert output['summary']['n_databases_failed'] == 0
+    assert set(integrated['Database']) == {'GO_BP', 'KEGG'}
+    assert 'must not be included' not in set(integrated['Term'])
+    assert not (tmp_path / 'results' / 'enrichment_integrated_results.csv').exists()
+    assert integrated.loc[integrated['Database'] == 'GO_BP', 'Enrichment FDR'].tolist() == go_table['Adjusted P-value'].tolist()
+    assert integrated.loc[integrated['Database'] == 'KEGG', 'Enrichment FDR'].tolist() == kegg_table['Adjusted P-value'].tolist()
+
+
+def test_bulk_batch_enrichment_retains_partial_library_failures(tmp_path, monkeypatch):
+    import modules.bulk_enrichment as enrichment
+
+    geneset, deg = _write_tiny_inputs(tmp_path)
+    _disable_enrichment_figures(monkeypatch)
+    monkeypatch.setattr(enrichment, '_write_integrated_overview_figures', lambda *args, **kwargs: [])
+
+    def resolve_geneset(name, organism):
+        if name == 'KEGG_2021_Human':
+            raise FileNotFoundError('KEGG snapshot is not installed')
+        return str(geneset)
+
+    monkeypatch.setattr(enrichment, '_resolve_geneset_path', resolve_geneset)
+    output = enrichment.BulkEnrichmentAnalysis(
+        project_dir=str(tmp_path),
+        params={
+            'method': 'ORA', 'batch_databases': True,
+            'databases': 'GO_BP,KEGG', '_analysis_id': 'partial-001',
+            'organism': 'Human', 'pvalue_cutoff': 0.4,
+            'input_source': str(deg), 'input_comparison': 'Treat vs Ctrl',
+            'ora_min_size': 1, 'ora_max_size': 4,
+        },
+        progress_callback=lambda *_: None,
+    ).run(str(deg))
+
+    rows = {row['database']: row for row in output['summary']['database_results']}
+    assert output['summary']['n_databases_completed'] == 1
+    assert output['summary']['n_databases_failed'] == 1
+    assert rows['GO_BP']['status'] == 'completed'
+    assert rows['KEGG']['status'] == 'failed'
+    assert 'snapshot is not installed' in rows['KEGG']['error']
+
+
+def test_batch_database_form_selection_preserves_all_checked_values():
+    from werkzeug.datastructures import MultiDict
+    from modules.schemas import PARAM_SCHEMAS, parse_form_params
+
+    params = parse_form_params(PARAM_SCHEMAS['bulk_enrichment'], MultiDict([
+        ('batch_databases', 'on'), ('databases', 'GO_BP'), ('databases', 'KEGG'),
+    ]))
+
+    assert params['batch_databases'] is True
+    assert params['databases'] == 'GO_BP,KEGG'
+    assert 'database' not in params
+
+
 def test_enrichment_schema_is_human_only_and_gsea_controls_are_conditional():
     from modules.schemas import PARAM_SCHEMAS
 
     schema = {item['key']: item for item in PARAM_SCHEMAS['bulk_enrichment']}
     assert schema['organism']['options'] == ['Human']
     assert 'Custom_GMT' in schema['database']['options']
+    assert schema['batch_databases']['default'] is True
+    assert schema['databases']['type'] == 'static_multiselect'
     assert schema['custom_geneset_text']['show_if'] == {'database': 'Custom_GMT'}
     assert schema['ora_min_size']['show_if'] == {'method': 'ORA'}
     assert schema['ranking_metric']['show_if'] == {'method': 'GSEA'}

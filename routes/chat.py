@@ -2,6 +2,7 @@
 """AI 对话 API"""
 from flask import Blueprint, request, jsonify
 from config import Config
+from modules.ai_config import get_effective_ai_config
 from routes.auth import require_ai_token
 
 chat_bp = Blueprint('chat', __name__)
@@ -31,6 +32,29 @@ class ChatHistoryStore:
 _chat_histories = ChatHistoryStore()
 
 
+def _public_attachments(project_id, attachments):
+    """Keep only project-scoped image URLs before returning chat metadata."""
+    prefix = f"/api/projects/{project_id}/result-file/"
+    allowed_types = {"png", "jpg", "jpeg", "svg", "webp", "tiff"}
+    public = []
+    for item in attachments or []:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "")
+        file_type = str(item.get("type") or "png").lower()
+        if not url.startswith(prefix) or file_type not in allowed_types:
+            continue
+        public.append({
+            "id": str(item.get("id") or ""),
+            "task_id": str(item.get("task_id") or ""),
+            "label": str(item.get("label") or "分析图"),
+            "category": str(item.get("category") or "plot"),
+            "type": file_type,
+            "url": url,
+        })
+    return public
+
+
 @chat_bp.route('/api/chat/config')
 @require_ai_token
 def chat_config():
@@ -43,8 +67,9 @@ def chat_config():
 @require_ai_token
 def chat_endpoint():
     """发送消息给 AI 助手"""
-    if not Config.AI_API_KEY:
-        return jsonify({"error": "AI API Key 未配置，请在 config.py 或环境变量 AI_API_KEY 中设置"}), 400
+    ai_config = get_effective_ai_config()
+    if not ai_config["api_key"]:
+        return jsonify({"error": "AI API Key 未配置，请在平台的 AI API 设置页中填写"}), 400
 
     data = request.get_json(silent=True) or {}
     message = data.get('message', '').strip()
@@ -88,6 +113,13 @@ def chat_endpoint():
 
         # 更新历史
         stored_messages = result["messages"]
+        attachments = _public_attachments(project_id, result.get("attachments", []))
+        if attachments:
+            for index in range(len(stored_messages) - 1, -1, -1):
+                if stored_messages[index].get("role") == "assistant":
+                    stored_messages = stored_messages.copy()
+                    stored_messages[index] = {**stored_messages[index], "attachments": attachments}
+                    break
         # Replace the augmented last user message before saving history so a
         # later page does not expose stale raw form JSON as a chat bubble.
         for index in range(len(stored_messages) - 1, -1, -1):
@@ -102,8 +134,9 @@ def chat_endpoint():
             "reply": result["reply"],
             "tool_calls": result["tool_calls"],
             "proposed_tools": result.get("proposed_tools", []),
+            "attachments": attachments,
             "config": {
-                "model": Config.AI_MODEL,
+                "model": get_effective_ai_config()["model"],
                 "message_count": len(result["messages"]),
             },
         })
@@ -122,6 +155,7 @@ def chat_history(pid):
             messages.append({
                 "role": msg["role"],
                 "content": msg.get("content", ""),
+                "attachments": _public_attachments(pid, msg.get("attachments", [])),
             })
     return jsonify({"messages": messages})
 

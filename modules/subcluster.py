@@ -41,6 +41,19 @@ class SubclusterAnalysis(BaseAnalysis):
         import os
         import pandas as pd
 
+        # logreg 等方法的 scanpy 输出只有 names/scores，没有 pvals_adj 与
+        # logfoldchanges；直接取列会 KeyError。富集属 best-effort，缺列时
+        # 跳过并保留聚类/DEG 结果（与模块的降级设计一致）。
+        required_columns = {'pvals_adj', 'logfoldchanges'}
+        missing_columns = required_columns - set(marker_df.columns)
+        if missing_columns or marker_df.empty:
+            self.progress(
+                -1,
+                f'marker 表缺少 {sorted(missing_columns)} 列'
+                '（如 logreg 方法不提供 p 值），跳过通路富集。'
+            )
+            return [], 0
+
         try:
             import gseapy as gp
         except ImportError:
@@ -116,6 +129,7 @@ class SubclusterAnalysis(BaseAnalysis):
 
         self.progress(5, 'Loading clustered data...')
         adata = self.load_adata(input_path)
+        adata = self.apply_scope(adata)
         source_key = self.params.get('source_cluster_key', 'leiden')
         target = str(self.params.get('target_cluster', '')).strip()
         if source_key not in adata.obs or not target:
@@ -136,13 +150,24 @@ class SubclusterAnalysis(BaseAnalysis):
         sub.obs['parent_cluster'] = target
 
         n_neighbors = min(int(self.params.get('n_neighbors', 15)), max(2, sub.n_obs - 1))
-        use_rep = 'X_pca' if 'X_pca' in sub.obsm else None
+        # 与父级聚类保持一致：优先使用批次校正后的表示，而不是回退到
+        # 未校正的 X_pca（否则子簇可能按 batch 分裂）。
+        from modules.clustering import ClusteringAnalysis
+        use_rep = next((
+            key for key in ClusteringAnalysis.CORRECTED_REPRESENTATIONS
+            if key in sub.obsm
+        ), 'X_pca' if 'X_pca' in sub.obsm else None)
         if use_rep is None:
             self.progress(15, 'PCA missing; computing PCA for the selected cluster...')
             sc.pp.pca(sub, n_comps=min(50, sub.n_obs - 1, sub.n_vars - 1))
             use_rep = 'X_pca'
-        self.progress(25, f'Rebuilding neighbor graph for {sub.n_obs} cells...')
+        from modules.pc_strategy import resolve_analysis_n_pcs
+        used_n_pcs, pc_diagnostics = resolve_analysis_n_pcs(
+            sub, int(self.params.get('n_pcs', 25)), representation_key=use_rep,
+        )
+        self.progress(25, f'Rebuilding neighbor graph for {sub.n_obs} cells ({use_rep}, {used_n_pcs} PCs)...')
         sc.pp.neighbors(sub, n_neighbors=n_neighbors, use_rep=use_rep,
+                        n_pcs=used_n_pcs,
                         metric=self.params.get('distance_metric', 'euclidean'))
         resolution = float(self.params.get('resolution', 0.8))
         method = self.params.get('clustering_method', 'leiden')
@@ -182,8 +207,11 @@ class SubclusterAnalysis(BaseAnalysis):
         groups = list(sub.obs['subcluster'].cat.categories)
         marker_df = pd.DataFrame()
         if len(groups) >= 2:
-            sc.tl.rank_genes_groups(sub, groupby='subcluster', method=self.params.get('deg_method', 'wilcoxon'),
-                                    n_genes=min(int(self.params.get('n_genes', 50)), sub.n_vars))
+            sc.tl.rank_genes_groups(
+                sub, groupby='subcluster', method=self.params.get('deg_method', 'wilcoxon'),
+                n_genes=min(int(self.params.get('n_genes', 50)), sub.n_vars),
+                use_raw=False,
+            )
             marker_tables = []
             for group in groups:
                 table = sc.get.rank_genes_groups_df(sub, group=group)
@@ -269,6 +297,8 @@ class SubclusterAnalysis(BaseAnalysis):
         self.progress(100, 'Done')
         return {'output_adata': output_path, 'result_files': result_files,
                 'summary': {'source_cluster_key': source_key, 'target_cluster': target,
+                            'scope_key': str(self.params.get('scope_key', '') or '').strip() or None,
+                            'scope_values': ([v.strip() for v in str(self.params.get('scope_values', '') or '').split(',') if v.strip()] or None),
                             'n_cells': int(sub.n_obs), 'n_subclusters': len(groups),
                             'subcluster_counts': {str(k): int(v) for k, v in counts.items()},
                             'marker_selection': {

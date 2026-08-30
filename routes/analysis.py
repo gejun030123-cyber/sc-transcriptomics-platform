@@ -2,6 +2,7 @@ import os
 import json
 import copy
 import re
+import pandas as pd
 from flask import Blueprint, render_template, request, redirect, url_for, flash
 from models import Project, AnalysisTask, ResultFile
 from config import Config
@@ -75,6 +76,69 @@ def _bulk_deg_enrichment_sources(project_id):
     return sorted(options, key=lambda item: (item['label'], item['path']))
 
 
+def _sc_deg_enrichment_sources(project_id):
+    """List completed, task-bound single-cell DEG sources for enrichment.
+
+    Unlike the retired package-directory scan, this follows the DEG task's
+    recorded internal source files.  It prevents a newer unrelated CSV from
+    silently changing the biological contrast used for pathway analysis.
+    """
+    options = []
+    for task in AnalysisTask.get_by_project(project_id):
+        if task.status != 'completed' or task.module_name not in {
+            'sc_cell_deg', 'sc_pseudobulk_deg',
+        }:
+            continue
+        try:
+            summary = json.loads(task.result_json or '{}')
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        source_files = summary.get('deg_source_files') or []
+        if isinstance(source_files, str):
+            source_files = [source_files]
+        valid_files = []
+        for source_path in source_files:
+            valid, _ = Config._validate_path(str(source_path), project_id)
+            if valid and os.path.isfile(source_path):
+                valid_files.append(str(source_path))
+        if not valid_files:
+            continue
+        clusters = set()
+        for source_path in valid_files:
+            try:
+                header = pd.read_csv(source_path, nrows=0)
+                if "cluster" not in header.columns:
+                    clusters.add("All")
+                    continue
+                values = pd.read_csv(source_path, usecols=["cluster"])["cluster"]
+                clusters.update(
+                    str(value).strip() for value in values.dropna()
+                    if str(value).strip()
+                )
+            except (OSError, ValueError, pd.errors.ParserError):
+                # The worker revalidates the exact DEG files before execution.
+                # Do not expose an unreadable historical file as a selectable
+                # cluster list in the run form.
+                continue
+        if not clusters:
+            clusters.add("All")
+        source_level = str(summary.get('deg_source_level') or '').strip().lower()
+        if source_level not in {'cell_level', 'pseudobulk'}:
+            continue
+        contract = str(summary.get('deg_source_task_contract') or '').strip()
+        label_level = '样本级 pseudobulk' if source_level == 'pseudobulk' else '细胞级探索性'
+        options.append({
+            'task_id': task.id,
+            'files': valid_files,
+            'source_level': source_level,
+            'contract': contract,
+            'clusters': sorted(clusters, key=lambda value: (value != 'All', value)),
+            'label': f'{label_level} · {contract or task.module_name} [{task.id}]',
+            'output_adata_path': os.path.abspath(task.output_adata_path or ''),
+        })
+    return sorted(options, key=lambda item: item['task_id'], reverse=True)
+
+
 def _path_has_module_requirements(path, requirements):
     """Check the lightweight AnnData contract needed by a module input."""
     if not requirements:
@@ -102,6 +166,27 @@ def _path_has_module_requirements(path, requirements):
             pass
 
 
+BASE_GRN_EXTENSIONS = (
+    '.parquet', '.pq', '.csv', '.tsv', '.txt', '.gz',
+    '.pickle', '.pkl', '.gpickle', '.oracle', '.celloracle',
+)
+
+
+def _list_base_grn_files(pid):
+    """列出项目 uploads 中可作为 CellOracle base GRN 的文件。"""
+    from config import Config
+    uploads_dir = os.path.join(Config.DATA_DIR, 'projects', pid, 'uploads')
+    files = []
+    if os.path.isdir(uploads_dir):
+        for name in sorted(os.listdir(uploads_dir)):
+            if name.lower().endswith(BASE_GRN_EXTENSIONS):
+                files.append({
+                    'name': name,
+                    'path': os.path.join(uploads_dir, name),
+                })
+    return files
+
+
 def build_input_options(module_name, completed_tasks, uploaded_files):
     """Build an ordered, dependency-aware input list for the analysis form.
 
@@ -122,15 +207,21 @@ def build_input_options(module_name, completed_tasks, uploaded_files):
         'hvg': ('normalize',),
         'dimred': ('hvg',),
         'batch_correct': ('dimred', 'hvg'),
-        'clustering': ('dimred',),
+        # Clustering with the web default ``use_corrected=true`` must consume
+        # the batch-corrected output when one exists.  Keeping dimred as the
+        # fallback preserves the explicit PCA-only path when no correction was
+        # run (or when the user disables ``use_corrected``).
+        'clustering': ('batch_correct', 'dimred'),
         'subcluster': ('clustering',),
         'qc_reassess': ('clustering',),
         'annotation': ('qc_reassess', 'clustering'),
         'sc_timecourse': ('annotation', 'qc_reassess', 'clustering'),
         'deg': ('annotation', 'qc_reassess', 'clustering'),
+        'sc_cell_go': ('sc_pseudobulk_deg', 'sc_cell_deg', 'annotation', 'qc_reassess', 'clustering'),
         'trajectory': ('qc_reassess', 'clustering'),
         'proportion': ('annotation', 'qc_reassess', 'clustering'),
         'cell_communication': ('annotation',),
+        'virtual_ko': ('annotation', 'qc_reassess', 'clustering'),
         'bulk_normalize': ('bulk_qc',),
         'bulk_pca': ('bulk_normalize',),
         'bulk_deg': ('bulk_normalize',),
@@ -272,12 +363,18 @@ def analyze(pid, module_name):
 
     if request.method == 'POST':
         params = parse_form_params(schema, request.form)
+        selected_sc_deg_source = None
         if module_name == 'bulk_enrichment':
             method = str(params.get('method', 'ORA') or 'ORA').upper()
             database = str(params.get('database', 'GO_BP') or 'GO_BP')
+            batch_databases = bool(params.get('batch_databases', False))
+            selected_databases = str(params.get('databases', '') or '').strip()
             custom_genes = str(params.get('custom_genes', '')).strip()
             custom_geneset = str(params.get('custom_geneset_text', '')).strip()
             selected_deg = str(params.get('input_source', '')).strip()
+            if batch_databases and not selected_databases:
+                flash('请至少选择一个批量基因集数据库。', 'danger')
+                return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
             if database == 'Custom_GMT' and not custom_geneset:
                 flash('选择 Custom_GMT 时必须粘贴 Human GMT 内容。', 'danger')
                 return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
@@ -319,6 +416,34 @@ def analyze(pid, module_name):
                 params['deg_comparison_label'] = selected_source['comparison']
                 if not str(params.get('groupby', '') or '').strip() and selected_source.get('groupby'):
                     params['groupby'] = selected_source['groupby']
+        if module_name == 'sc_cell_go':
+            source_task_id = str(params.get('deg_source_task_id', '') or '').strip()
+            selected_sc_deg_source = next(
+                (item for item in _sc_deg_enrichment_sources(pid)
+                 if item['task_id'] == source_task_id),
+                None,
+            )
+            if selected_sc_deg_source is None:
+                flash('请明确选择一个已完成的单细胞 DEG 任务后再运行富集。', 'danger')
+                return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
+            params['deg_source_files'] = selected_sc_deg_source['files']
+            params['deg_source_level'] = selected_sc_deg_source['source_level']
+            params['source_level'] = selected_sc_deg_source['source_level']
+            params['source_task_id'] = selected_sc_deg_source['task_id']
+            requested_clusters = [
+                item.strip() for item in re.split(
+                    r'[,;\n]+', str(params.get('target_clusters', '') or ''),
+                ) if item.strip()
+            ]
+            unknown_clusters = sorted(
+                set(requested_clusters) - set(selected_sc_deg_source.get('clusters') or []),
+            )
+            if unknown_clusters:
+                flash(
+                    '所选 DEG 任务中不存在以下 cluster：' + '、'.join(unknown_clusters[:5]),
+                    'danger',
+                )
+                return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
         # 处理自动检测的分组映射
         auto_mapping = request.form.get('_auto_group_mapping')
         if auto_mapping:
@@ -338,6 +463,10 @@ def analyze(pid, module_name):
         if not is_valid or not os.path.isfile(input_path):
             flash(err or '输入文件不存在', 'danger')
             return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
+        if selected_sc_deg_source and selected_sc_deg_source['output_adata_path']:
+            if os.path.abspath(input_path) != selected_sc_deg_source['output_adata_path']:
+                flash('富集输入 AnnData 必须与所选 DEG 任务的输入一致，避免将通路结果绑定到不同数据版本。', 'danger')
+                return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
         # 注入 _visualization 和 _filters 到 params
         viz_json = request.form.get('_visualization', '')
         filters_json = request.form.get('_filters', '')
@@ -372,8 +501,12 @@ def analyze(pid, module_name):
             if blockers:
                 flash('分析前检查未通过：' + '；'.join(blockers[:2]), 'danger')
                 return redirect(url_for('analysis.analyze', pid=pid, module_name=module_name))
-        task = AnalysisTask(project_id=pid, module_name=module_name,
-                           params_json=json.dumps(params))
+        task = AnalysisTask(project_id=pid, module_name=module_name)
+        # Internal artifacts and downstream source tables are keyed by task
+        # ID.  This keeps concurrent/rerun outputs distinct without exposing
+        # a growing set of mutable canonical filenames.
+        params['_analysis_id'] = task.id
+        task.params_json = json.dumps(params, ensure_ascii=False)
         task.save()
         p.status = 'processing'
         p.save()
@@ -384,6 +517,7 @@ def analyze(pid, module_name):
 
     enrichment_deg_sources = []
     heatmap_deg_sources = []
+    sc_enrichment_deg_sources = []
     # List every valid per-comparison DEG table.  When several contrasts are
     # present, the user must choose one rather than silently enriching an
     # arbitrary or merged result.
@@ -395,6 +529,12 @@ def analyze(pid, module_name):
                     param['default'] = enrichment_deg_sources[0]['path']
     if module_name == 'bulk_heatmap':
         heatmap_deg_sources = _bulk_deg_enrichment_sources(pid)
+    if module_name == 'sc_cell_go':
+        sc_enrichment_deg_sources = _sc_deg_enrichment_sources(pid)
+        if len(sc_enrichment_deg_sources) == 1:
+            for param in schema:
+                if param['key'] == 'deg_source_task_id':
+                    param['default'] = sc_enrichment_deg_sources[0]['task_id']
 
     sidebar_modules = BULK_MODULE_LIST if is_bulk else SC_MODULE_LIST
     return render_template('analysis_select.html', project=p, module=mod_info,
@@ -403,5 +543,7 @@ def analyze(pid, module_name):
                           recommended_input=recommended_input,
                           enrichment_deg_sources=enrichment_deg_sources,
                           heatmap_deg_sources=heatmap_deg_sources,
+                          sc_enrichment_deg_sources=sc_enrichment_deg_sources,
+                          base_grn_files=_list_base_grn_files(pid),
                           all_modules=sidebar_modules,
                           module_display_map=MODULE_DISPLAY_MAP)

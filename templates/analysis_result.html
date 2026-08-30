@@ -131,11 +131,12 @@
 </div>
 <div class="row">
     {% for f in image_files %}
-    <div class="col-md-6 mb-4">
-        <div class="card p-3">
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <h6 class="mb-0">{{ f.label }}</h6>
-                <div class="d-flex gap-1">
+    {% set figure_column = 'col-12' if f.category in ['bar', 'heatmap', 'dotplot'] else 'col-12 col-xxl-6' %}
+    <div class="{{ figure_column }} mb-4 result-figure-col">
+        <div class="card p-3 result-figure-card">
+            <div class="result-figure-header mb-2">
+                <h6 class="result-figure-label">{{ f.label }}</h6>
+                <div class="result-figure-actions">
                     <a href="/projects/{{ project.id }}/figure-studio?source_kind=result_file&amp;source_id={{ f.id }}" class="btn btn-outline-primary btn-sm">美化</a>
                     <a href="/projects/{{ project.id }}/results/file/{{ f.id }}" download class="btn btn-outline-secondary btn-sm">下载 PNG</a>
                     {% if f.svg_variant %}
@@ -149,7 +150,7 @@
                     {% endif %}
                 </div>
             </div>
-            <img src="/projects/{{ project.id }}/results/file/{{ f.id }}" class="img-fluid rounded" alt="{{ f.label }}">
+            <img src="/projects/{{ project.id }}/results/file/{{ f.id }}" class="img-fluid rounded result-figure-preview" alt="{{ f.label }}" loading="lazy">
         </div>
     </div>
     {% endfor %}
@@ -384,6 +385,49 @@ loadOutputAdataInfo();
 
 {% block extra_css %}
 <style>
+    /* Result figures are content-dense: keep the header and preview from
+       competing for the same horizontal space on narrow screens. */
+    .result-figure-col { min-width: 0; }
+    .result-figure-card { height: 100%; min-width: 0; overflow: hidden; }
+    .result-figure-header {
+        display: flex;
+        align-items: flex-start !important;
+        flex-wrap: wrap;
+        gap: .5rem .75rem;
+    }
+    .result-figure-label {
+        flex: 1 1 14rem;
+        min-width: 0;
+        margin: 0;
+        line-height: 1.35;
+        overflow-wrap: anywhere;
+    }
+    .result-figure-actions {
+        flex: 0 1 auto;
+        max-width: 100%;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: .25rem !important;
+    }
+    .result-figure-actions .btn { white-space: nowrap; }
+    .result-figure-preview {
+        display: block;
+        width: 100%;
+        max-width: 100%;
+        height: auto;
+        object-fit: contain;
+    }
+    @media (max-width: 1399.98px) {
+        /* A single column gives dense heatmaps/dotplots enough label width. */
+        .result-figure-col { flex: 0 0 100%; max-width: 100%; }
+    }
+    @media (max-width: 575.98px) {
+        .result-figure-actions {
+            flex-basis: 100%;
+            justify-content: flex-start;
+        }
+    }
 </style>
 {% endblock %}
 

@@ -2,6 +2,7 @@ import os
 import logging
 from modules.base import BaseAnalysis
 from modules.io_utils import obs_grouping_info
+from modules.sc_de_utils import _matrix_is_raw_counts
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class CellCommunicationAnalysis(BaseAnalysis):
 
         self.progress(5, "Loading data...")
         adata = self.load_adata(input_path)
+        adata = self.apply_scope(adata)
 
         cluster_key = str(self.params.get('cluster_key', 'celltype') or '').strip()
         cluster_info = obs_grouping_info(
@@ -45,9 +47,9 @@ class CellCommunicationAnalysis(BaseAnalysis):
         if not hasattr(adata.obs[cluster_key].dtype, 'categories'):
             adata.obs[cluster_key] = adata.obs[cluster_key].astype(str).astype('category')
         resource = self.params.get('resource', 'consensus')
-        organism = self.params.get('organism', 'human')
+        organism = str(self.params.get('organism', 'human') or 'human').lower()
         min_prop = float(self.params.get('min_prop', 0.1))
-        top_n = int(self.params.get('top_n_interactions', 20))
+        top_n = max(1, int(self.params.get('top_n_interactions', 20)))
         show_heatmap = self.params.get('show_heatmap', True)
 
         self.progress(20, "Running LIANA cell communication analysis...")
@@ -66,16 +68,67 @@ class CellCommunicationAnalysis(BaseAnalysis):
                 }
             }
 
-        # Run LIANA rank aggregate
+        # Run LIANA rank aggregate.
+        # 注意：li.mt.rank_aggregate 的参数名是 expr_prop（表达比例阈值），
+        # 且没有 organism 参数——物种通过资源名切换（小鼠资源为
+        # mouseconsensus / mousecellphonedb 等）；显式 use_raw=False。
+        # LIANA 的表达量/幅度方法按 counts 尺度设计；平台 h5ad 的 X 是
+        # log1p 归一化值，因此先构造 X=原始 counts 的临时对象再运行，
+        # 避免 magnitude_rank/lr_means 在压缩对数尺度上失真。
         self.progress(30, f"Computing interactions (resource={resource})...")
-        li.mt.rank_aggregate(
-            adata,
-            groupby=cluster_key,
-            resource_name=resource,
-            organism=organism,
-            min_prop=min_prop,
-            verbose=False,
-        )
+        resource_name = str(resource)
+        # OmniPath 资源不分物种，始终保留原名；其余资源按物种加前缀。
+        if (organism == 'mouse'
+                and str(resource).lower() != 'omnipath'
+                and not str(resource).lower().startswith('mouse')):
+            resource_name = 'mouse' + str(resource)
+        liana_adata = adata
+        expression_scale = 'adata.X'
+        counts_layer = adata.layers.get('counts') if hasattr(adata, 'layers') else None
+        if counts_layer is not None and _matrix_is_raw_counts(counts_layer):
+            liana_adata = adata.copy()
+            liana_adata.X = counts_layer.copy()
+            expression_scale = 'layers[counts]'
+        else:
+            self.progress(
+                -1,
+                '未找到非负整数 counts 层，LIANA 将使用当前 X 尺度；'
+                '建议在 QC 中保留 counts layer 以获得正确的表达幅度。',
+            )
+        try:
+            li.mt.rank_aggregate(
+                liana_adata,
+                groupby=cluster_key,
+                resource_name=resource_name,
+                expr_prop=min_prop,
+                use_raw=False,
+                verbose=False,
+            )
+        except TypeError as exc:
+            # 不同 liana 版本参数差异的兜底：去掉 use_raw 重试。
+            self.progress(-1, f"LIANA 调用参数不兼容（{exc}），尝试回退重试...")
+            li.mt.rank_aggregate(
+                liana_adata,
+                groupby=cluster_key,
+                resource_name=resource_name,
+                expr_prop=min_prop,
+                verbose=False,
+            )
+        except Exception as exc:
+            self.progress(-1, f"LIANA 分析失败: {exc}")
+            return {
+                'output_adata': input_path,
+                'result_files': [],
+                'summary': {
+                    'status': 'failed',
+                    'error': f'LIANA rank_aggregate 失败: {exc}。'
+                             '首次运行需要联网下载 consensus 资源，请确认网络与 omnipath 资源包可用。',
+                }
+            }
+        if liana_adata is not adata:
+            adata.uns['liana_res'] = liana_adata.uns.get('liana_res')
+            expression_scale = 'layers[counts]'
+            del liana_adata
 
         result_files = []
         plots_dir = self.ensure_plots_dir()
@@ -101,7 +154,8 @@ class CellCommunicationAnalysis(BaseAnalysis):
         liana_results.to_csv(csv_path, index=False)
         result_files.append({'file_path': csv_path, 'file_type': 'csv', 'category': 'table', 'label': 'Cell Communication Results'})
 
-        # Top interactions
+        # Top interactions：LIANA 默认按 magnitude_rank（表达强度）升序，
+        # 不含特异性；在 summary 中注明口径，避免误读为“最强生物学信号”。
         top_interactions = liana_results.head(top_n)
 
         # Generate bubble plot for top interactions
@@ -119,7 +173,15 @@ class CellCommunicationAnalysis(BaseAnalysis):
             y_pos = {value: index for index, value in enumerate(y_labels)}
             scores = []
             for _, row in bubble.iterrows():
-                lr_score = row.get('lr_means', row.get('aggregate_rank', 0))
+                if 'lr_means' in row.index and pd.notna(row.get('lr_means')):
+                    lr_score = row['lr_means']
+                else:
+                    # aggregate_rank 是越小越强，取负号使气泡大小/颜色
+                    # 与“信号强度”方向一致（越大越强）。
+                    try:
+                        lr_score = -float(row.get('aggregate_rank', 0))
+                    except (TypeError, ValueError):
+                        lr_score = 0.0
                 try:
                     scores.append(float(lr_score))
                 except (TypeError, ValueError):
@@ -133,11 +195,6 @@ class CellCommunicationAnalysis(BaseAnalysis):
                 s=sizes, c=scores, cmap='Reds', alpha=0.8,
                 edgecolors='white', linewidths=0.45,
             )
-            for _, row in bubble.iterrows():
-                source = row.get('source', '')
-                target = row.get('target', '')
-                ligand = row.get('ligand_complex', row.get('ligand', ''))
-                receptor = row.get('receptor_complex', row.get('receptor', ''))
             ax.set_xticks(np.arange(len(x_labels)), x_labels, rotation=45, ha='right', fontsize=8)
             ax.set_yticks(np.arange(len(y_labels)), y_labels, fontsize=8)
             ax.set_xlabel('Ligand-Receptor', fontsize=9)
@@ -239,8 +296,12 @@ class CellCommunicationAnalysis(BaseAnalysis):
             'summary': {
                 'n_interactions': n_interactions,
                 'n_cell_types': n_cell_types,
-                'resource': resource,
+                'resource': resource_name,
                 'organism': organism,
                 'cluster_key': cluster_key,
+                'scope_key': str(self.params.get('scope_key', '') or '').strip() or None,
+                'scope_values': ([v.strip() for v in str(self.params.get('scope_values', '') or '').split(',') if v.strip()] or None),
+                'expression_scale': expression_scale,
+                'top_n_ordering': 'Top N 按 LIANA magnitude_rank（表达强度）排序，不含特异性',
             }
         }

@@ -1,0 +1,16 @@
+[Unit]
+Description=SC Transcriptomics Platform
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oelab
+WorkingDirectory=/home/oelab/data/sc-transcriptomics-platform
+ExecStart=/home/oelab/App/miniconda3/bin/python /home/oelab/data/sc-transcriptomics-platform/app.py
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -38,6 +38,10 @@ def test_batch_zip_endpoint_accepts_two_batches(test_project, monkeypatch):
             data=MultiDict(files + [
                 ('batch_name', 'Control'),
                 ('batch_name', 'Treatment'),
+                ('sample_id', 'Ctrl_S1'),
+                ('sample_id', 'Treat_S2'),
+                ('condition', '对照组'),
+                ('condition', '疾病组'),
             ]),
             content_type='multipart/form-data',
         )
@@ -49,7 +53,46 @@ def test_batch_zip_endpoint_accepts_two_batches(test_project, monkeypatch):
     task = AnalysisTask.get_by_id(payload['task_id'])
     params = json.loads(task.params_json)
     assert [item['batch_name'] for item in params['batch_sources']] == ['Control', 'Treatment']
+    assert [item['sample_id'] for item in params['batch_sources']] == ['Ctrl_S1', 'Treat_S2']
+    assert [item['condition'] for item in params['batch_sources']] == ['对照组', '疾病组']
     assert all(item['zip_path'].startswith(Config.uploads_dir(test_project)) for item in params['batch_sources'])
+
+
+def test_batch_zip_endpoint_defaults_sample_id_to_batch_name(test_project, monkeypatch):
+    from app import create_app
+    from config import Config
+    from models import AnalysisTask
+
+    submitted = []
+    import worker
+    monkeypatch.setattr(worker, 'submit_task', lambda *args: submitted.append(args) or True)
+    app = create_app()
+    app.config['TESTING'] = True
+
+    files = [
+        ('batch_zip', (_zip_bytes(['filtered_feature_bc_matrix/matrix.mtx',
+                                   'filtered_feature_bc_matrix/barcodes.tsv',
+                                   'filtered_feature_bc_matrix/features.tsv']), 'control.zip')),
+        ('batch_zip', (_zip_bytes(['filtered_feature_bc_matrix/matrix.mtx',
+                                   'filtered_feature_bc_matrix/barcodes.tsv',
+                                   'filtered_feature_bc_matrix/features.tsv']), 'treatment.zip')),
+    ]
+    with app.test_client() as client:
+        response = client.post(
+            f'/projects/{test_project}/upload/import-10x-batches',
+            data=MultiDict(files + [
+                ('batch_name', 'Control'),
+                ('batch_name', 'Treatment'),
+            ]),
+            content_type='multipart/form-data',
+        )
+
+    assert response.status_code == 200
+    task = AnalysisTask.get_by_id(response.get_json()['task_id'])
+    params = json.loads(task.params_json)
+    # sample_id 未填写时默认与批次名称一致
+    assert [item['sample_id'] for item in params['batch_sources']] == ['Control', 'Treatment']
+    assert all(item['condition'] == '' for item in params['batch_sources'])
 
 
 def test_batch_zip_extraction_rejects_path_traversal(tmp_path):

@@ -2,6 +2,7 @@
 """AI 对话适配器 — 支持 Anthropic Messages 和 OpenAI 兼容 API"""
 import json
 from config import Config
+from modules.ai_config import get_effective_ai_config
 
 
 # 工具定义：AI 可调用的平台功能
@@ -71,7 +72,7 @@ TOOLS_ANTHROPIC = [
     },
     {
         "name": "get_task_results",
-        "description": "获取某个分析任务的结果摘要，包括统计数据和生成的图表列表。",
+        "description": "获取某个分析任务的结果摘要，包括统计数据、生成的图表列表；如果存在 PNG/JPG/SVG 等图片，还会返回可在当前对话中展示的图片附件。",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -302,6 +303,78 @@ TOOLS_ANTHROPIC = [
             },
             "required": ["session_id", "instruction"]
         }
+    },
+    {
+        "name": "list_wes_workflows",
+        "description": "[只读] 列出平台登记的 WES 工作流、支持的输入类型、模式和执行器状态。不会启动分析。",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "list_wes_references",
+        "description": "[只读] 列出管理员登记的 WES reference asset，返回 assembly、bundle 版本和资源类型，不返回参考序列内容。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "assembly": {"type": "string", "description": "可选，如 GRCh38"},
+                "bundle_version": {"type": "string", "description": "可选 reference bundle 版本"},
+                "status": {"type": "string", "description": "可选，默认 registered"}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "inspect_wes_manifest",
+        "description": "[只读] 对 WES 样本 manifest 做输入、样本角色、参考资源和文件路径预检查；不会启动外部工作流。优先使用 manifest_id，也可传项目内 manifest_path 或内联 manifest。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "workflow_key": {
+                    "type": "string",
+                    "description": "WES 工作流键，如 wes_germline、wes_somatic、wes_annotate_only"
+                },
+                "manifest_id": {
+                    "type": "string",
+                    "description": "已登记的项目 manifest ID"
+                },
+                "manifest_path": {
+                    "type": "string",
+                    "description": "项目目录内 JSON/CSV/TSV manifest 路径"
+                },
+                "manifest": {
+                    "type": "object",
+                    "description": "内联 manifest 对象；仅用于预检查，不会持久化"
+                },
+                "check_files": {
+                    "type": "boolean",
+                    "description": "是否检查输入文件存在，默认 true"
+                },
+                "check_content": {
+                    "type": "boolean",
+                    "description": "是否使用已安装的 pysam 做 BAM/CRAM/VCF/FASTQ 内容级检查，默认 false"
+                }
+            },
+            "required": ["workflow_key"]
+        }
+    },
+    {
+        "name": "inspect_wes_preflight",
+        "description": "[只读] WES manifest 预检查别名，用于确认样本配对、文件类型和参考资源；不执行 Nextflow。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "workflow_key": {"type": "string"},
+                "manifest_id": {"type": "string"},
+                "manifest_path": {"type": "string"},
+                "manifest": {"type": "object"},
+                "check_files": {"type": "boolean"},
+                "check_content": {"type": "boolean"}
+            },
+            "required": ["workflow_key"]
+        }
     }
 ]
 
@@ -316,6 +389,7 @@ AUTO_EXEC_TOOLS = {
     'inspect_analysis_state', 'inspect_adata', 'get_cluster_summary',
     'score_cell_type_signature', 'list_builtin_markers',
     'recommend_analysis_config',
+    'list_wes_workflows', 'list_wes_references', 'inspect_wes_manifest', 'inspect_wes_preflight',
 }
 # 需要用户确认的工具
 CONFIRM_TOOLS = {'run_analysis', 'run_pipeline', 'propose_parameter_sweep', 'run_parameter_sweep',
@@ -325,7 +399,7 @@ CONFIRM_TOOLS = {'run_analysis', 'run_pipeline', 'propose_parameter_sweep', 'run
 
 
 # System prompt
-SYSTEM_PROMPT = """你是一个生信分析助手，帮助用户进行 RNA-seq 数据分析。你的平台是基于 Flask 的 Web 应用，支持单细胞和 Bulk RNA-seq 全流程分析。
+SYSTEM_PROMPT = """你是一个生信分析助手，帮助用户进行 RNA-seq 和 WES 数据分析。你的平台是基于 Flask 的 Web 应用，支持单细胞、Bulk RNA-seq 全流程，以及 WES 输入预检查与工作流登记。
 
 ## 你的能力
 1. **自然语言触发分析**：用户说"对 hmc3 和 ctrl 做差异分析"，你调用 run_analysis(module_name="bulk_deg", params={{...}})
@@ -335,6 +409,7 @@ SYSTEM_PROMPT = """你是一个生信分析助手，帮助用户进行 RNA-seq �
 5. **分析状态检查**：使用 inspect_analysis_state 查看当前聚类/嵌入/注释信息
 6. **细胞类型打分**：使用 score_cell_type_signature 对已有分群进行 marker 评分
 7. **目标优化 Agent**：用户指定细胞类型，你使用 start_goal_agent 自动检查、生成候选参数、评分并推荐最佳分群
+8. **WES 输入审阅**：使用 list_wes_workflows、list_wes_references 和 inspect_wes_manifest 检查清单、配对、参考资源和文件能力；这些工具只读，不启动 WES。
 
 ## 目标优化 Agent 使用流程
 当用户表示对分群不满意或想找特定细胞类型时：
@@ -370,12 +445,19 @@ Bulk：bulk_qc, bulk_normalize, bulk_deg, bulk_pca, bulk_heatmap, bulk_enrichmen
 
 def _is_anthropic():
     """判断是否使用 Anthropic API"""
-    url = Config.AI_API_URL.lower()
+    settings = get_effective_ai_config()
+    provider = settings.get("provider", "auto")
+    if provider == "anthropic":
+        return True
+    if provider == "openai":
+        return False
+    url = settings["api_url"].lower()
     return 'anthropic' in url or 'claude' in url
 
 
 def _provider_name():
-    url = Config.AI_API_URL.lower()
+    settings = get_effective_ai_config()
+    url = settings["api_url"].lower()
     if 'deepseek' in url:
         return 'deepseek-anthropic' if _is_anthropic() else 'deepseek-openai'
     return 'anthropic' if _is_anthropic() else 'openai-compatible'
@@ -383,19 +465,39 @@ def _provider_name():
 
 def _safe_api_url():
     """Return API URL without query strings for display/logging."""
-    return Config.AI_API_URL.split('?', 1)[0]
+    return get_effective_ai_config()["api_url"].split('?', 1)[0]
 
 
 def get_ai_config_status():
     """Expose non-secret AI configuration status for UI diagnostics."""
+    settings = get_effective_ai_config()
     return {
-        "configured": bool(Config.AI_API_KEY),
+        "configured": bool(settings["api_key"]),
         "provider": _provider_name(),
         "mode": "anthropic_messages" if _is_anthropic() else "openai_chat_completions",
         "api_url": _safe_api_url(),
-        "model": Config.AI_MODEL,
+        "model": settings["model"],
         "requires_local_token": bool(Config.AI_API_TOKEN),
     }
+
+
+def _merge_attachments(target, result):
+    """Collect safe result-image metadata from tool responses for the UI."""
+    if not isinstance(result, dict):
+        return
+    for attachment in result.get("attachments", []) or []:
+        if not isinstance(attachment, dict) or not attachment.get("url"):
+            continue
+        key = attachment.get("id") or attachment["url"]
+        if not any((item.get("id") or item.get("url")) == key for item in target):
+            target.append({
+                "id": attachment.get("id", ""),
+                "task_id": attachment.get("task_id", ""),
+                "label": attachment.get("label", "分析图"),
+                "category": attachment.get("category", "plot"),
+                "type": attachment.get("type", "png"),
+                "url": attachment["url"],
+            })
 
 
 def chat(messages, project_id=None):
@@ -403,11 +505,17 @@ def chat(messages, project_id=None):
     与 LLM 对话，支持工具调用循环。自动检测 Anthropic / OpenAI 格式。
     """
     tool_calls_log = []
+    # Attachment metadata is for the browser only; do not send the extra
+    # fields back to OpenAI-compatible clients as message properties.
+    model_messages = [
+        {key: value for key, value in message.items() if key != "attachments"}
+        for message in messages
+    ]
 
     if _is_anthropic():
-        return _chat_anthropic(messages, project_id, tool_calls_log)
+        return _chat_anthropic(model_messages, project_id, tool_calls_log)
     else:
-        return _chat_openai(messages, project_id, tool_calls_log)
+        return _chat_openai(model_messages, project_id, tool_calls_log)
 
 
 def _chat_anthropic(messages, project_id, tool_calls_log):
@@ -419,6 +527,7 @@ def _chat_anthropic(messages, project_id, tool_calls_log):
     from modules.ai_tools import execute_tool
 
     proposed_tools = []
+    attachments = []
 
     api_messages = []
     for msg in messages:
@@ -455,6 +564,7 @@ def _chat_anthropic(messages, project_id, tool_calls_log):
                     result_str = json.dumps({"status": "pending_confirmation", "message": "等待用户确认"})
                 else:
                     result = execute_tool(func_name, args, project_id)
+                    _merge_attachments(attachments, result)
                     result_str = json.dumps(result, ensure_ascii=False, default=str)
                 tool_results.append({
                     "type": "tool_result",
@@ -485,44 +595,49 @@ def _chat_anthropic(messages, project_id, tool_calls_log):
                             rs = json.dumps({"status": "pending_confirmation", "message": "等待用户确认"})
                         else:
                             r = execute_tool(fn, ar, project_id)
+                            _merge_attachments(attachments, r)
                             rs = json.dumps(r, ensure_ascii=False, default=str)
                         new_tool_results.append({"type": "tool_result", "tool_use_id": block.get("id"), "content": rs})
                 if not has_more_tools:
                     all_msgs = messages + [{"role": "assistant", "content": new_text}]
-                    return {"reply": new_text, "tool_calls": tool_calls_log, "messages": all_msgs, "proposed_tools": proposed_tools}
+                    return {"reply": new_text, "tool_calls": tool_calls_log, "messages": all_msgs, "proposed_tools": proposed_tools, "attachments": attachments}
                 api_messages.append({"role": "assistant", "content": content_blocks})
                 api_messages.append({"role": "user", "content": new_tool_results})
 
             reply_text = new_text or "工具调用已执行，但回复生成超出轮次限制。请查看任务状态了解结果。"
             all_msgs = messages + [{"role": "assistant", "content": reply_text}]
-            return {"reply": reply_text, "tool_calls": tool_calls_log, "messages": all_msgs, "proposed_tools": proposed_tools}
+            return {"reply": reply_text, "tool_calls": tool_calls_log, "messages": all_msgs, "proposed_tools": proposed_tools, "attachments": attachments}
 
         # 纯文本回复
         all_msgs = messages + [{"role": "assistant", "content": text_content}]
-        return {"reply": text_content, "tool_calls": tool_calls_log, "messages": all_msgs, "proposed_tools": proposed_tools}
+        return {"reply": text_content, "tool_calls": tool_calls_log, "messages": all_msgs, "proposed_tools": proposed_tools, "attachments": attachments}
 
     except Exception as e:
-        return {"reply": f"AI 调用失败: {str(e)}", "tool_calls": tool_calls_log, "messages": messages, "proposed_tools": proposed_tools}
+        return {"reply": f"AI 调用失败: {str(e)}", "tool_calls": tool_calls_log, "messages": messages, "proposed_tools": proposed_tools, "attachments": attachments}
 
 
 def _anthropic_messages_endpoint():
-    base_url = Config.AI_API_URL.rstrip("/")
+    base_url = get_effective_ai_config()["api_url"].rstrip("/")
     if base_url.endswith("/v1/messages") or base_url.endswith("/messages"):
         return base_url
+    if base_url.endswith("/v1"):
+        return base_url + "/messages"
     return base_url + "/v1/messages"
 
 
 def _anthropic_messages_create(api_messages):
     import requests
 
+    settings = get_effective_ai_config()
+
     headers = {
         "Content-Type": "application/json",
-        "x-api-key": Config.AI_API_KEY,
-        "Authorization": f"Bearer {Config.AI_API_KEY}",
+        "x-api-key": settings["api_key"],
+        "Authorization": f"Bearer {settings['api_key']}",
         "anthropic-version": "2023-06-01",
     }
     payload = {
-        "model": Config.AI_MODEL,
+        "model": settings["model"],
         "system": SYSTEM_PROMPT,
         "messages": api_messages,
         "tools": TOOLS_ANTHROPIC,
@@ -550,18 +665,21 @@ def _chat_openai(messages, project_id, tool_calls_log):
     from openai import OpenAI
     from modules.ai_tools import execute_tool
 
+    settings = get_effective_ai_config()
+
     client = OpenAI(
-        base_url=Config.AI_API_URL,
-        api_key=Config.AI_API_KEY,
+        base_url=settings["api_url"],
+        api_key=settings["api_key"],
         timeout=60.0,
     )
 
     proposed_tools = []
+    attachments = []
     all_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
 
     for _ in range(5):
         response = client.chat.completions.create(
-            model=Config.AI_MODEL,
+            model=settings["model"],
             messages=all_messages,
             tools=TOOLS_OPENAI,
             tool_choice="auto",
@@ -577,6 +695,7 @@ def _chat_openai(messages, project_id, tool_calls_log):
                 "tool_calls": tool_calls_log,
                 "messages": all_messages[1:],
                 "proposed_tools": proposed_tools,
+                "attachments": attachments,
             }
 
         for tc in msg.tool_calls:
@@ -593,6 +712,7 @@ def _chat_openai(messages, project_id, tool_calls_log):
                 result_str = json.dumps({"status": "pending_confirmation", "message": "等待用户确认"})
             else:
                 result = execute_tool(func_name, args, project_id)
+                _merge_attachments(attachments, result)
                 result_str = json.dumps(result, ensure_ascii=False, default=str)
 
             all_messages.append({
@@ -606,4 +726,5 @@ def _chat_openai(messages, project_id, tool_calls_log):
         "tool_calls": tool_calls_log,
         "messages": all_messages[1:],
         "proposed_tools": proposed_tools,
+        "attachments": attachments,
     }

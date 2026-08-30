@@ -15,6 +15,7 @@ htmlcov/
 venv/
 .venv/
 /data
+/.test_tmp/
 genesets/
 .superpowers/
 /cache
@@ -31,9 +32,20 @@ artifacts/
 
 # Local installers and archives
 *.deb
+/vendor/nat123/
 
 # Local configuration
 .claude/
 PROMPT.md
 STATE.md
 review_*.md
+
+# Local scratch, env backups and runtime artifacts
+.env.save
+.Rhistory
+.dshtest
+.ovqc.txt
+.nextflow/
+.nextflow.log*
+/raw_data/
+deploy/*.log

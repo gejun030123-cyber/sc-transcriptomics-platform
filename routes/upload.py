@@ -10,6 +10,9 @@ ALLOWED_EXT = {
     '.h5ad', '.h5', '.hdf5', '.loom', '.zarr',
     '.csv', '.txt', '.mtx', '.gz', '.xlsx', '.xls', '.tsv',
     '.zip',
+    # CellOracle 虚拟敲除：base GRN / links 对象
+    '.parquet', '.pq', '.pickle', '.pkl', '.gpickle',
+    '.oracle', '.celloracle', '.links',
 }
 
 # 10x 文件名匹配模式
@@ -270,7 +273,14 @@ def import_10x_batches(pid):
         names = [request.form.get('batch_a_name', ''), request.form.get('batch_b_name', '')]
     while len(names) < len(files):
         names.append('')
+    sample_ids = request.form.getlist('sample_id')
+    while len(sample_ids) < len(files):
+        sample_ids.append('')
+    conditions = request.form.getlist('condition')
+    while len(conditions) < len(files):
+        conditions.append('')
     default_names = []
+    resolved_sample_ids = []
     for index, file in enumerate(files, start=1):
         original = secure_filename(file.filename or '')
         if not original.lower().endswith('.zip'):
@@ -281,8 +291,15 @@ def import_10x_batches(pid):
         if not name:
             name = f'batch_{index}'
         default_names.append(name)
+        sample_id = sample_ids[index - 1].strip() or name
+        sample_id = ''.join(ch if ch.isalnum() or ch in '._-' else '_' for ch in sample_id).strip('._-')
+        if not sample_id:
+            sample_id = name
+        resolved_sample_ids.append(sample_id)
     if len(set(default_names)) != len(default_names):
-        return jsonify({'error': '两组批次名称不能相同'}), 400
+        return jsonify({'error': '批次名称不能重复'}), 400
+    if len(set(resolved_sample_ids)) != len(resolved_sample_ids):
+        return jsonify({'error': '样本 ID（sample_id）不能重复'}), 400
 
     species = request.form.get('species', '').strip() or None
     genome = request.form.get('genome', '').strip() or None
@@ -295,7 +312,12 @@ def import_10x_batches(pid):
         stored_name = f'{index}_{batch_name}_{original}'
         zip_path = os.path.join(zip_dir, stored_name)
         file.save(zip_path)
-        batch_sources.append({'zip_path': zip_path, 'batch_name': batch_name})
+        batch_sources.append({
+            'zip_path': zip_path,
+            'batch_name': batch_name,
+            'sample_id': resolved_sample_ids[index - 1],
+            'condition': conditions[index - 1].strip(),
+        })
 
     params = {
         'batch_sources': batch_sources,

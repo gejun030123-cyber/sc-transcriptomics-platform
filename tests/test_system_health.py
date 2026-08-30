@@ -13,6 +13,23 @@ def test_dependency_status_has_groups_and_module_availability():
     assert set(MODULE_REGISTRY).issubset(status["modules"])
     assert "optional_missing" in status["modules"]["subcluster"]
     assert "gseapy" not in status["modules"]["bulk_enrichment"]["missing"]
+    assert {"hap.py", "som.py"} <= set(status["external_tools"])
+
+
+def test_dependency_status_honors_configured_nextflow(tmp_path, monkeypatch):
+    from config import Config
+    from modules.platform.system_health import dependency_status
+
+    nextflow = tmp_path / "nextflow"
+    nextflow.write_text("#!/bin/sh\n", encoding="utf-8")
+    nextflow.chmod(0o755)
+    monkeypatch.setattr(Config, "WES_NEXTFLOW_BIN", str(nextflow))
+
+    status = dependency_status()
+    assert status["external_tools"]["nextflow"] == {
+        "installed": True,
+        "path": str(nextflow),
+    }
 
 
 def test_system_dependencies_api(tmp_path, monkeypatch):

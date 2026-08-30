@@ -178,7 +178,7 @@ def _select_terms(frame, spec, *, direction=False):
 
 
 class NatureEnrichmentBarplot:
-    """Horizontal ORA/GSEA enrichment bars with restrained count annotations."""
+    """Horizontal ORA/GSEA bars with explicit score and gene-count labels."""
 
     plot_type = 'enrichment_barplot'
 
@@ -196,7 +196,7 @@ class NatureEnrichmentBarplot:
         y = np.cumsum(row_steps) - row_steps / 2.0
         with style.context(spec):
             fig, ax = _new_figure(spec.with_updates(plot_type=self.plot_type), style, container)
-            ax.barh(y, values, color=colors, height=row_steps * .60, edgecolor='none', alpha=.92, zorder=2)
+            ax.barh(y, values, color=colors, height=row_steps * .64, edgecolor='none', alpha=.96, zorder=2)
             ax.axvline(0, color=style.neutral_dark, linewidth=.55, zorder=1) if is_gsea else None
             ax.set_yticks(y, terms)
             ax.invert_yaxis()
@@ -207,11 +207,15 @@ class NatureEnrichmentBarplot:
             ax.spines['left'].set_visible(False)
             ax.tick_params(axis='y', length=0, pad=3)
             limit = max(float(np.nanmax(np.abs(values))), 1.0)
-            ax.set_xlim((-limit * 1.16, limit * 1.16) if is_gsea else (0, limit * 1.20))
+            # Reserve deliberate space for the audit labels instead of letting
+            # the text collide with the right edge at a single-column width.
+            ax.set_xlim((-limit * 1.48, limit * 1.48) if is_gsea else (0, limit * 1.48))
             for yi, value, count in zip(y, values, subset['_count']):
-                offset = limit * (.025 if is_gsea else .018)
+                offset = limit * .035
                 x = value + (offset if value >= 0 else -offset)
-                ax.text(x, yi, f'n={int(round(count))}', ha='left' if value >= 0 else 'right',
+                value_label = f'{value:+.2f}' if is_gsea else f'{value:.2f}'
+                ax.text(x, yi, f'{value_label}  ·  n={int(round(count))}',
+                        ha='left' if value >= 0 else 'right',
                         va='center', color=style.muted_text, fontsize=style.profile(spec).legend_font_pt)
             fig.subplots_adjust(left=.51 if spec.width == 'single' else .40, right=.97, top=.88, bottom=.20)
         warnings = []

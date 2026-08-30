@@ -322,6 +322,37 @@ class TestSCModuleClustering:
         assert 'marker_selection' in result['summary']
         assert result['summary']['marker_selection']['parameters']['method'] == 'wilcoxon'
 
+    @_timeout(60)
+    def test_clustering_use_corrected_runs_neighbors_on_harmony(self, tmp_path):
+        """use_corrected=true 必须让 neighbors/UMAP 使用 Harmony 表示。"""
+        from modules.clustering import ClusteringAnalysis
+
+        adata = _make_sc_anndata()
+        adata.obsm['X_pca_harmony'] = adata.obsm['X_pca'].copy()
+        input_path = str(tmp_path / 'harmony_input.h5ad')
+        adata.write_h5ad(input_path)
+
+        mod = _instantiate(ClusteringAnalysis, str(tmp_path), params={
+            'resolutions': '0.5',
+            'n_neighbors': 10,
+            'n_pcs': 5,
+            'use_corrected': True,
+            'compute_marker_preview': False,
+            'show_resolution_sankey': False,
+            'show_cluster_batch_composition': False,
+        })
+        result = mod.run(input_path)
+        summary = result['summary']
+        assert summary['requested_use_corrected'] is True
+        assert summary['resolved_use_rep'] == 'X_pca_harmony'
+        assert summary['neighbors_use_rep'] == 'X_pca_harmony'
+        assert summary['umap_source_representation'] == 'X_pca_harmony'
+
+        out = sc.read_h5ad(result['output_adata'])
+        assert out.uns['clustering_neighbors']['neighbors_use_rep'] == 'X_pca_harmony'
+        assert out.uns['clustering_umap']['source_representation'] == 'X_pca_harmony'
+        assert out.uns['neighbors']['params']['use_rep'] == 'X_pca_harmony'
+
 
 class TestSCModuleQCReassess:
     """QC 再评估模块集成测试。"""
@@ -982,7 +1013,7 @@ class TestSCModuleDimredDeepAssertions:
 
     @_timeout(60)
     def test_dimred_output_has_pca_variance(self, tmp_path):
-        """Dimred 输出应含 PCA variance ratio 和 summary 中的 n_pcs。"""
+        """Dimred 输出应区分最大候选 PC 与最终选中的 PC。"""
         from modules.dimred import DimredAnalysis
 
         adata = _make_sc_anndata()
@@ -994,10 +1025,46 @@ class TestSCModuleDimredDeepAssertions:
         })
         result = mod.run(input_path)
 
-        assert result['summary']['n_pcs'] == 10
+        assert result['summary']['requested_max_pcs'] == 10
+        assert result['summary']['candidate_n_pcs'] == 10
+        assert 2 <= result['summary']['selected_n_pcs'] <= 10
+        assert result['summary']['pc_selection_method'] == 'elbow'
+        assert result['summary']['pca_fingerprint']
+        assert result['summary']['pca_result_shape'][1] == 10
         assert result['summary']['pca_variance_ratio_top5'] is not None
         assert 0 < result['summary']['pca_variance_ratio_top5'] <= 1.0
         assert result['summary']['embedding_method'] in ('umap', 'mde')
+
+    @_timeout(120)
+    def test_dimred_recomputes_pca_when_hvg_mode_changes(self, tmp_path):
+        """Full-gene and HVG PCA must produce different, auditable fingerprints."""
+        from modules.dimred import DimredAnalysis
+
+        adata = _make_sc_anndata(n_obs=50, n_vars=300)
+        adata.var['highly_variable'] = False
+        adata.var.iloc[:80, adata.var.columns.get_loc('highly_variable')] = True
+        input_path = str(tmp_path / 'input.h5ad')
+        adata.write_h5ad(input_path)
+
+        results = {}
+        for hvg_only in (False, True):
+            project_dir = tmp_path / ('hvg' if hvg_only else 'full')
+            project_dir.mkdir()
+            result = _instantiate(DimredAnalysis, str(project_dir), params={
+                'n_comps': 10,
+                'auto_n_comps': 'none',
+                'pca_hvg_only': hvg_only,
+                'batch_key': '',
+                'umap_n_neighbors': 10,
+            }).run(input_path)
+            results[hvg_only] = result
+
+        full = results[False]['summary']
+        hvg = results[True]['summary']
+        assert full['pca_n_genes'] == 300
+        assert hvg['pca_n_genes'] == 80
+        assert full['pca_result_shape'] == hvg['pca_result_shape'] == [50, 10]
+        assert full['pca_fingerprint'] != hvg['pca_fingerprint']
 
     @_timeout(60)
     def test_dimred_umap_coords_2d(self, tmp_path):
@@ -1654,7 +1721,7 @@ class TestWorkerIntegration:
                        'trajectory', 'sc_timecourse', 'proportion',
                        'cell_communication', 'subcluster', 'sc_batch_import',
                        'sc_cell_deg', 'sc_cell_go', 'sc_pseudobulk_deg',
-                       'sc_csv_export'}
+                       'sc_csv_export', 'virtual_ko'}
         expected_bulk = {'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca',
                         'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
                         'bulk_deg_integration'}

@@ -173,6 +173,19 @@ def test_gsea_top_n_balances_both_nes_directions_and_strips_ids():
     plt.close(figure)
 
 
+def test_enrichment_barplot_exposes_score_and_gene_count_at_each_bar_end():
+    import matplotlib.pyplot as plt
+
+    from figure_engine import NatureFigureDirector
+
+    director = NatureFigureDirector()
+    figure = director.render(director.create_spec('barplot', top_n=3), _ora_fixture())
+    labels = [text.get_text() for text in figure.axes[0].texts]
+    assert any('8.00' in label and 'n=8' in label for label in labels)
+    assert figure.axes[0].get_xlim()[1] > 8.0 * 1.4
+    plt.close(figure)
+
+
 def test_target_pathways_and_gene_labels_apply_to_network_views(tmp_path):
     import matplotlib.pyplot as plt
     from figure_engine import NatureFigureDirector, export_figure

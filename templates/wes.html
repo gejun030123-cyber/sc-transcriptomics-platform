@@ -1,0 +1,569 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }} - WES{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-start mb-3">
+    <div>
+        <h4>WES 工作台</h4>
+        <p class="text-muted mb-0">实验室科研用途；胚系与肿瘤结果独立展示，不用于临床诊断。</p>
+    </div>
+    <a class="btn btn-sm btn-outline-secondary" href="/projects/{{ project.id }}">返回项目</a>
+</div>
+
+{% if not settings.executor_enabled %}
+<div class="alert alert-warning">
+    执行器仍处于关闭状态。可以登记样本、准备运行和查看既有结果；参考资源与科学验证通过后再开启。
+</div>
+{% endif %}
+
+<div class="row g-3 mb-4">
+    <div class="col-lg-5">
+        <div class="card p-3 h-100">
+            <h6>运行环境</h6>
+            <table class="table table-sm mb-0 small">
+                <tr><td>Nextflow profile</td><td>{{ settings.profile }}</td></tr>
+                <tr><td>Genome</td><td>{{ settings.genome }}</td></tr>
+                <tr><td>本地 iGenomes</td><td>{{ '已配置' if settings.igenomes_configured else '未配置' }}</td></tr>
+                <tr><td>VEP cache</td><td>{{ '已配置' if settings.vep_configured else '未配置' }}</td></tr>
+                <tr><td>PoN / germline resource</td><td>{{ '已配置' if settings.pon_configured and settings.germline_resource_configured else '未完整配置' }}</td></tr>
+            </table>
+        </div>
+    </div>
+    <div class="col-lg-7">
+        <div class="card p-3 h-100">
+            <h6>Capture kit profiles</h6>
+            {% if capture_kits %}
+                {% for kit in capture_kits %}
+                <div class="d-flex justify-content-between border-bottom py-2 small">
+                    <span><strong>{{ kit.name }}</strong> {{ kit.version }} · {{ kit.assembly }}</span>
+                    <span class="badge {{ 'text-bg-success' if kit.production_allowed else 'text-bg-warning' }}">{{ kit.status }}</span>
+                </div>
+                {% endfor %}
+            {% else %}
+                <p class="text-muted small mb-0">尚无 profile。可先登记官方 test_only BED；真实试剂盒到位后新增独立 profile。</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<div class="card p-3 mb-4">
+    <h6>上传自有 capture BED</h6>
+    <p class="text-muted small mb-2">
+        上传后只登记为 <code>test_only</code>；管理员核对厂商、版本、GRCh38 坐标和 checksum 后，
+        才能提升为 <code>validated</code>。不会因上传自动启动分析。
+    </p>
+    <form method="post" enctype="multipart/form-data" action="/projects/{{ project.id }}/wes/capture-kits/upload">
+        <div class="row g-2 align-items-end">
+            <div class="col-md-2">
+                <label class="form-label small">稳定 ID</label>
+                <input class="form-control form-control-sm" name="capture_kit_id" required
+                       pattern="[A-Za-z0-9_-]{1,64}" placeholder="lab-kit-v1">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small">厂商/产品名称</label>
+                <input class="form-control form-control-sm" name="name" required placeholder="实验室实际试剂盒">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small">版本</label>
+                <input class="form-control form-control-sm" name="version" required placeholder="v1">
+            </div>
+            <div class="col-md-1">
+                <label class="form-label small">Assembly</label>
+                <input class="form-control form-control-sm" name="assembly" value="GRCh38" required>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small">Calling BED</label>
+                <input class="form-control form-control-sm" type="file" name="calling_bed"
+                       accept=".bed,.gz" required>
+            </div>
+            <div class="col-md-1">
+                <button class="btn btn-sm btn-outline-primary w-100" type="submit">上传</button>
+            </div>
+        </div>
+    </form>
+</div>
+
+<div class="card p-3 mb-4">
+    <h6>上传 SRA 并转换为 FASTQ</h6>
+    <p class="text-muted small mb-2">
+        仅接受本地 <code>.sra</code> 文件。平台会先检查磁盘空间，再在后台运行
+        <code>fasterq-dump --split-files</code>，检测 R1/R2、压缩并登记 FASTQ 资产。
+        转换期间可以离开页面，稍后回来查看状态。
+    </p>
+    <form id="wes-sra-form" enctype="multipart/form-data">
+        <div class="row g-2 align-items-end">
+            <div class="col-md-2">
+                <label class="form-label small">sample_id</label>
+                <input class="form-control form-control-sm" id="wes-sra-sample-id" required placeholder="S1">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small">patient_id</label>
+                <input class="form-control form-control-sm" id="wes-sra-patient-id" required placeholder="P1">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small">role</label>
+                <select class="form-select form-select-sm" id="wes-sra-role">
+                    <option value="germline">germline</option>
+                    <option value="normal">normal</option>
+                    <option value="tumor">tumor</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small">SRA 文件</label>
+                <input class="form-control form-control-sm" type="file" id="wes-sra-file" accept=".sra" required>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-sm btn-outline-primary w-100" type="submit">上传并转换</button>
+            </div>
+        </div>
+    </form>
+    <div class="small text-muted mt-2" id="wes-sra-status"></div>
+    <button type="button" class="btn btn-sm btn-outline-success mt-2 d-none" id="wes-sra-use-result">
+        将转换结果填入 FASTQ 样本
+    </button>
+    {% if sra_jobs %}
+    <div class="border-top mt-3 pt-2">
+        <div class="small fw-semibold mb-1">本项目 SRA 转换记录</div>
+        <div class="table-responsive">
+            <table class="table table-sm align-middle small mb-0">
+                <thead><tr><th>任务</th><th>样本</th><th>状态</th><th>输出</th></tr></thead>
+                <tbody>
+                {% for job in sra_jobs %}
+                <tr>
+                    <td><code>{{ job.id }}</code></td>
+                    <td>{{ job.sample_id }} · {{ job.role }}</td>
+                    <td>{{ job.status }}{% if job.progress_message %}（{{ job.progress_message }}）{% endif %}</td>
+                    <td>
+                        {% if job.output_paths %}
+                        <span class="text-break">{{ job.output_paths.fastq_1 }}<br>{{ job.output_paths.fastq_2 }}</span>
+                        <button type="button" class="btn btn-sm btn-outline-success mt-1 wes-sra-use-history"
+                                data-sra-job-id="{{ job.id }}">填入向导</button>
+                        {% elif job.error_text %}<span class="text-danger">{{ job.error_text }}</span>
+                        {% else %}<span class="text-muted">—</span>{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<div class="card p-3 mb-4">
+    <h6>创建 WES 样本运行</h6>
+    <p class="text-muted small mb-3">
+        选择流程、capture kit 并上传测序文件；平台会自动保存文件、登记 checksum、生成 sample manifest
+        并执行预检，不需要手写 JSON。SRA 不作为直接输入；请先转换为 FASTQ。
+    </p>
+    <form id="wes-manifest-form">
+        <div class="row g-2 mb-3">
+            <div class="col-md-3">
+                <label class="form-label small">分析流程</label>
+                <select class="form-select form-select-sm" id="wes-workflow-key" required>
+                    {% for workflow in workflows %}
+                    {% if workflow.key != 'wes_annotate_only' %}
+                    <option value="{{ workflow.key }}">{{ workflow.display_name }}</option>
+                    {% endif %}
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small">Reference bundle</label>
+                <input class="form-control form-control-sm" id="wes-reference-bundle"
+                       value="gatk-grch38-lab-v1" required>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small">Capture kit</label>
+                <select class="form-select form-select-sm" id="wes-capture-kit" required>
+                    <option value="">请选择</option>
+                    {% for kit in capture_kits %}
+                    <option value="{{ kit.capture_kit_id }}" data-production="{{ 'true' if kit.production_allowed else 'false' }}">
+                        {{ kit.name }} {{ kit.version }} · {{ kit.status }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small">输入类型</label>
+                <select class="form-select form-select-sm" id="wes-input-type" required>
+                    <option value="fastq">FASTQ R1/R2</option>
+                    <option value="bam">BAM + BAI</option>
+                    <option value="cram">CRAM + CRAI</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="table-responsive">
+            <table class="table table-sm align-middle" id="wes-sample-table">
+                <thead>
+                <tr>
+                    <th>sample_id</th><th>patient_id</th><th>role</th>
+                    <th class="wes-fastq-field">R1</th><th class="wes-fastq-field">R2</th>
+                    <th class="wes-bam-field d-none">BAM</th><th class="wes-bam-field d-none">BAI</th>
+                    <th class="wes-cram-field d-none">CRAM</th><th class="wes-cram-field d-none">CRAI</th>
+                    <th>matched normal</th><th></th>
+                </tr>
+                </thead>
+                <tbody>
+                <tr class="wes-sample-row">
+                    <td><input class="form-control form-control-sm wes-sample-id" required></td>
+                    <td><input class="form-control form-control-sm wes-patient-id" required></td>
+                    <td>
+                        <select class="form-select form-select-sm wes-role" required>
+                            <option value="germline">germline</option>
+                            <option value="normal">normal</option>
+                            <option value="tumor">tumor</option>
+                        </select>
+                    </td>
+                    <td class="wes-fastq-field"><input class="form-control form-control-sm wes-fastq-1" type="file" accept=".fastq,.fq,.gz"></td>
+                    <td class="wes-fastq-field"><input class="form-control form-control-sm wes-fastq-2" type="file" accept=".fastq,.fq,.gz"></td>
+                    <td class="wes-bam-field d-none"><input class="form-control form-control-sm wes-bam" type="file" accept=".bam"></td>
+                    <td class="wes-bam-field d-none"><input class="form-control form-control-sm wes-bai" type="file" accept=".bai"></td>
+                    <td class="wes-cram-field d-none"><input class="form-control form-control-sm wes-cram" type="file" accept=".cram"></td>
+                    <td class="wes-cram-field d-none"><input class="form-control form-control-sm wes-crai" type="file" accept=".crai"></td>
+                    <td><input class="form-control form-control-sm wes-matched-normal" placeholder="N1"></td>
+                    <td><button type="button" class="btn btn-sm btn-outline-danger wes-remove-row">删除</button></td>
+                </tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="d-flex gap-2 align-items-center">
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="wes-add-sample">添加样本</button>
+            <button type="submit" class="btn btn-sm btn-primary">预检并生成 manifest</button>
+            <span class="small text-muted" id="wes-manifest-status"></span>
+        </div>
+    </form>
+    <div class="mt-3 d-none" id="wes-manifest-result">
+        <div class="alert alert-secondary small mb-2" id="wes-manifest-message"></div>
+        <button type="button" class="btn btn-sm btn-outline-primary" id="wes-prepare-run">准备 LaunchSpec</button>
+        <button type="button" class="btn btn-sm btn-danger d-none" id="wes-launch-run">确认启动 WES</button>
+    </div>
+</div>
+
+<div class="card p-3 mb-4">
+    <h6>可准备的流程</h6>
+    <div class="row g-2">
+        {% for workflow in workflows %}
+        <div class="col-md-4">
+            <div class="border rounded p-2 h-100 small">
+                <strong>{{ workflow.display_name }}</strong>
+                <div class="text-muted">{{ workflow.key }} · Sarek {{ workflow.release }}</div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<div class="card p-3">
+    <h6>运行与结果</h6>
+    {% if runs %}
+    <div class="table-responsive">
+        <table class="table table-sm align-middle small">
+            <thead><tr><th>Run</th><th>流程</th><th>状态</th><th>创建时间</th><th>结果工件</th></tr></thead>
+            <tbody>
+            {% for run in runs %}
+            <tr>
+                <td><code>{{ run.id }}</code></td>
+                <td>{{ run.workflow_key }}</td>
+                <td><span class="status-badge status-{{ run.status }}">{{ run.status }}</span></td>
+                <td>{{ run.created_at }}</td>
+                <td>
+                    {% for item in run.artifacts %}
+                    <a class="d-block" href="/projects/{{ project.id }}/wes/artifacts/{{ item.id }}">{{ item.artifact_kind }} · {{ item.metadata.relative_path }}</a>
+                    {% else %}<span class="text-muted">尚未收集</span>{% endfor %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}<p class="text-muted small mb-0">当前项目尚无 WES run。</p>{% endif %}
+</div>
+
+<script>
+(function () {
+    const pid = {{ project.id|tojson }};
+    const form = document.getElementById('wes-manifest-form');
+    const tableBody = document.querySelector('#wes-sample-table tbody');
+    const workflowSelect = document.getElementById('wes-workflow-key');
+    const inputTypeSelect = document.getElementById('wes-input-type');
+    const status = document.getElementById('wes-manifest-status');
+    const resultBox = document.getElementById('wes-manifest-result');
+    const resultMessage = document.getElementById('wes-manifest-message');
+    const sraForm = document.getElementById('wes-sra-form');
+    const sraStatus = document.getElementById('wes-sra-status');
+    const sraUseResult = document.getElementById('wes-sra-use-result');
+    let manifestId = '';
+    let preparedRunId = '';
+    let sraResult = null;
+
+    function updateInputFields() {
+        const type = inputTypeSelect.value;
+        document.querySelectorAll('.wes-fastq-field').forEach(el => el.classList.toggle('d-none', type !== 'fastq'));
+        document.querySelectorAll('.wes-bam-field').forEach(el => el.classList.toggle('d-none', type !== 'bam'));
+        document.querySelectorAll('.wes-cram-field').forEach(el => el.classList.toggle('d-none', type !== 'cram'));
+        document.querySelectorAll('.wes-sample-row').forEach(row => {
+            const hasServerPaths = Boolean(row.dataset.serverPaths && row.dataset.serverInputType === type);
+            row.querySelectorAll('.wes-fastq-1, .wes-fastq-2').forEach(el => el.required = type === 'fastq' && !hasServerPaths);
+            row.querySelectorAll('.wes-bam, .wes-bai').forEach(el => el.required = type === 'bam' && !hasServerPaths);
+            row.querySelectorAll('.wes-cram, .wes-crai').forEach(el => el.required = type === 'cram' && !hasServerPaths);
+        });
+    }
+
+    function addRow() {
+        const template = tableBody.querySelector('.wes-sample-row');
+        const row = template.cloneNode(true);
+        row.querySelectorAll('input').forEach(el => { el.value = ''; el.required = false; });
+        row.querySelector('.wes-role').value = workflowSelect.value === 'wes_somatic' ? 'tumor' : 'germline';
+        delete row.dataset.uploadSignature;
+        delete row.dataset.uploadPaths;
+        delete row.dataset.serverPaths;
+        delete row.dataset.serverInputType;
+        tableBody.appendChild(row);
+        updateInputFields();
+    }
+
+    function rowFiles(row) {
+        const type = inputTypeSelect.value;
+        const selectors = type === 'fastq' ? ['fastq_1', 'fastq_2'] :
+            type === 'bam' ? ['bam', 'bai'] : ['cram', 'crai'];
+        const files = {};
+        selectors.forEach(field => {
+            const input = row.querySelector(`.wes-${field.replace('_', '-')}`);
+            files[field] = input && input.files ? input.files[0] : null;
+        });
+        return files;
+    }
+
+    function uploadSignature(row) {
+        const files = rowFiles(row);
+        return inputTypeSelect.value + '|' + Object.keys(files).map(field => {
+            const file = files[field];
+            return `${field}:${file ? file.name + ':' + file.size + ':' + file.lastModified : ''}`;
+        }).join('|');
+    }
+
+    async function uploadRow(row) {
+        const type = inputTypeSelect.value;
+        if (row.dataset.serverPaths && row.dataset.serverInputType === type) {
+            return JSON.parse(row.dataset.serverPaths);
+        }
+        const files = rowFiles(row);
+        const signature = uploadSignature(row);
+        if (row.dataset.uploadSignature === signature && row.dataset.uploadPaths) {
+            return JSON.parse(row.dataset.uploadPaths);
+        }
+        const formData = new FormData();
+        formData.append('sample_id', row.querySelector('.wes-sample-id').value.trim());
+        formData.append('patient_id', row.querySelector('.wes-patient-id').value.trim());
+        formData.append('role', row.querySelector('.wes-role').value);
+        formData.append('input_type', type);
+        formData.append('capture_kit_id', document.getElementById('wes-capture-kit').value);
+        Object.keys(files).forEach(field => {
+            if (files[field]) formData.append(field, files[field]);
+        });
+        const response = await fetch(`/api/projects/${pid}/wes/data/upload`, {
+            method: 'POST', body: formData
+        });
+        const data = await response.json().catch(() => ({error: '服务器返回了无效响应'}));
+        if (!response.ok) throw data;
+        row.dataset.uploadSignature = signature;
+        row.dataset.uploadPaths = JSON.stringify(data.paths || {});
+        return data.paths || {};
+    }
+
+    function collectManifest(uploadedPaths) {
+        const type = inputTypeSelect.value;
+        const samples = Array.from(tableBody.querySelectorAll('.wes-sample-row')).map((row, index) => {
+            const sample = {
+                sample_id: row.querySelector('.wes-sample-id').value.trim(),
+                patient_id: row.querySelector('.wes-patient-id').value.trim(),
+                role: row.querySelector('.wes-role').value,
+                input_type: type,
+                capture_kit: document.getElementById('wes-capture-kit').value,
+                ...uploadedPaths[index]
+            };
+            const matchedNormal = row.querySelector('.wes-matched-normal').value.trim();
+            if (matchedNormal) sample.matched_normal_id = matchedNormal;
+            return sample;
+        });
+        return {
+            reference_bundle_id: document.getElementById('wes-reference-bundle').value.trim(),
+            capture_bed_id: document.getElementById('wes-capture-kit').value,
+            samples: samples
+        };
+    }
+
+    async function postJson(url, body) {
+        const response = await fetch(url, {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+        });
+        const data = await response.json().catch(() => ({error: '服务器返回了无效响应'}));
+        if (!response.ok) throw data;
+        return data;
+    }
+
+    inputTypeSelect.addEventListener('change', updateInputFields);
+    document.getElementById('wes-add-sample').addEventListener('click', addRow);
+    tableBody.addEventListener('change', event => {
+        if (event.target.type === 'file') {
+            const row = event.target.closest('.wes-sample-row');
+            if (row) {
+                delete row.dataset.uploadSignature;
+                delete row.dataset.uploadPaths;
+            }
+        }
+    });
+
+    async function getSraJob(jobId) {
+        const response = await fetch(`/api/projects/${pid}/wes/sra/jobs/${jobId}`);
+        const data = await response.json().catch(() => ({error: '服务器返回了无效响应'}));
+        if (!response.ok) throw data;
+        return data.job;
+    }
+
+    function useSraResultInWizard() {
+        if (!sraResult || !sraResult.output_paths) return;
+        inputTypeSelect.value = 'fastq';
+        let row = Array.from(tableBody.querySelectorAll('.wes-sample-row')).find(candidate => {
+            const sampleId = candidate.querySelector('.wes-sample-id').value.trim();
+            return !sampleId && !candidate.dataset.serverPaths;
+        });
+        if (!row) {
+            addRow();
+            row = tableBody.lastElementChild;
+        }
+        row.querySelector('.wes-sample-id').value = sraResult.sample_id;
+        row.querySelector('.wes-patient-id').value = sraResult.patient_id;
+        row.querySelector('.wes-role').value = sraResult.role;
+        row.dataset.serverPaths = JSON.stringify(sraResult.output_paths);
+        row.dataset.serverInputType = 'fastq';
+        delete row.dataset.uploadSignature;
+        delete row.dataset.uploadPaths;
+        updateInputFields();
+        sraStatus.textContent = '已填入样本向导；点击“预检并生成 manifest”继续。';
+        sraUseResult.classList.add('d-none');
+    }
+
+    sraForm.addEventListener('submit', async event => {
+        event.preventDefault();
+        const file = document.getElementById('wes-sra-file').files[0];
+        if (!file) return;
+        const formData = new FormData();
+        formData.append('sample_id', document.getElementById('wes-sra-sample-id').value.trim());
+        formData.append('patient_id', document.getElementById('wes-sra-patient-id').value.trim());
+        formData.append('role', document.getElementById('wes-sra-role').value);
+        formData.append('capture_kit_id', document.getElementById('wes-capture-kit').value);
+        formData.append('sra', file);
+        sraStatus.textContent = '正在上传 SRA…';
+        sraUseResult.classList.add('d-none');
+        try {
+            const response = await fetch(`/api/projects/${pid}/wes/sra/upload`, {
+                method: 'POST', body: formData
+            });
+            const data = await response.json().catch(() => ({error: '服务器返回了无效响应'}));
+            if (!response.ok) throw data;
+            const jobId = data.job.id;
+            sraStatus.textContent = `已上传，转换任务 ${jobId} 正在排队…`;
+            const poll = async () => {
+                const job = await getSraJob(jobId);
+                if (job.status === 'completed') {
+                    sraResult = job;
+                    sraStatus.textContent = `转换完成：${job.output_paths.fastq_1}；${job.output_paths.fastq_2}`;
+                    sraUseResult.classList.remove('d-none');
+                    return;
+                }
+                if (job.status === 'failed') {
+                    sraStatus.textContent = `转换失败：${job.error_text || job.progress_message || '未知错误'}`;
+                    return;
+                }
+                sraStatus.textContent = `${job.progress_message || '转换中…'}（${job.progress || 0}%）`;
+                window.setTimeout(poll, 3000);
+            };
+            window.setTimeout(poll, 1000);
+        } catch (error) {
+            sraStatus.textContent = error.error || 'SRA 上传失败';
+        }
+    });
+    sraUseResult.addEventListener('click', useSraResultInWizard);
+    document.querySelectorAll('.wes-sra-use-history').forEach(button => {
+        button.addEventListener('click', async () => {
+            try {
+                sraResult = await getSraJob(button.dataset.sraJobId);
+                useSraResultInWizard();
+            } catch (error) {
+                sraStatus.textContent = error.error || '无法读取历史 SRA 转换结果';
+            }
+        });
+    });
+
+    inputTypeSelect.addEventListener('change', () => {
+        document.querySelectorAll('.wes-sample-row').forEach(row => {
+            if (row.dataset.serverInputType !== inputTypeSelect.value) {
+                delete row.dataset.serverPaths;
+                delete row.dataset.serverInputType;
+            }
+        });
+        updateInputFields();
+    });
+    tableBody.addEventListener('click', event => {
+        if (!event.target.classList.contains('wes-remove-row')) return;
+        const rows = tableBody.querySelectorAll('.wes-sample-row');
+        if (rows.length > 1) event.target.closest('tr').remove();
+    });
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        status.textContent = '正在上传样本文件…';
+        resultBox.classList.add('d-none');
+        try {
+            const rows = Array.from(tableBody.querySelectorAll('.wes-sample-row'));
+            const uploadedPaths = [];
+            for (let index = 0; index < rows.length; index += 1) {
+                status.textContent = `正在上传第 ${index + 1}/${rows.length} 个样本…`;
+                uploadedPaths.push(await uploadRow(rows[index]));
+            }
+            status.textContent = '文件上传完成，正在预检…';
+            const data = await postJson(`/api/projects/${pid}/wes/preflight`, {
+                workflow_key: workflowSelect.value, manifest: collectManifest(uploadedPaths),
+                check_files: true, check_content: false
+            });
+            manifestId = data.manifest_id || '';
+            status.textContent = `预检通过，manifest ${manifestId}`;
+            resultMessage.textContent = (data.message || 'manifest 已登记') +
+                ((data.warnings || []).length ? ' 警告：' + data.warnings.join('；') : '');
+            resultBox.classList.remove('d-none');
+        } catch (error) {
+            const details = (error.errors || []).concat(error.warnings || []).join('；');
+            status.textContent = details || error.error || '预检失败';
+        }
+    });
+    document.getElementById('wes-prepare-run').addEventListener('click', async () => {
+        if (!manifestId) return;
+        status.textContent = '正在生成 LaunchSpec…';
+        try {
+            const data = await postJson(`/api/projects/${pid}/wes/runs/prepare`, {
+                workflow_key: workflowSelect.value, manifest_id: manifestId
+            });
+            preparedRunId = (data.run || {}).id || '';
+            resultMessage.textContent = data.message || `已准备 run ${preparedRunId}`;
+            document.getElementById('wes-launch-run').classList.remove('d-none');
+            status.textContent = `已准备 ${preparedRunId}`;
+        } catch (error) {
+            status.textContent = error.error || 'LaunchSpec 准备失败';
+        }
+    });
+    document.getElementById('wes-launch-run').addEventListener('click', async () => {
+        if (!preparedRunId || !confirm('确认提交 WES Nextflow？')) return;
+        status.textContent = '正在提交…';
+        try {
+            const data = await postJson(`/api/projects/${pid}/wes/runs/${preparedRunId}/launch`, {confirm: true});
+            resultMessage.textContent = data.message || 'WES 已启动';
+            status.textContent = 'WES 已提交';
+        } catch (error) {
+            status.textContent = error.error || 'WES 启动失败';
+        }
+    });
+    updateInputFields();
+})();
+</script>
+{% endblock %}

@@ -8,6 +8,7 @@ manifest supplies that information before data are merged.
 
 import os
 import re
+import hashlib
 from itertools import combinations
 
 import numpy as np
@@ -16,6 +17,7 @@ import pandas as pd
 from config import Config
 from modules.base import BaseAnalysis
 from modules.io_utils import read_10x_mtx_compat, summarize_adata_import
+from modules.sc_de_utils import _matrix_is_raw_counts
 
 
 MANIFEST_REQUIRED_COLUMNS = ("sample_id", "matrix_dir", "condition", "replicate")
@@ -29,6 +31,48 @@ TENX_FEATURE_FILENAMES = (
 def _safe_name(value, fallback="batch"):
     name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "")).strip("._-")
     return name or fallback
+
+
+def comparison_id_for_groups(group_1, group_2):
+    """Return a stable comparison ID without lossy-name collisions."""
+    left = str(group_1).strip()
+    right = str(group_2).strip()
+    safe_left = _safe_name(left, "group_1")
+    safe_right = _safe_name(right, "group_2")
+    comparison_id = f"{safe_left}_vs_{safe_right}"
+    if safe_left != left or safe_right != right:
+        digest = hashlib.sha256(f"{left}\0{right}".encode("utf-8")).hexdigest()[:10]
+        comparison_id = f"{comparison_id}_{digest}"
+    return comparison_id
+
+
+_CONTROL_NAME_PATTERNS = frozenset({
+    'control', 'ctrl', 'vehicle', 'wildtype', 'wild_type', 'wt', 'normal',
+    'untreated', 'untrt', 'mock', 'sham', 'baseline', 'healthy',
+    'negctrl', 'negative', 'nc', 'd0', 'day0',
+})
+_CONTROL_NAME_TOKENS = frozenset({
+    'control', 'ctrl', 'vehicle', 'wt', 'normal', 'untreated',
+    'mock', 'sham', 'baseline', 'healthy', 'nc', 'negctrl', 'negative',
+})
+
+
+def _looks_like_control(label):
+    """Heuristic for whether a condition label conventionally names a control.
+
+    Used only to give all_pairwise comparisons a stable, auditable
+    direction: the control-like label is placed on the control (right) side so
+    that a positive log2FC always means "higher in the experimental group".
+    Alphabetical order is otherwise kept and recorded as such.
+    """
+    text = str(label or '').strip().lower()
+    if not text:
+        return False
+    compact = re.sub(r'[^a-z0-9]+', '', text)
+    if compact in _CONTROL_NAME_PATTERNS:
+        return True
+    tokens = set(re.split(r'[^a-z0-9]+', text))
+    return bool(tokens & _CONTROL_NAME_TOKENS)
 
 
 def _nonempty_text(value):
@@ -168,7 +212,13 @@ def sample_design_from_obs(adata, sample_key="sample_id", condition_key="conditi
     """
     for column in (sample_key, condition_key):
         if not column or column not in adata.obs.columns:
-            raise ValueError(f"adata.obs 中缺少 '{column}' 列")
+            available = ", ".join(str(item) for item in adata.obs.columns[:10])
+            raise ValueError(
+                f"adata.obs 中缺少 '{column}' 列；当前 obs 列：{available}"
+                + ("…" if len(adata.obs.columns) > 10 else "")
+                + "。样本级分析需要真实的 sample_id 与 condition 元数据，"
+                "请先通过批量 10x manifest 导入，或在 h5ad.obs 中补充后重试。"
+            )
     design = pd.DataFrame({
         "sample_id": adata.obs[sample_key].map(_nonempty_text),
         "condition": adata.obs[condition_key].map(_nonempty_text),
@@ -203,21 +253,32 @@ def build_comparison_plan(design, requested_comparisons="", mode="all_pairwise",
                              flags=re.IGNORECASE)
             if len(parts) != 2 or not all(part.strip() for part in parts):
                 raise ValueError(f"比较格式无效: '{item}'；请使用 GroupA-vs-GroupB")
-            pairs.append((parts[0].strip(), parts[1].strip()))
+            pairs.append((parts[0].strip(), parts[1].strip(), "explicit"))
     elif mode == "vs_reference":
         reference = str(reference_group or "").strip()
         if reference not in groups:
             raise ValueError("vs_reference 模式需要选择一个存在的 reference_group")
-        pairs = [(group, reference) for group in groups if group != reference]
+        pairs = [(group, reference, "vs_reference")
+                 for group in groups if group != reference]
     else:
-        pairs = list(combinations(groups, 2))
+        # all_pairwise 本身没有方向：control 风格标签固定放在对照（右侧），
+        # 否则按字母序，并把依据写入 registry，避免 log2FC 方向被静默反转。
+        pairs = []
+        for left, right in combinations(groups, 2):
+            if _looks_like_control(left) and not _looks_like_control(right):
+                pairs.append((right, left, "control_name_heuristic"))
+            else:
+                pairs.append((left, right, "alphabetical"))
 
     rows = []
     seen = set()
-    for group_1, group_2 in pairs:
+    for group_1, group_2, direction_basis in pairs:
         if group_1 == group_2 or (group_1, group_2) in seen:
             continue
+        # 同时登记反向对，避免手动比较同时写 "A-vs-B" 和 "B-vs-A"
+        # 时生成两条方向相反、重复计算的行。
         seen.add((group_1, group_2))
+        seen.add((group_2, group_1))
         count_1 = int((design["condition"] == group_1).sum())
         count_2 = int((design["condition"] == group_2).sum())
         valid_groups = group_1 in groups and group_2 in groups
@@ -230,10 +291,11 @@ def build_comparison_plan(design, requested_comparisons="", mode="all_pairwise",
             reason = ""
         label = f"{group_1} vs {group_2}"
         rows.append({
-            "comparison_id": f"{_safe_name(group_1)}_vs_{_safe_name(group_2)}",
+            "comparison_id": comparison_id_for_groups(group_1, group_2),
             "comparison": label,
             "group_1": group_1,
             "group_2": group_2,
+            "direction_basis": direction_basis,
             "n_samples_group_1": count_1,
             "n_samples_group_2": count_2,
             "status": "runnable" if enough else "not_runnable",
@@ -243,19 +305,13 @@ def build_comparison_plan(design, requested_comparisons="", mode="all_pairwise",
 
 
 def aggregate_pseudobulk_counts(adata, sample_key="sample_id", condition_key="condition",
-                                celltype_key="", min_cells=1):
+                                celltype_key="", min_cells=1, batch_key=""):
     """Aggregate a count layer as sample × optional cell type × gene records."""
-    from scipy import sparse
-
     if "counts" not in adata.layers:
         raise ValueError("缺少 layers['counts']；无法生成原始 counts pseudobulk")
     design = sample_design_from_obs(adata, sample_key, condition_key)
     matrix = adata.layers["counts"]
-    if sparse.issparse(matrix):
-        values = np.asarray(matrix.data, dtype=float)
-    else:
-        values = np.asarray(matrix, dtype=float).reshape(-1)
-    if values.size and (np.nanmin(values) < 0 or not np.allclose(values[:min(values.size, 100_000)], np.round(values[:min(values.size, 100_000)]), atol=1e-6)):
+    if not _matrix_is_raw_counts(matrix):
         raise ValueError("counts 层不是非负整数原始计数，不能用于 pseudobulk 差异分析")
 
     work = pd.DataFrame({
@@ -263,6 +319,20 @@ def aggregate_pseudobulk_counts(adata, sample_key="sample_id", condition_key="co
         "condition": adata.obs[condition_key].map(_nonempty_text),
         "row_index": np.arange(adata.n_obs),
     }, index=adata.obs_names)
+    requested_batch = str(batch_key or "").strip()
+    if requested_batch:
+        if requested_batch not in adata.obs.columns:
+            raise ValueError(f"adata.obs 中没有 batch_key '{requested_batch}'")
+        work["batch"] = adata.obs[requested_batch].map(_nonempty_text)
+        if bool(work["batch"].eq("").any()):
+            raise ValueError(f"batch_key '{requested_batch}' 存在空值")
+        batch_per_sample = work.groupby("sample_id", observed=True)["batch"].nunique()
+        mixed_batch = batch_per_sample[batch_per_sample > 1]
+        if not mixed_batch.empty:
+            raise ValueError(
+                "同一 sample_id 对应多个 batch，无法建立样本级协变量: "
+                + ", ".join(mixed_batch.index[:8])
+            )
     requested_celltype = str(celltype_key or "").strip()
     if requested_celltype:
         if requested_celltype not in adata.obs.columns:
@@ -283,14 +353,20 @@ def aggregate_pseudobulk_counts(adata, sample_key="sample_id", condition_key="co
         if n_cells < int(min_cells):
             continue
         vector = np.asarray(matrix[indices, :].sum(axis=0)).reshape(-1)
-        rows.append({
+        row = {
             "sample_id": str(keys[0]), "condition": str(keys[1]),
             "celltype": str(keys[2]), "n_cells": n_cells,
             "library_size": float(vector.sum()),
-        })
+        }
+        if requested_batch:
+            row["batch"] = str(work.iloc[indices]["batch"].iloc[0])
+        rows.append(row)
         count_rows.append(vector)
     if not rows:
-        return pd.DataFrame(columns=["sample_id", "condition", "celltype", "n_cells", "library_size"]), np.empty((0, adata.n_vars))
+        columns = ["sample_id", "condition", "celltype", "n_cells", "library_size"]
+        if requested_batch:
+            columns.insert(2, "batch")
+        return pd.DataFrame(columns=columns), np.empty((0, adata.n_vars))
     return pd.DataFrame(rows), np.vstack(count_rows)
 
 

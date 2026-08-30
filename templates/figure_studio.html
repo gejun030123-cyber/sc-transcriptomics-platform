@@ -122,8 +122,8 @@
         </div>
 
         <div id="volcano-controls" class="control-section data-only special-controls" style="display:none">
-            <h6>火山图阈值与标注</h6>
-            <p class="hint mb-2">只会按新阈值重新分类点色、重绘阈值线和更新标注；不会重新计算差异表达。</p>
+            <h6>差异表达图阈值与标注</h6>
+            <p class="hint mb-2">可重绘 Volcano 或 MA 图；只更新阈值、点色和标注，不会重新计算差异表达。</p>
             <div class="row g-2">
                 <div class="col-6"><label for="pvalue-threshold" class="form-label">FDR 阈值</label><input id="pvalue-threshold" type="number" step="any" min="0.000001" max="1" value="0.05" class="form-control compact-input style-field"></div>
                 <div class="col-6"><label for="fc-threshold" class="form-label">Fold change 阈值</label><input id="fc-threshold" type="number" step="any" min="1" value="1.5" class="form-control compact-input style-field"></div>
@@ -131,7 +131,8 @@
                 <div class="col-4"><label for="down-color" class="form-label">下调</label><input id="down-color" type="color" value="#0f4d92" class="form-control form-control-color style-field"></div>
                 <div class="col-4"><label for="ns-color" class="form-label">不显著</label><input id="ns-color" type="color" value="#c7cdd6" class="form-control form-control-color style-field"></div>
             </div>
-            <div class="mt-2"><label for="label-genes" class="form-label">标注基因</label><textarea id="label-genes" class="form-control compact-input style-field" rows="2" placeholder="TP53, VEGFA, IL6；使用箭头和框标注"></textarea></div>
+            <div class="mt-2"><label for="deg-gene-search" class="form-label">搜索并选择标注基因</label><input id="deg-gene-search" class="form-control compact-input" placeholder="输入基因名；可勾选后加入标注"><div id="deg-gene-picker" class="border rounded mt-1 enrichment-term-picker"><span class="text-muted small p-2 d-block">选择差异表达图后加载基因。</span></div></div>
+            <div class="mt-2"><label for="label-genes" class="form-label">已选标注基因（可编辑）</label><textarea id="label-genes" class="form-control compact-input style-field" rows="2" placeholder="从上方勾选，或输入基因名；逗号、分号或换行分隔"></textarea></div>
         </div>
 
         <div id="heatmap-controls" class="control-section data-only special-controls" style="display:none">
@@ -201,6 +202,7 @@
     let previewTimer = null;
     let previewRequest = 0;
     let enrichmentTerms = [];
+    let degGenes = [];
 
     const defaults = {
         title: '', x_label: '', y_label: '', font_family: 'Arial', font_size: 11,
@@ -303,6 +305,58 @@
         return new Set(String(document.getElementById('enrichment-target-pathways').value || '')
             .split(/[\n,;]/).map(value => value.trim()).filter(Boolean));
     }
+    function degGeneSet() {
+        return new Set(String(document.getElementById('label-genes').value || '')
+            .split(/[\n,;]/).map(value => value.trim()).filter(Boolean));
+    }
+    function renderDEGGeneRows() {
+        const picker = document.getElementById('deg-gene-picker');
+        const search = String(document.getElementById('deg-gene-search').value || '').trim().toLowerCase();
+        const selected = degGeneSet();
+        picker.replaceChildren();
+        const rows = degGenes.filter(item => !search || item.gene.toLowerCase().includes(search)).slice(0, 160);
+        if (!rows.length) {
+            const hint = document.createElement('span'); hint.className = 'text-muted small p-2 d-block';
+            hint.textContent = degGenes.length ? '没有匹配的基因。' : '当前来源没有可选择的差异表达基因。'; picker.appendChild(hint); return;
+        }
+        rows.forEach(item => {
+            const label = document.createElement('label'); label.className = 'enrichment-term-row';
+            const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.className = 'form-check-input mt-1';
+            checkbox.checked = selected.has(item.gene);
+            checkbox.addEventListener('change', () => {
+                const values = degGeneSet();
+                if (checkbox.checked) values.add(item.gene); else values.delete(item.gene);
+                document.getElementById('label-genes').value = Array.from(values).join('\n');
+                schedulePreview(); renderDEGGeneRows();
+            });
+            const body = document.createElement('span'); body.className = 'flex-grow-1'; body.textContent = item.gene;
+            const meta = document.createElement('div'); meta.className = 'enrichment-term-meta';
+            const fdr = item.fdr == null ? 'FDR n/a' : `FDR ${Number(item.fdr).toExponential(2)}`;
+            const fc = item.log2fc == null ? '' : ` · log2FC ${Number(item.log2fc).toFixed(2)}`;
+            meta.textContent = `${item.regulation || 'NS'} · ${fdr}${fc}`;
+            body.appendChild(meta); label.appendChild(checkbox); label.appendChild(body); picker.appendChild(label);
+        });
+        if (degGenes.length > rows.length) {
+            const hint = document.createElement('div'); hint.className = 'text-muted small p-2';
+            hint.textContent = `显示 ${rows.length} 个基因；可继续搜索缩小范围。`; picker.appendChild(hint);
+        }
+    }
+    async function populateDEGGenePicker(source) {
+        degGenes = [];
+        const picker = document.getElementById('deg-gene-picker');
+        if (!source || !['bulk_volcano', 'sc_volcano', 'bulk_ma', 'sc_ma'].includes(source.edit_mode)) {
+            const hint = document.createElement('span'); hint.className = 'text-muted small p-2 d-block'; hint.textContent = '选择可重绘的差异表达图后加载基因。'; picker.replaceChildren(hint); return;
+        }
+        picker.innerHTML = '<span class="text-muted small p-2 d-block">正在加载基因…</span>';
+        try {
+            const query = new URLSearchParams({source_kind: source.kind, source_id: source.id});
+            const response = await fetch(`/projects/${projectId}/figure-studio/deg-genes?${query}`);
+            const data = await response.json(); if (!response.ok) throw new Error(data.error || '基因加载失败');
+            degGenes = data.genes || []; renderDEGGeneRows();
+        } catch (error) {
+            picker.innerHTML = `<span class="text-danger small p-2 d-block">${error.message}</span>`;
+        }
+    }
     function renderEnrichmentTermRows() {
         const picker = document.getElementById('enrichment-term-picker');
         const search = String(document.getElementById('enrichment-term-search').value || '').trim().toLowerCase();
@@ -346,7 +400,7 @@
         const picker = document.getElementById('enrichment-term-picker');
         const scope = document.getElementById('enrichment-database-scope');
         scope.replaceChildren(new Option('全部数据库', ''));
-        if (!source || !['bulk_enrichment', 'bulk_enrichment_overview'].includes(source.edit_mode)) {
+        if (!source || !['bulk_enrichment', 'bulk_enrichment_overview', 'sc_enrichment'].includes(source.edit_mode)) {
             const hint = document.createElement('span'); hint.className = 'text-muted small p-2 d-block'; hint.textContent = '选择富集图后加载通路。'; picker.replaceChildren(hint); return;
         }
         picker.innerHTML = '<span class="text-muted small p-2 d-block">正在加载通路…</span>';
@@ -364,25 +418,28 @@
         }
     }
     function showMode(source) {
-        const isVolcano = source && source.edit_mode === 'bulk_volcano';
+        const isVolcano = source && ['bulk_volcano', 'sc_volcano'].includes(source.edit_mode);
+        const isDEG = source && ['bulk_volcano', 'sc_volcano', 'bulk_ma', 'sc_ma'].includes(source.edit_mode);
         const isHeatmap = source && source.edit_mode === 'bulk_heatmap';
         const isCorrelation = source && source.edit_mode === 'bulk_correlation';
-        const isEnrichment = source && ['bulk_enrichment', 'bulk_enrichment_overview'].includes(source.edit_mode);
-        const isData = isVolcano || isHeatmap || isCorrelation || isEnrichment;
+        const isEnrichment = source && ['bulk_enrichment', 'bulk_enrichment_overview', 'sc_enrichment'].includes(source.edit_mode);
+        const isData = isDEG || isHeatmap || isCorrelation || isEnrichment;
         document.querySelectorAll('.data-only').forEach(node => {
             if (['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(node.tagName)) node.disabled = !isData;
             node.querySelectorAll('input, select, textarea, button').forEach(control => { control.disabled = !isData; });
         });
-        document.getElementById('volcano-controls').style.display = isVolcano ? '' : 'none';
+        document.getElementById('volcano-controls').style.display = isDEG ? '' : 'none';
         document.getElementById('heatmap-controls').style.display = isHeatmap ? '' : 'none';
         document.getElementById('correlation-controls').style.display = isCorrelation ? '' : 'none';
         document.getElementById('enrichment-controls').style.display = isEnrichment ? '' : 'none';
         if (!source) {
             note.className = 'mode-note'; note.textContent = '请选择一个图形。'; return;
         }
-        if (isVolcano) {
+        if (isDEG) {
             note.className = 'mode-note data';
-            note.textContent = '数据重绘模式：修改阈值只重新分类点色、阈值线和基因标注，不重新计算差异表达。';
+            note.textContent = isVolcano
+                ? '数据重绘模式：可搜索并选择标注基因；修改阈值只重新分类点色、阈值线和基因标注，不重新计算差异表达。'
+                : '数据重绘模式：可搜索并选择 MA 图标注基因；修改阈值和标注不重新计算差异表达。';
         } else if (isHeatmap) {
             note.className = 'mode-note data';
             note.textContent = '数据重绘模式：可修改配色、聚类和注释条；原始热图始终保留。';
@@ -405,7 +462,7 @@
             const option = new Option('暂无平台图；可上传 PNG/JPG/SVG', ''); option.disabled = true; option.selected = true; select.add(option); return;
         }
         sources.forEach(source => {
-            const type = source.edit_mode === 'bulk_volcano' ? '可重绘火山图' : source.edit_mode === 'bulk_heatmap' ? '可重绘热图' : source.edit_mode === 'bulk_correlation' ? '可重绘相关性热图' : ['bulk_enrichment', 'bulk_enrichment_overview'].includes(source.edit_mode) ? '可重绘富集图' : '外观编辑';
+            const type = (source.edit_mode === 'bulk_volcano' || source.edit_mode === 'sc_volcano') ? '可重绘火山图' : (source.edit_mode === 'bulk_ma' || source.edit_mode === 'sc_ma') ? '可重绘 MA 图' : source.edit_mode === 'bulk_heatmap' ? '可重绘热图' : source.edit_mode === 'bulk_correlation' ? '可重绘相关性热图' : ['bulk_enrichment', 'bulk_enrichment_overview', 'sc_enrichment'].includes(source.edit_mode) ? '可重绘富集图' : '外观编辑';
             const option = new Option(`${source.label}（${type}）`, `${source.kind}:${source.id}`);
             if (source.kind === selectedInitial.kind && source.id === selectedInitial.id) option.selected = true;
             select.add(option);
@@ -441,6 +498,7 @@
         applyStyle(sourceStyle);
         populateHeatmapPickers(source, sourceStyle || {});
         populateEnrichmentPicker(source, sourceStyle || {});
+        populateDEGGenePicker(source);
         document.getElementById('version-label').value = source ? source.label.replace(/^已保存：/, '') : '';
         showMode(source); schedulePreview();
     }
@@ -492,6 +550,8 @@
         renderEnrichmentTermRows(); schedulePreview();
     });
     document.getElementById('enrichment-target-pathways').addEventListener('input', renderEnrichmentTermRows);
+    document.getElementById('deg-gene-search').addEventListener('input', renderDEGGeneRows);
+    document.getElementById('label-genes').addEventListener('input', renderDEGGeneRows);
     select.addEventListener('change', chooseSource);
     document.getElementById('refresh-preview').addEventListener('click', renderPreview);
     document.getElementById('image-upload').addEventListener('change', uploadImage);

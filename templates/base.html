@@ -38,9 +38,13 @@
             <div class="navbar-nav">
                 <a class="nav-link" href="/">控制台</a>
                 <a class="nav-link" href="/projects/new">新建项目</a>
+                <a class="nav-link" href="/settings/ai">AI API 设置</a>
             </div>
             <div class="d-flex align-items-center" id="system-status">
                 <span class="text-white-50 small" id="sys-info">加载中...</span>
+                {% if config.PLATFORM_ACCESS_PASSWORD %}
+                <a class="nav-link ms-3" href="{{ url_for('platform_logout') }}">退出</a>
+                {% endif %}
             </div>
         </div>
     </nav>

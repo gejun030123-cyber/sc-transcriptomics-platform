@@ -72,9 +72,17 @@ def enrichment_terms(pid):
         source = resolve_source(
             pid, request.args.get('source_kind', ''), request.args.get('source_id', ''),
         )
-        if source.get('edit_mode') not in {'bulk_enrichment', 'bulk_enrichment_overview'}:
+        if source.get('edit_mode') not in {'bulk_enrichment', 'bulk_enrichment_overview', 'sc_enrichment'}:
             return jsonify({'error': '当前图形没有可选择的富集通路。'}), 400
         table = pd.read_csv(source['data_path'])
+        # Single-cell enrichment figures are bound to one cluster/direction unit;
+        # narrow the picker to exactly that unit so the shown terms match the figure.
+        for key in ('cluster', 'direction', 'method'):
+            value = (source.get('sc_context') or {}).get(key)
+            if value and key in table.columns:
+                table = table[table[key].astype(str) == str(value)]
+        if table.empty:
+            return jsonify({'error': '该富集图对应单元没有可选择的通路。'}), 400
         database_column = next((column for column in ('Database', 'database', 'Gene_set', 'gene_set') if column in table.columns), None)
         term_column = next((column for column in ('Term', 'Description', 'pathway', 'term') if column in table.columns), None)
         fdr_column = next((column for column in ('Enrichment FDR', 'Adjusted P-value', 'Adjusted p-value', 'FDR', 'fdr', 'padj') if column in table.columns), None)
@@ -135,6 +143,71 @@ def enrichment_terms(pid):
         return jsonify({'error': str(exc)}), 400
     except (OSError, pd.errors.EmptyDataError, pd.errors.ParserError, ValueError):
         return jsonify({'error': '读取富集结果表失败。'}), 400
+
+
+@figure_studio_bp.route('/<pid>/figure-studio/deg-genes')
+def deg_genes(pid):
+    """Return a bounded, searchable gene picker for a data-backed DEG figure."""
+    if not _project_or_redirect(pid):
+        return jsonify({'error': '项目未找到。'}), 404
+    try:
+        source = resolve_source(
+            pid, request.args.get('source_kind', ''), request.args.get('source_id', ''),
+        )
+        if source.get('edit_mode') not in {
+            'bulk_volcano', 'sc_volcano', 'bulk_ma', 'sc_ma',
+        }:
+            return jsonify({'error': '当前图形没有可选择的差异表达基因。'}), 400
+        table = pd.read_csv(source['data_path'])
+        for key, value in (source.get('sc_context') or {}).items():
+            if key in {'module', 'evidence_role', 'plot_type'}:
+                continue
+            if value and key in table.columns:
+                table = table[table[key].astype(str) == str(value)]
+        gene_column = next((column for column in ('gene', 'names') if column in table.columns), None)
+        fc_column = next(
+            (column for column in ('log2FC', 'avg_log2FC', 'logFC') if column in table.columns),
+            None,
+        )
+        fdr_column = next(
+            (column for column in ('padj', 'p.adjust', 'p_val_adj') if column in table.columns),
+            None,
+        )
+        if not gene_column or not fc_column or not fdr_column:
+            return jsonify({'error': '差异表达结果缺少 gene、log2FC 或 FDR 列。'}), 400
+        rows = pd.DataFrame({
+            'gene': table[gene_column].astype(str).str.strip(),
+            'log2fc': pd.to_numeric(table[fc_column], errors='coerce'),
+            'fdr': pd.to_numeric(table[fdr_column], errors='coerce'),
+        })
+        rows = rows[rows['gene'].ne('') & rows['gene'].str.lower().ne('nan')].copy()
+        rows['fdr'] = rows['fdr'].fillna(1.0).clip(lower=0.0, upper=1.0)
+        rows['_abs_fc'] = rows['log2fc'].abs().fillna(-1.0)
+        # A repeated gene may occur in a legacy/combined table.  Keep its most
+        # statistically informative row; the original table remains untouched.
+        rows = rows.sort_values(['fdr', '_abs_fc', 'gene'], ascending=[True, False, True])
+        rows = rows.drop_duplicates('gene', keep='first').head(3000)
+        payload = []
+        for row in rows.itertuples(index=False):
+            log2fc = float(row.log2fc) if pd.notna(row.log2fc) else None
+            fdr = float(row.fdr) if pd.notna(row.fdr) else None
+            regulation = (
+                'Up' if fdr is not None and fdr < 0.05 and log2fc is not None and log2fc > 0
+                else 'Down' if fdr is not None and fdr < 0.05 and log2fc is not None and log2fc < 0
+                else 'NS'
+            )
+            payload.append({
+                'gene': str(row.gene), 'log2fc': log2fc, 'fdr': fdr,
+                'regulation': regulation,
+            })
+        return jsonify({
+            'source': {'kind': source['kind'], 'id': source['id']},
+            'genes': payload,
+        })
+    except FigureStudioError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except (OSError, pd.errors.EmptyDataError, pd.errors.ParserError, ValueError):
+        return jsonify({'error': '读取差异表达结果表失败。'}), 400
 
 
 @figure_studio_bp.route('/<pid>/figure-studio/upload', methods=['POST'])

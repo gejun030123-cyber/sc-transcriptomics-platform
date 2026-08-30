@@ -47,8 +47,10 @@ def order_timepoints(values, requested_order=""):
     """Return ordered string labels and numeric plotting positions.
 
     Explicit order takes precedence.  Otherwise numeric columns and familiar
-    labels (D0/D3/D7, 0h/12h) are sorted chronologically; arbitrary labels use
-    natural sorting and are treated as ordered experimental categories.
+    labels (D0/D3/D7, 0h/12h) are sorted chronologically.  Arbitrary labels
+    must come from an explicitly ordered categorical column (or be supplied in
+    ``requested_order``); alphabetical/natural sorting would invent a temporal
+    direction and invalidate trend statistics.
     """
     import pandas as pd
 
@@ -86,8 +88,18 @@ def order_timepoints(values, requested_order=""):
         labels = sorted(observed, key=lambda item: parsed[item])
         return labels, {label: float(parsed[label]) for label in labels}
 
-    labels = sorted(observed, key=_natural_key)
-    return labels, {label: float(index) for index, label in enumerate(labels)}
+    if isinstance(series.dtype, pd.CategoricalDtype) and series.cat.ordered:
+        labels = [
+            str(category) for category in series.cat.categories
+            if str(category) in observed
+        ]
+        if labels and set(labels) == set(observed):
+            return labels, {label: float(index) for index, label in enumerate(labels)}
+
+    raise ValueError(
+        "无法从时间标签推断可靠顺序；请在 time_order 中显式填写所有时间点，"
+        "或将该列设置为 ordered categorical。"
+    )
 
 
 def benjamini_hochberg(pvalues):
@@ -157,10 +169,10 @@ def _matrix_variance(matrix):
 def _is_count_like_matrix(matrix):
     """Return whether a matrix is safe to describe as raw non-negative counts.
 
-    Import compatibility may populate ``layers['counts']`` by copying ``X``.
-    The layer name alone therefore cannot justify count-based pseudobulk
-    inference.  Check a bounded set of non-zero values instead of densifying a
-    large sparse matrix.
+    A counts layer is usable only when its observed values are non-negative
+    integer-like counts; the layer name alone is not sufficient because older
+    imports may have copied a transformed ``X``.  Check a bounded set of
+    non-zero values instead of densifying a large sparse matrix.
     """
     from scipy import sparse
 
@@ -479,6 +491,7 @@ class SCTimecourseAnalysis(BaseAnalysis):
 
         self.progress(5, "读取单细胞数据与时间元数据...")
         adata = self.load_adata(input_path)
+        adata = self.apply_scope(adata)
         timepoint_key = str(self.params.get("timepoint_key", "timepoint") or "").strip()
         if timepoint_key not in adata.obs.columns:
             raise ValueError(f"时间列 '{timepoint_key}' 不在 adata.obs 中；请先在 h5ad.obs 中提供真实采样时间。")
@@ -707,6 +720,8 @@ class SCTimecourseAnalysis(BaseAnalysis):
             "result_files": result_files,
             'summary': {
                 "n_cells": int(adata.n_obs), "n_timepoints": int(len(time_labels)),
+                "scope_key": str(self.params.get("scope_key", "") or "").strip() or None,
+                "scope_values": ([v.strip() for v in str(self.params.get("scope_values", "") or "").split(",") if v.strip()] or None),
                 "n_celltypes": int(len(celltypes)), "n_samples": int(units["unit"].nunique()) if sample_key else 0,
                 "n_composition_significant": int(n_composition_sig),
                 "n_gene_significant": int(n_gene_sig),

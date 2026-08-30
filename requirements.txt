@@ -20,11 +20,24 @@ anndata
 # Single-cell analysis
 scanpy
 omicverse
+# Leiden/Louvain 聚类的必需后端（scanpy 仅将其列为可选 extra，
+# 未安装时默认聚类路径会 ImportError）
+igraph
+leidenalg
+louvain
+# qc 双细胞检测
+scrublet
+pyscdblfinder>=0.2.0
 
 # Bulk RNA-seq and enrichment
 gseapy
 pydeseq2
 inmoose
+
+# Optional WES content-level checks (BAM/CRAM/FASTA/VCF headers and indices).
+# Variant calling and VCF normalization remain external tools (GATK,
+# samtools/bcftools) executed by the configured Nextflow profile.
+pysam
 
 # Optional single-cell annotation / communication / integration
 celltypist

@@ -1,10 +1,10 @@
-"""Fixed publication templates for secondary Bulk RNA-seq diagnostics.
+"""Fixed publication templates for transcriptomics diagnostics.
 
 The main scientific plots have dedicated renderers.  This module deliberately
-keeps the smaller diagnostic family in one deterministic renderer so that QC,
-normalisation checks and time-course summaries cannot silently fall back to
-Matplotlib defaults.  ``data['kind']`` selects a scientific view; visual
-constants remain owned by :class:`NatureStyle` and ``FigureSpec``.
+keeps the smaller diagnostic family in one deterministic renderer so that Bulk
+and single-cell QC, normalisation checks and time-course summaries cannot
+silently fall back to Matplotlib defaults. ``data['kind']`` selects a scientific
+view; visual constants remain owned by :class:`NatureStyle` and ``FigureSpec``.
 """
 
 from __future__ import annotations

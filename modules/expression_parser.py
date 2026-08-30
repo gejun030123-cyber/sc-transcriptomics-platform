@@ -14,6 +14,12 @@
     OR  / ∪ / |    并集
     NOT / - / \\    差集
     XOR / △        对称差集
+
+⚠️ 运算符优先级（从高到低）：
+    一元 NOT > OR > AND > XOR > 二元 NOT（差集）
+注意这与常见布尔优先级（AND 高于 OR）相反：
+    ``A:up OR B:up AND C:up`` 解析为 ``(A OR B) AND C``。
+请显式加括号表达复杂逻辑，避免歧义。
 """
 import re
 
@@ -219,25 +225,29 @@ class _Parser:
         return left
 
     def _and_expr(self):
-        left = self._unary_not()
+        # AND 的优先级低于 OR（文档约定：OR > AND > XOR > 二元 NOT）。
+        left = self._or_expr()
         while self.peek() and self.peek()[0] == 'OP' and self.peek()[1] == 'AND':
             self.consume()
-            right = self._unary_not()
+            right = self._or_expr()
             left = BinOp('AND', left, right)
         return left
 
     def _unary_not(self):
+        # 一元 NOT 只绑定单个 primary（原子/括号/简写），因此
+        # NOT A:up OR B:up 解析为 (NOT A) OR B，与文档优先级一致；
+        # 需要整体取反时请使用括号 NOT (A:up OR B:up)。
         if self.peek() and self.peek()[0] == 'OP' and self.peek()[1] == 'NOT':
             self.consume()
             operand = self._unary_not()
             return UnaryNot(operand)
-        return self._or_expr()
+        return self._primary()
 
     def _or_expr(self):
-        left = self._primary()
+        left = self._unary_not()
         while self.peek() and self.peek()[0] == 'OP' and self.peek()[1] == 'OR':
             self.consume()
-            right = self._primary()
+            right = self._unary_not()
             left = BinOp('OR', left, right)
         return left
 
