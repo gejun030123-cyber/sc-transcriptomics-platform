@@ -329,6 +329,27 @@ class TestFocusTermHelpers:
         mask2 = _focus_term_mask(frame, ["lipid"])
         assert mask2.tolist() == [False, False, False]
 
+    def test_go_focus_rows_keep_only_full_library_fdr_matches(self):
+        import pandas as pd
+        from modules.sc_cell_go import _focus_significant_rows
+
+        frame = pd.DataFrame({
+            "status": ["completed", "completed", "completed", "completed"],
+            "Significant": [True, True, False, True],
+            "gene_set": [
+                "GO_Biological_Process_2023", "GO_Cellular_Component_2023",
+                "GO_Molecular_Function_2023", "KEGG_2021_Human",
+            ],
+            "Term": ["lipid transport", "lipoprotein particle", "cholesterol binding", "lipid pathway"],
+            "method": ["ORA"] * 4,
+            "direction": ["Up", "Up", "Down", "Up"],
+        })
+        selected = _focus_significant_rows(
+            frame, ["lipid transport", "lipoprotein particle", "cholesterol binding", "lipid pathway"],
+        )
+        assert selected["Term"].tolist() == ["lipid transport", "lipoprotein particle"]
+        assert selected["Database"].tolist() == ["GO_BP", "GO_CC"]
+
     def test_focus_params_registered_in_schema(self):
         from modules.schemas import PARAM_SCHEMAS
 

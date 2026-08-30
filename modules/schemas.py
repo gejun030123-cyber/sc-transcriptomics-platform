@@ -79,6 +79,8 @@ PARAM_SCHEMAS = {
         {'key': 'deg_prefix', 'label': '旧版 DEG 文件前缀（兼容）', 'type': 'text', 'default': 'sc_pseudobulk', 'help': '仅为旧项目结果包兼容保留；新任务不再按前缀搜索。'},
         {'key': 'export_prefix', 'label': '富集结果文件前缀', 'type': 'text', 'default': 'sc_cell_go', 'help': '导出 CSV 与内部溯源文件的统一前缀。'},
         {'key': 'focus_terms', 'label': '聚焦通路 term（可选）', 'type': 'text', 'default': '', 'help': '逗号/分号分隔的完整通路名称，可来自 AI 的 search_pathway_terms。全量统计与全量表保持不变，仅额外输出主题子表与聚焦 dotplot/barplot；留空则行为与原来完全一致。'},
+        {'key': 'focus_label', 'label': '聚焦主题标签（可选）', 'type': 'text', 'default': '主题聚焦', 'help': '用于聚焦图标题，例如“脂代谢与炎症”。不参与统计计算或 term 匹配。'},
+        {'key': 'focus_plot_mode', 'label': '聚焦图展示方式', 'type': 'select', 'options': ['individual_and_overview', 'overview_only'], 'option_labels': {'individual_and_overview': '单库图 + BP/CC/MF 合并图', 'overview_only': '仅 BP/CC/MF 合并图'}, 'default': 'individual_and_overview', 'help': '仅影响图表展示；完整全库统计表和主题子表始终保留。BP/CC/MF 合并图按上调、下调分别输出。'},
         {'key': 'method', 'label': '富集方法', 'type': 'select', 'options': ['ORA', 'GSEA'], 'default': 'ORA', 'help': 'ORA：对显著 DEG 做超几何检验；GSEA：对完整 pseudobulk 排名表做预排序 GSEA，仅支持样本级 pseudobulk。'},
         {'key': 'direction_mode', 'label': '差异方向', 'type': 'select', 'options': ['up_down', 'up', 'down', 'all'], 'default': 'up_down', 'help': 'ORA 可单独分析上调、下调或两者；pseudobulk 推荐上下调分开。GSEA 使用完整双向排序，不按此项拆分。'},
         {'key': 'execution_mode', 'label': '基因集执行方式', 'type': 'select', 'options': ['local', 'enrichr'], 'default': 'local', 'help': 'local：仅使用服务器本地 GMT/TXT 基因集，不上传基因列表（推荐）；enrichr：仅用于兼容旧的细胞级 ORA，会将基因列表发送至 Enrichr 在线服务。'},

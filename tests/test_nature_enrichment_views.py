@@ -78,6 +78,76 @@ def test_multidatabase_overview_uses_facets_and_shared_encodings(tmp_path):
     plt.close(figure)
 
 
+def test_go_focus_triptych_keeps_an_explicit_empty_ontology_panel():
+    from figure_engine import NatureFigureDirector
+
+    frame = pd.DataFrame({
+        'Database': ['GO_BP', 'GO_MF'], 'Method': ['ORA', 'ORA'],
+        'Direction': ['Up', 'Up'], 'Comparison': ['demo', 'demo'],
+        'Term': ['lipid transport', 'cholesterol binding'],
+        'Adjusted P-value': [.003, .02], 'Overlap': ['5/100', '3/100'],
+        'Genes': ['APOE;APOB', 'APOA1;APOC3'],
+    })
+    spec = NatureFigureDirector().create_spec(
+        'enrichment_overview', width='double', height_mm=180, top_n=6,
+        formats=('png',), database_scope=('GO_BP', 'GO_CC', 'GO_MF'),
+        extra={'facet_layout': 'one_column', 'include_empty_databases': True},
+    )
+    figure = NatureFigureDirector().render(spec, frame)
+    assert getattr(figure, '_nature_panel_grid') == {'nrows': 3, 'ncols': 1, 'panels': 3}
+    assert any('No FDR-significant' in text.get_text() for axis in figure.axes for text in axis.texts)
+    import matplotlib.pyplot as plt
+    plt.close(figure)
+
+
+def test_go_focus_triptych_keeps_overlapping_selected_terms():
+    from figure_engine import NatureFigureDirector
+
+    frame = pd.DataFrame({
+        'Database': ['GO_BP', 'GO_BP'], 'Method': ['ORA', 'ORA'],
+        'Direction': ['Up', 'Up'], 'Comparison': ['demo', 'demo'],
+        'Term': ['inflammatory response', 'cytokine-mediated signalling'],
+        'Adjusted P-value': [.003, .02], 'Overlap': ['5/100', '4/100'],
+        # A high Jaccard similarity would normally reduce this to one term.
+        'Genes': ['A;B;C;D;E', 'A;B;C;D;F'],
+    })
+    spec = NatureFigureDirector().create_spec(
+        'enrichment_overview', width='double', height_mm=140, top_n=6,
+        formats=('png',), database_scope=('GO_BP', 'GO_CC', 'GO_MF'),
+        extra={
+            'facet_layout': 'one_column', 'include_empty_databases': True,
+            'disable_redundancy_compression': True,
+        },
+    )
+    figure = NatureFigureDirector().render(spec, frame)
+    labels = [label.get_text() for label in figure.axes[0].get_yticklabels()]
+    assert labels == ['inflammatory response', 'cytokine-mediated signalling']
+    import matplotlib.pyplot as plt
+    plt.close(figure)
+
+
+def test_go_focus_triptych_renders_truthful_empty_panels_when_no_term_is_significant():
+    from figure_engine import NatureFigureDirector
+
+    frame = pd.DataFrame(columns=[
+        'Database', 'Method', 'Direction', 'Comparison', 'Term',
+        'Adjusted P-value', 'Overlap', 'Genes',
+    ])
+    spec = NatureFigureDirector().create_spec(
+        'enrichment_overview', width='double', height_mm=180, top_n=6,
+        formats=('png',), database_scope=('GO_BP', 'GO_CC', 'GO_MF'),
+        extra={'facet_layout': 'one_column', 'include_empty_databases': True},
+    )
+    figure = NatureFigureDirector().render(spec, frame)
+    assert getattr(figure, '_nature_panel_grid') == {'nrows': 3, 'ncols': 1, 'panels': 3}
+    assert sum(
+        'No FDR-significant' in text.get_text()
+        for axis in figure.axes for text in axis.texts
+    ) == 3
+    import matplotlib.pyplot as plt
+    plt.close(figure)
+
+
 def test_gsea_running_uses_real_rank_and_hit_contract(tmp_path):
     from figure_engine import NatureFigureDirector, export_figure
 

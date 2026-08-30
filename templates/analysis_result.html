@@ -131,7 +131,7 @@
 </div>
 <div class="row">
     {% for f in image_files %}
-    {% set figure_column = 'col-12' if f.category in ['bar', 'heatmap', 'dotplot'] else 'col-12 col-xxl-6' %}
+    {% set figure_column = 'col-12' if f.category in ['bar', 'heatmap', 'dotplot', 'enrichment_overview'] else 'col-12 col-xxl-6' %}
     <div class="{{ figure_column }} mb-4 result-figure-col">
         <div class="card p-3 result-figure-card">
             <div class="result-figure-header mb-2">

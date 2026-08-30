@@ -48,6 +48,12 @@ LOCAL_GO_ASPECTS = {
     "MF": "GO_Molecular_Function_2023",
 }
 
+GO_FOCUS_OVERVIEW_DATABASES = {
+    "GO_Biological_Process_2023": "GO_BP",
+    "GO_Cellular_Component_2023": "GO_CC",
+    "GO_Molecular_Function_2023": "GO_MF",
+}
+
 
 def _safe_name(value, fallback="gene_set"):
     text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "")).strip("._-")
@@ -420,6 +426,158 @@ def _emit_focus_outputs(analysis, result, *, focus_terms, show_plots, plot_top_n
             )
 
 
+def _focus_significant_rows(frame, focus_terms):
+    """Return FDR-significant exact focus matches from completed enrichment rows."""
+    if frame is None or frame.empty or not focus_terms:
+        return pd.DataFrame()
+    required_columns = {"status", "Significant", "gene_set", "Term", "method", "direction"}
+    if not required_columns.issubset(frame.columns):
+        return pd.DataFrame()
+    completed = frame.loc[frame["status"].eq("completed")].copy()
+    significant = completed["Significant"]
+    if significant.dtype != bool:
+        significant = significant.astype(str).str.lower().isin({"true", "1", "yes"})
+    selected = completed.loc[significant & _focus_term_mask(completed, focus_terms)].copy()
+    selected = selected.loc[selected["gene_set"].isin(GO_FOCUS_OVERVIEW_DATABASES)].copy()
+    if selected.empty:
+        return selected
+    selected["Database"] = selected["gene_set"].map(GO_FOCUS_OVERVIEW_DATABASES)
+    selected["Method"] = selected["method"].astype(str).str.upper()
+    selected["Direction"] = selected["direction"].astype(str)
+    return selected
+
+
+def _emit_go_focus_overviews(analysis, frames, *, focus_terms, focus_label,
+                             show_plots, plot_top_n, package_dirs, output_prefix,
+                             result_files, figure_audits, plot_warnings):
+    """Export one BP/CC/MF triptych per comparison, scope and DEG direction.
+
+    The source rows have already been tested against every term in each local
+    ontology.  This function only selects FDR-significant exact focus matches
+    for display; it never reruns enrichment or changes the correction family.
+    """
+    if not focus_terms or not frames:
+        return 0
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    observed_libraries = set(combined.get("gene_set", pd.Series(dtype=str)).astype(str))
+    required_libraries = set(GO_FOCUS_OVERVIEW_DATABASES)
+    missing_libraries = sorted(required_libraries - observed_libraries)
+    if missing_libraries:
+        plot_warnings.append(
+            "未生成 GO BP/CC/MF 合并图：本次运行未同时包含 "
+            + "、".join(missing_libraries)
+        )
+        return 0
+
+    selected = _focus_significant_rows(combined, focus_terms)
+    if not selected.empty:
+        source_path = _available_path(
+            package_dirs["go"], f"{output_prefix}_focus_GO_BP_CC_MF_source", ".csv",
+        )
+        selected.to_csv(source_path, index=False)
+        result_files.append({
+            "file_path": source_path, "file_type": "csv", "category": "table",
+            "label": "主题聚焦 GO BP/CC/MF 合并图来源表（全库 FDR 筛选展示）",
+        })
+    else:
+        plot_warnings.append(
+            "全量 FDR 结果中没有显著的精确主题 term；GO BP/CC/MF 合并图将以空面板如实标记。"
+        )
+    if not show_plots:
+        return 0
+
+    from figure_engine import NatureFigureDirector, export_registered_figure
+    import matplotlib.pyplot as plt
+
+    director = NatureFigureDirector()
+    emitted = 0
+    # Retain not-runnable/failed directions as blank triptychs too.  This
+    # makes an absent Down result explicit instead of silently omitting it;
+    # only completed, FDR-significant rows ever enter the plotted data.
+    source_rows = combined.loc[
+        combined.get("gene_set", pd.Series("", index=combined.index)).isin(
+            GO_FOCUS_OVERVIEW_DATABASES
+        )
+    ].copy()
+    group_columns = ["comparison_id", "comparison", "deg_scope", "cluster", "direction", "method"]
+    for group_key, source_group in source_rows.groupby(
+        group_columns, dropna=False, sort=True, observed=True,
+    ):
+        comparison_id, comparison, deg_scope, cluster, direction, method = group_key
+        group = _focus_significant_rows(source_group, focus_terms)
+        scope_label = "全细胞" if str(deg_scope) == "all_cells" else f"簇 {cluster}"
+        direction_label = "上调" if str(direction) == "Up" else "下调" if str(direction) == "Down" else str(direction)
+        top_n = min(8, max(1, int(plot_top_n)))
+        title = (
+            f"{comparison} · {scope_label} · {direction_label} · {focus_label}\n"
+            "GO-BP / GO-CC / GO-MF（从全量结果筛选展示；FDR 为全库校正）"
+        )
+        output_key = (
+            f"{output_prefix}_focus_GO_BP_CC_MF_{_safe_name(deg_scope)}_"
+            f"{_safe_name(comparison_id)}_{_safe_name(cluster, 'All')}_"
+            f"{_safe_name(direction, 'All')}"
+        )
+        label = (
+            f"{focus_label} GO BP/CC/MF 合并图 · {scope_label} · {direction_label}"
+            "（全库 FDR 筛选展示）"
+        )
+        try:
+            spec = director.create_spec(
+                "enrichment_overview", width="double",
+                # A vertical BP/CC/MF triptych needs enough room for term
+                # labels, but a 150 mm minimum made sparse or empty panels
+                # unnecessarily tall in the result browser.
+                height_mm=min(180, max(105, 42 + 10 * top_n)), top_n=top_n,
+                formats=("svg", "pdf", "png"), title=title,
+                database_scope=("GO_BP", "GO_CC", "GO_MF"),
+                extra={
+                    "facet_layout": "one_column",
+                    "include_empty_databases": True,
+                    # The user selected these exact biological themes.  Show
+                    # every significant selected term up to top_n rather than
+                    # hiding one because it overlaps another selected term.
+                    "disable_redundancy_compression": True,
+                },
+            )
+            figure = director.render(spec, group)
+            semantic_warnings = getattr(figure, "_nature_semantic_warnings", None)
+            if semantic_warnings is not None:
+                semantic_warnings.append(
+                    "该图仅展示预先确认的主题 term；统计检验与 FDR 均来自完整 GO 本体。"
+                )
+            exported, report = export_registered_figure(
+                figure, os.path.join(analysis.ensure_plots_dir(), output_key), spec,
+                category="enrichment_overview", label=label,
+                qa_path=os.path.join(
+                    package_dirs["go"], f"{output_key}_nature_readiness.json",
+                ),
+            )
+            result_files.extend(exported)
+            figure_audits.append({
+                "status": "pass" if report.ready else "warning",
+                "nature_readiness_score": report.score,
+                "issues": [issue.message for issue in report.issues],
+                "scope": scope_label,
+                "direction": direction_label,
+            })
+            if not report.ready:
+                plot_warnings.append(
+                    f"{comparison} / {scope_label} / {direction_label}: "
+                    "GO BP/CC/MF 合并图 readiness 检查需复核。"
+                )
+            emitted += 1
+        except Exception as exc:
+            plot_warnings.append(
+                f"{comparison} / {scope_label} / {direction_label}: "
+                f"GO BP/CC/MF 合并图生成失败（{exc}）"
+            )
+        finally:
+            if "figure" in locals():
+                plt.close(figure)
+                del figure
+    return emitted
+
+
 class SCCellGOEnrichment(BaseAnalysis):
     """Run enrichment for cell-level or sample-level DEG exports."""
 
@@ -448,6 +606,15 @@ class SCCellGOEnrichment(BaseAnalysis):
             "", "0", "false", "no", "off",
         }
         focus_terms = _parse_focus_terms(self.params.get("focus_terms"))
+        focus_label = str(self.params.get("focus_label", "主题聚焦") or "主题聚焦").strip()
+        if len(focus_label) > 80:
+            raise ValueError("focus_label 不能超过 80 个字符")
+        focus_plot_mode = str(
+            self.params.get("focus_plot_mode", "individual_and_overview")
+            or "individual_and_overview"
+        ).strip().lower()
+        if focus_plot_mode not in {"individual_and_overview", "overview_only"}:
+            raise ValueError("focus_plot_mode 必须为 individual_and_overview 或 overview_only")
         libraries = _requested_gene_sets(self.params)
         organism = str(self.params.get("organism", "Human") or "Human")
         execution_mode = str(self.params.get("execution_mode", "local") or "local").lower()
@@ -579,6 +746,7 @@ class SCCellGOEnrichment(BaseAnalysis):
         statuses = []
         plot_warnings = []
         figure_audits = []
+        go_focus_overview_frames = []
         provenance_warnings = []
         if source_selection == "legacy_package_discovery":
             provenance_warnings.append(
@@ -980,8 +1148,8 @@ class SCCellGOEnrichment(BaseAnalysis):
                         ),
                     })
                 _emit_focus_outputs(
-                    self, result,
-                    focus_terms=focus_terms, show_plots=show_enrichment_plots,
+                    self, result, focus_terms=focus_terms,
+                    show_plots=(show_enrichment_plots and focus_plot_mode != "overview_only"),
                     plot_top_n=plot_top_n,
                     enrichment_max_genes=enrichment_max_genes,
                     similarity_threshold=similarity_threshold,
@@ -995,6 +1163,8 @@ class SCCellGOEnrichment(BaseAnalysis):
                     audit=audit, result_files=result_files,
                     figure_audits=figure_audits, plot_warnings=plot_warnings,
                 )
+                if library in GO_FOCUS_OVERVIEW_DATABASES:
+                    go_focus_overview_frames.append(result)
                 audit_path = _available_path(
                     package_dirs["go"],
                     f"{output_prefix}_enrichment_{_safe_name(library)}_"
@@ -1008,7 +1178,9 @@ class SCCellGOEnrichment(BaseAnalysis):
                     "file_path": audit_path, "file_type": "json", "category": "qc",
                     "label": f"Enrichment audit: {comparison} / {library} / {deg_scope}",
                 })
-                if show_enrichment_plots:
+                if show_enrichment_plots and not (
+                    focus_terms and focus_plot_mode == "overview_only"
+                ):
                     completed = result.loc[result["status"].eq("completed")].copy()
                     if not completed.empty:
                         from modules.bulk_enrichment import _render_enrichment_variants
@@ -1115,6 +1287,14 @@ class SCCellGOEnrichment(BaseAnalysis):
                     "n_clusters": int(result["cluster"].nunique()),
                 })
 
+        n_go_focus_overviews = _emit_go_focus_overviews(
+            self, go_focus_overview_frames,
+            focus_terms=focus_terms, focus_label=focus_label,
+            show_plots=show_enrichment_plots, plot_top_n=plot_top_n,
+            package_dirs=package_dirs, output_prefix=output_prefix,
+            result_files=result_files, figure_audits=figure_audits,
+            plot_warnings=plot_warnings,
+        )
         if export_full_tables:
             manifest_path = _available_path(
                 package_dirs["go"], f"{output_prefix}_go_comparison_manifest", ".csv"
@@ -1147,6 +1327,9 @@ class SCCellGOEnrichment(BaseAnalysis):
         if focus_terms:
             summary["focus_terms"] = focus_terms
             summary["focus_note"] = "focus_terms 仅增加主题子表与聚焦图；全量统计与全量表保持不变。"
+            summary["focus_label"] = focus_label
+            summary["focus_plot_mode"] = focus_plot_mode
+            summary["n_go_focus_overviews"] = int(n_go_focus_overviews)
         if all_failed:
             summary["error"] = "所有指定富集单元均执行失败；请查看通路审计中的基因集与错误信息。"
         return {
