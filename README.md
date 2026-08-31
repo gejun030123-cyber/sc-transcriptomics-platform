@@ -26,11 +26,11 @@
 
 ### 单细胞转录组分析
 
-平台提供 14 个核心单细胞分析模块，并补充批量导入、细胞级 DEG、GO 富集、pseudobulk DEG 和标准 CSV 结果包等交付模块。核心顺序为：
+平台提供 15 个核心单细胞分析模块，并补充批量导入、细胞级 DEG、GO 富集、pseudobulk DEG 和标准 CSV 结果包等交付模块。核心顺序为：
 
 ```text
 qc -> normalize -> hvg -> dimred -> batch_correct -> clustering
-  -> qc_reassess / annotation / subcluster / sc_timecourse / deg
+  -> qc_reassess / annotation -> functional_state / subcluster / sc_timecourse / deg
   -> trajectory / proportion / cell_communication / virtual_ko
 ```
 
@@ -45,6 +45,7 @@ qc -> normalize -> hvg -> dimred -> batch_correct -> clustering
 | `subcluster` | 对指定 cluster 进行子簇重聚类、差异表达和通路富集 | 子簇 UMAP、marker 表、热图、富集结果 |
 | `qc_reassess` | 聚类后按簇评估 doublet、MT、ribo、细胞数，支持自动移除低质量簇 | 低质量簇表、按簇 QC 汇总图、doublet/MT UMAP、QC 指标 UMAP 面板、低质量簇高亮图 |
 | `annotation` | 分层 cell lineage/type/subtype、独立 multi-label cell state；`Colorectal` 面板先判 broad lineage 再细分 goblet/TA/absorptive/inflammatory 等上皮亚型；逐簇保存候选、正负 Marker、决策原因；Doublet 继承 QC 实际运行的 caller，Marker 混合不冒充 Doublet；环境 RNA 仅检查异源谱系 Marker；可选本地 CellTypist 参考（不覆盖 Marker 标签） | 细胞类型 UMAP、细胞类型组成图、marker score heatmap、marker dotplot、marker 表达验证图、annotation score UMAP、成熟度 UMAP、CellTypist 参考 UMAP、逐簇复核表 |
+| `functional_state` | 在选定 celltype 范围内并列评估关键基因表达、`scanpy.score_genes` 功能通路和 CollecTRI + decoupler ULM 支持的 TF 活性；正式条件比较以 sample × celltype 聚合，逐细胞图仅作描述性展示 | 基因表达 dotplot、TF/通路评分热图、condition UMAP、样本级 violin/FDR、相关性散点、TF–pathway concordance matrix、coverage/overlap QC 与 manifest |
 | `sc_timecourse` | 按真实时间点进行样本级细胞组成和伪 bulk 基因动态分析，区分描述性趋势与统计推断 | 时间点 UMAP、组成曲线/热图、动态基因表和趋势图 |
 | `deg` | cluster/celltype marker（探索性） | 火山图、显著 DEG 数量图、top marker UMAP 面板、dotplot、marker heatmap、基因表达 UMAP |
 | `trajectory` | Diffusion Map、DPT、PAGA 拟时序 | pseudotime UMAP、pseudotime 分布图、PAGA 图、基因随拟时序变化图 |
@@ -53,6 +54,8 @@ qc -> normalize -> hvg -> dimred -> batch_correct -> clustering
 | `virtual_ko` | 基于 CellOracle 的 GRN 推断（Ridge 回归）与 in silico 基因敲除扰动模拟；内置人类 promoter base GRN（hg19/hg38）或上传自定义 base GRN；在独立 celloracle 环境（Python 3.9/3.10）中运行 | GRN 边表 CSV、每个基因的状态偏移 CSV、Top 受调控基因 CSV、quiver 向量场、模拟流场网格、细胞分群+流场、偏移分布图（PNG+SVG）、含模拟结果的 h5ad |
 
 `annotation` 还提供可选的脱敏 LLM 辅助注释：仅向配置的模型发送 cluster 级 marker 摘要（不含表达矩阵、细胞条码、样本元数据或项目路径），返回结果只作为候选证据，须人工复核后采纳。
+
+`functional_state` 的 TF activity 绝不等同于 TF 基因表达：前者仅在本地、版本冻结的网络靶基因覆盖充分时计算。它还将 ctrl/dis 分层相关性与 regulator–pathway 一致性作为探索性效应量展示，不以细胞数替代生物学重复。完整的输入安全、资源校验、统计合同和延期范围见 [功能状态模块说明](docs/FUNCTIONAL_STATE_IMPLEMENTATION.md)。
 
 ### Bulk RNA-seq 分析
 
@@ -200,6 +203,7 @@ python app.py
 - `celltypist`：启用本地人类 CellTypist 参考交叉验证；类器官注释不把外部模型作为默认真值，冲突结果保留人工复核。
 - `liana`：启用细胞通讯分析；未安装时该任务会明确返回 `unavailable` 和安装提示，不会伪装成成功。
 - `gseapy`：用于本地 GMT/TXT 过度富集分析，以及子簇/Bulk 的兼容富集路径；未安装时核心聚类和差异分析仍可使用。
+- `decoupler==2.2.0`：启用 `functional_state` 的 CollecTRI 网络支持 TF activity（ULM）；网络快照由管理员在受控数据卷维护，分析时校验版本和 SHA-256，不能由网页指定任意路径。
 - `harmonypy`、`bbknn`、`scanorama`、`scvi-tools`、`torch`：启用 Harmony、BBKNN、Scanorama、SysVI/scVI 批次整合路径；未安装时对应方法不可用。
 - `kneed`：启用 Kneedle 自动 PC 选择。
 - `plotly`：仅用于兼容历史分析模块的内部数据结构；网页、报告和下载结果均不再输出 Plotly 交互图。

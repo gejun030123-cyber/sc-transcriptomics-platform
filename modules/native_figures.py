@@ -239,7 +239,16 @@ def umap_panel_figure(adata, color_keys, titles=None, basis='X_umap',
 
 def heatmap_figure(matrix, x_labels=None, y_labels=None, title='',
                    x_label='', y_label='', colorbar_label='z-score',
-                   vmin=-3, vmax=3):
+                   vmin=-3, vmax=3, x_group_labels=None,
+                   x_label_rotation=45):
+    """Render a compact heatmap with an optional second-level x-axis header.
+
+    ``x_group_labels`` is useful when adjacent columns share a long parent
+    label (for example, cell type) while the x ticks carry a short child label
+    (for example, condition).  Keeping the two levels separate prevents the
+    diagonal, overlapping labels that make dense biological heatmaps hard to
+    read.
+    """
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap
 
@@ -247,25 +256,50 @@ def heatmap_figure(matrix, x_labels=None, y_labels=None, title='',
     cmap = LinearSegmentedColormap.from_list(
         'nature_diverging', ['#0F4D92', '#DCEAF0', '#FFFFFF', '#F6CFCB', '#B64342']
     )
-    width = max(7.0, min(14.0, 4.8 + 0.22 * max(1, matrix.shape[1])))
+    grouped_columns = x_group_labels is not None
+    if grouped_columns and len(x_group_labels) != matrix.shape[1]:
+        raise ValueError('x_group_labels must match the heatmap column count')
+    width_per_column = 0.78 if grouped_columns else 0.22
+    width = max(7.0, min(16.0, 4.8 + width_per_column * max(1, matrix.shape[1])))
     height = max(4.8, min(12.0, 3.6 + 0.18 * max(1, matrix.shape[0])))
     fig, ax = plt.subplots(figsize=(width, height), dpi=150)
     image = ax.imshow(matrix, aspect='auto', cmap=cmap, vmin=vmin, vmax=vmax)
     if x_labels is not None:
         ax.set_xticks(np.arange(len(x_labels)), [str(item) for item in x_labels])
-        ax.tick_params(axis='x', labelrotation=45, labelsize=8)
+        ax.tick_params(axis='x', labelrotation=x_label_rotation,
+                       labelsize=8, pad=5)
     if y_labels is not None:
         ax.set_yticks(np.arange(len(y_labels)), [str(item) for item in y_labels])
         ax.tick_params(axis='y', labelsize=8)
-    ax.set_title(title, loc='left', pad=10, fontsize=10,
-                 fontweight='semibold', color=NATURE_TEXT)
+    if grouped_columns:
+        # Place the title at figure level, leaving a dedicated row for the
+        # grouped headers rather than letting both strings occupy the same
+        # narrow top margin.
+        fig.suptitle(title, x=0.01, y=0.99, ha='left', fontsize=10,
+                     fontweight='semibold', color=NATURE_TEXT)
+        groups = [str(item) for item in x_group_labels]
+        start = 0
+        for index in range(1, len(groups) + 1):
+            if index != len(groups) and groups[index] == groups[start]:
+                continue
+            end = index - 1
+            centre = (start + end) / 2
+            ax.text(centre, 1.015, groups[start], transform=ax.get_xaxis_transform(),
+                    ha='center', va='bottom', fontsize=7.4, fontweight='semibold',
+                    color=NATURE_TEXT, clip_on=False, linespacing=0.92)
+            if start:
+                ax.axvline(start - 0.5, color='#98A2B3', linewidth=0.75, alpha=0.85)
+            start = index
+    else:
+        ax.set_title(title, loc='left', pad=10, fontsize=10,
+                     fontweight='semibold', color=NATURE_TEXT)
     ax.set_xlabel(x_label, fontsize=9, color=NATURE_TEXT)
     ax.set_ylabel(y_label, fontsize=9, color=NATURE_TEXT)
     colorbar = fig.colorbar(image, ax=ax, fraction=0.035, pad=0.025, aspect=32)
     colorbar.outline.set_visible(False)
     colorbar.set_label(colorbar_label, fontsize=8, labelpad=5)
     _style_axis(ax)
-    fig.tight_layout(pad=1.1)
+    fig.tight_layout(pad=1.1, rect=(0.0, 0.0, 1.0, 0.94) if grouped_columns else None)
     return fig
 
 
@@ -950,7 +984,24 @@ def marker_dotplot_figure(mean_expression, detection_fraction, categories,
         norm=norm, edgecolors='white', linewidths=0.35, alpha=0.95,
     )
     ax.set_xticks(np.arange(n_categories), categories, rotation=category_rotation, ha='right')
-    ax.set_yticks(np.arange(n_genes), gene_labels)
+    section_values = []
+    if gene_sections is not None:
+        if isinstance(gene_sections, dict):
+            section_values = [str(gene_sections.get(label, '')) for label in gene_labels]
+        else:
+            section_values = [str(item or '') for item in gene_sections]
+        if len(section_values) != n_genes:
+            raise ValueError('gene_sections must match gene_labels when provided')
+    display_gene_labels = list(gene_labels)
+    if section_values:
+        previous = None
+        for index, section in enumerate(section_values):
+            if section and section != previous:
+                display_gene_labels[index] = f'{section}\n{gene_labels[index]}'
+                if index:
+                    ax.axhline(index - 0.5, color='#98A2B3', linewidth=0.85, zorder=0)
+            previous = section
+    ax.set_yticks(np.arange(n_genes), display_gene_labels)
     ax.set_xlim(-0.55, n_categories - 0.45)
     ax.set_ylim(-0.55, n_genes - 0.45)
     ax.invert_yaxis()

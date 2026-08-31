@@ -19,6 +19,9 @@ anndata
 
 # Single-cell analysis
 scanpy
+# Functional-state TF activity (CollecTRI + ULM). Pin the API used by the
+# managed resource workflow; each analysis also records the installed version.
+decoupler==2.2.0
 omicverse
 # Leiden/Louvain 聚类的必需后端（scanpy 仅将其列为可选 extra，
 # 未安装时默认聚类路径会 ImportError）

@@ -7,6 +7,7 @@ from .clustering import ClusteringAnalysis
 from .subcluster import SubclusterAnalysis
 from .qc_reassess import QCReassessAnalysis
 from .annotation import AnnotationAnalysis
+from .functional_state import FunctionalStateAnalysis
 from .deg import DEGAnalysis
 from .trajectory import TrajectoryAnalysis
 from .sc_timecourse import SCTimecourseAnalysis
@@ -39,6 +40,7 @@ MODULE_REGISTRY = {
     'subcluster': SubclusterAnalysis,
     'qc_reassess': QCReassessAnalysis,
     'annotation': AnnotationAnalysis,
+    'functional_state': FunctionalStateAnalysis,
     'deg': DEGAnalysis,
     'trajectory': TrajectoryAnalysis,
     'sc_timecourse': SCTimecourseAnalysis,
@@ -65,7 +67,7 @@ MODULE_REGISTRY = {
 
 PIPELINE_ORDER = [
     'qc', 'normalize', 'hvg', 'dimred', 'batch_correct', 'clustering', 'subcluster',
-    'qc_reassess', 'annotation', 'sc_timecourse', 'deg', 'sc_cell_deg', 'sc_pseudobulk_deg', 'sc_cell_go', 'trajectory', 'proportion', 'cell_communication', 'virtual_ko', 'sc_csv_export',
+    'qc_reassess', 'annotation', 'functional_state', 'sc_timecourse', 'deg', 'sc_cell_deg', 'sc_pseudobulk_deg', 'sc_cell_go', 'trajectory', 'proportion', 'cell_communication', 'virtual_ko', 'sc_csv_export',
     'bulk_qc', 'bulk_normalize', 'bulk_pca', 'bulk_deg', 'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
     'bulk_deg_integration',
 ]
@@ -81,6 +83,7 @@ PIPELINE_DEPS = {
     'subcluster': ['clustering'],
     'qc_reassess': ['clustering'],
     'annotation': ['clustering'],
+    'functional_state': ['annotation'],
     'sc_timecourse': ['clustering'],
     'deg': ['clustering'],
     'trajectory': ['clustering'],

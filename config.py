@@ -84,6 +84,13 @@ class Config:
     CACHE_DIR = os.path.abspath(os.environ.get(
         'CACHE_DIR', os.path.join(DATA_DIR, 'cache')
     ))
+    # Curated public resources used by optional single-cell modules live on
+    # the controlled data volume rather than in user project uploads.  The
+    # directory can be redirected by an administrator, while tests continue
+    # to follow their isolated DATA_DIR.
+    FUNCTIONAL_STATE_RESOURCE_DIR = os.environ.get(
+        'FUNCTIONAL_STATE_RESOURCE_DIR', ''
+    ).strip()
     DB_PATH = os.environ.get('DB_PATH', os.path.join(_BASE_DIR, 'instance', 'bioinfo.db'))
     CELLMARKER_PATH = os.environ.get('CELLMARKER_PATH', os.path.join(os.path.dirname(_BASE_DIR), 'CellMarker_Augmented_2021.txt'))
 
@@ -228,6 +235,14 @@ class Config:
         path = os.path.abspath(cls.RUNTIME_TMP_DIR)
         os.makedirs(path, exist_ok=True)
         return path
+
+    @classmethod
+    def functional_state_resource_dir(cls):
+        """Return the administrator-controlled functional-state resource root."""
+        configured = str(cls.FUNCTIONAL_STATE_RESOURCE_DIR or '').strip()
+        return os.path.abspath(
+            configured or os.path.join(cls.DATA_DIR, 'functional_state_resources')
+        )
 
     @classmethod
     def configure_runtime_tmpdir(cls):
