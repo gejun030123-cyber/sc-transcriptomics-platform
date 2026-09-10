@@ -73,7 +73,7 @@ class TestVirtualKOParams:
         schema = PARAM_SCHEMAS['virtual_ko']
         form = MultiDict([
             ('base_grn_source', 'builtin_human_hg38'),
-            ('base_grn_file', '/some/file.pickle'),
+            ('base_grn_file', '/some/file.parquet'),
             ('perturb_genes', 'SPI1'),
         ])
         params = parse_form_params(schema, form)
@@ -86,11 +86,11 @@ class TestVirtualKOParams:
         schema = PARAM_SCHEMAS['virtual_ko']
         form = MultiDict([
             ('base_grn_source', 'upload'),
-            ('base_grn_file', '/tmp/x.pickle'),
+            ('base_grn_file', '/tmp/x.parquet'),
             ('perturb_genes', 'SPI1'),
         ])
         params = parse_form_params(schema, form)
-        assert params['base_grn_file'] == '/tmp/x.pickle'
+        assert params['base_grn_file'] == '/tmp/x.parquet'
 
 
 class TestVirtualKOPaths:
@@ -112,8 +112,28 @@ class TestVirtualKOPaths:
         mod = VirtualKOAnalysis(project_dir=str(tmp_path), params={
             'base_grn_source': 'upload', 'base_grn_file': '/etc/passwd',
         }, progress_callback=None)
-        with pytest.raises(ValueError, match='不在项目或平台数据目录内'):
+        with pytest.raises(ValueError, match='当前项目的 uploads'):
             mod._resolve_base_grn()
+
+    def test_resolve_base_grn_rejects_pickle_even_in_uploads(self, tmp_path):
+        from modules.virtual_ko import VirtualKOAnalysis
+        uploads = tmp_path / 'uploads'
+        uploads.mkdir()
+        unsafe = uploads / 'untrusted.pkl'
+        unsafe.write_bytes(b'not a real pickle')
+        mod = VirtualKOAnalysis(project_dir=str(tmp_path), params={
+            'base_grn_source': 'upload', 'base_grn_file': str(unsafe),
+        }, progress_callback=None)
+        with pytest.raises(ValueError, match='不接受 pickle'):
+            mod._resolve_base_grn()
+
+    def test_links_file_is_disabled_before_subprocess(self, tmp_path):
+        from modules.virtual_ko import VirtualKOAnalysis
+        mod = VirtualKOAnalysis(project_dir=str(tmp_path), params={
+            'links_file': 'unsafe.links',
+        }, progress_callback=None)
+        with pytest.raises(ValueError, match='不接受用户提供的 CellOracle Links'):
+            mod._resolve_links_file()
 
     def test_resolve_base_grn_missing_file(self, tmp_path):
         from modules.virtual_ko import VirtualKOAnalysis
@@ -154,7 +174,7 @@ class TestVirtualKOSubprocess:
             'print(json.dumps({"type": "progress", "pct": 50, "message": "half"}))\n'
             'with open(os.path.join(cfg["output_dir"], "a.csv"), "w") as f:\n'
             '    f.write("a,b\\n1,2\\n")\n'
-            'summary = {"status": "completed", "output_h5ad": "OUT.h5ad", "genes": {}}\n'
+            'summary = {"status": "completed", "output_h5ad": "OUT.h5ad", "genes": {}, "environment": dict(os.environ)}\n'
             'print(json.dumps({"type": "result", "summary": summary, "files": ['
             '{"path": os.path.join(cfg["output_dir"], "a.csv"), "kind": "csv", '
             '"category": "table", "label": "t"}]}))\n',
@@ -181,6 +201,34 @@ class TestVirtualKOSubprocess:
         assert any('50' == str(pct) for pct, _ in progress_events)
         assert any(f['path'].endswith('a.csv') for f in files)
         assert os.path.isfile(out_dir / 'a.csv')
+
+    def test_subprocess_does_not_inherit_secrets(self, tmp_path, monkeypatch):
+        """The isolated CellOracle process only receives an explicit env allowlist."""
+        from modules.virtual_ko import VirtualKOAnalysis
+        fake_py = tmp_path / 'fake_python'
+        fake_worker = tmp_path / 'worker.py'
+        fake_py.write_text('#!/bin/sh\nexec python3 "$@"\n', encoding='utf-8')
+        fake_py.chmod(0o755)
+        fake_worker.write_text(
+            'import json, os, sys\n'
+            'json.load(open(sys.argv[2], encoding="utf-8"))\n'
+            'print(json.dumps({"type": "result", "summary": {"environment": dict(os.environ)}, "files": []}))\n',
+            encoding='utf-8',
+        )
+        monkeypatch.setenv('AI_API_KEY', 'must-not-reach-subprocess')
+        monkeypatch.setenv('PLATFORM_ACCESS_PASSWORD', 'must-not-reach-subprocess')
+        mod = VirtualKOAnalysis(project_dir=str(tmp_path), params={}, progress_callback=None)
+        mod._celloracle_python = lambda: str(fake_py)
+        mod._celloracle_worker = lambda: str(fake_worker)
+        _files, summary = mod._run_subprocess({
+            'input_h5ad': str(tmp_path / 'in.h5ad'),
+            'output_dir': str(tmp_path / 'results'),
+            'plots_dir': str(tmp_path / 'plots'),
+            'intermediate_dir': str(tmp_path / 'intermediate'),
+            'base_grn_source': 'builtin_human_hg38', 'base_grn_file': '',
+        })
+        assert 'AI_API_KEY' not in summary['environment']
+        assert 'PLATFORM_ACCESS_PASSWORD' not in summary['environment']
 
     def test_run_unavailable_when_python_missing(self, tmp_path):
         from modules.virtual_ko import VirtualKOAnalysis

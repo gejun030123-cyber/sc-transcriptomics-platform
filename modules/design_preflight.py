@@ -33,6 +33,21 @@ _BATCH_TOKENS = ("batch", "lane", "sequencing", "library", "run")
 _CELLTYPE_TOKENS = ("celltype", "cell_type", "annotation", "cluster", "leiden", "louvain")
 _TIME_TOKENS = ("time", "day", "hour", "week", "stage", "minute")
 
+# 需要硬预检（blockers 会阻止提交）的模块。网页表单与 AI 工具必须使用
+# 同一集合：此前表单只检查 4 个模块、AI 检查 8 个，导致同一个人工提交
+# 反而绕过了正式样本级统计（sc_pseudobulk_deg 等）的设计门槛。
+PREFLIGHT_MODULES = frozenset({
+    "bulk_normalize",
+    "bulk_deg",
+    "batch_correct",
+    "sc_timecourse",
+    "sc_cell_deg",
+    "sc_pseudobulk_deg",
+    "functional_state",
+    "proportion",
+    "neighborhood_da",
+})
+
 
 def _check(name, status, message, value=None):
     item = {"name": str(name), "status": str(status), "message": str(message)}

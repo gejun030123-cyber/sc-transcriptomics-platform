@@ -108,3 +108,22 @@ def test_expression_matrix_import_writes_standard_h5ad_with_sample_id(tmp_path):
     assert converted.shape == (2, 3)
     assert list(converted.obs['sample_id'].unique()) == ['counts']
     assert 'counts' in converted.layers
+
+
+def test_reimport_preserves_prior_converted_h5ad(tmp_path):
+    from modules.convert_10x import Convert10x
+
+    project_dir = tmp_path / 'project'
+    uploads_dir = project_dir / 'uploads'
+    uploads_dir.mkdir(parents=True)
+    source = uploads_dir / 'counts.csv'
+    _write_expression_matrix(source)
+    params = {'source_path': str(source), 'input_format': 'expression_matrix'}
+
+    first = Convert10x(str(project_dir), params, lambda *_args: None).run(str(source))
+    original_bytes = open(first['output_adata'], 'rb').read()
+    second = Convert10x(str(project_dir), params, lambda *_args: None).run(str(source))
+
+    assert first['output_adata'].endswith('counts_imported.h5ad')
+    assert second['output_adata'].endswith('counts_imported_2.h5ad')
+    assert open(first['output_adata'], 'rb').read() == original_bytes

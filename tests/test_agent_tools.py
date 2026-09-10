@@ -76,6 +76,46 @@ class TestPathValidation:
         # 可能因为文件不存在而返回错误，但至少不应该接受
         assert err is not None
 
+    def test_validate_project_path_accepts_project_relative_path(self, tmp_path, monkeypatch):
+        """脱敏后的相对路径必须仍能在项目目录内解析."""
+        from modules.ai_tools import _validate_project_path
+        from config import Config
+
+        monkeypatch.setattr(Config, 'DATA_DIR', str(tmp_path))
+        project_dir = tmp_path / 'projects' / 'test_pid'
+        (project_dir / 'intermediate').mkdir(parents=True)
+        target = project_dir / 'intermediate' / 'qc_output.h5ad'
+        target.write_text('x')
+
+        assert _validate_project_path('intermediate/qc_output.h5ad', 'test_pid') is None
+        assert _validate_project_path('../outside.h5ad', 'test_pid') is not None
+
+    def test_redact_server_paths_hides_absolute_locations(self, tmp_path, monkeypatch):
+        """发给外部模型的结果里不能出现服务器绝对路径."""
+        from modules.ai_tools import _redact_server_paths
+        from config import Config
+
+        monkeypatch.setattr(Config, 'DATA_DIR', str(tmp_path))
+        project_dir = tmp_path / 'projects' / 'test_pid'
+        payload = {
+            'csv_package_dir': str(project_dir / 'results' / 'sc_batch_results'),
+            'deg_source_files': [str(project_dir / 'results' / 'deg_a.csv')],
+            'checksum_file': '/etc/passwd',
+            'note': 'no path here',
+            'url': 'https://example.org/x',
+        }
+
+        redacted = _redact_server_paths(payload, 'test_pid')
+
+        assert redacted['csv_package_dir'] == 'results/sc_batch_results'
+        assert redacted['deg_source_files'] == ['results/deg_a.csv']
+        assert redacted['checksum_file'] == 'passwd'
+        assert redacted['note'] == 'no path here'
+        assert redacted['url'] == 'https://example.org/x'
+        joined = json.dumps(redacted)
+        assert str(tmp_path) not in joined
+        assert '/etc/passwd' not in joined
+
     def test_find_latest_adata_no_project(self):
         """测试项目不存在时返回 None."""
         from modules.ai_tools import _find_latest_adata

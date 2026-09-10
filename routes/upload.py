@@ -10,9 +10,9 @@ ALLOWED_EXT = {
     '.h5ad', '.h5', '.hdf5', '.loom', '.zarr',
     '.csv', '.txt', '.mtx', '.gz', '.xlsx', '.xls', '.tsv',
     '.zip',
-    # CellOracle 虚拟敲除：base GRN / links 对象
-    '.parquet', '.pq', '.pickle', '.pkl', '.gpickle',
-    '.oracle', '.celloracle', '.links',
+    # CellOracle virtual KO accepts only tabular TF-info matrices.  Never
+    # accept project-uploaded pickle/Oracle/Links files for deserialization.
+    '.parquet', '.pq',
 }
 
 # 10x 文件名匹配模式

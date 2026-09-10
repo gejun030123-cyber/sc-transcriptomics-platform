@@ -147,6 +147,11 @@ class DEGAnalysis(BaseAnalysis):
         self.progress(5, "Loading data...")
         adata = self.load_adata(input_path)
         adata = self.apply_scope(adata)
+        # The selected scope is the contract for this module's chained h5ad.
+        # Pairwise/custom contrasts below use a smaller temporary subset only
+        # for statistics; they must never silently replace the scoped input
+        # supplied to downstream modules.
+        output_adata = adata
         requested_groupby = str(self.params.get('groupby', '') or '').strip()
         if not requested_groupby and 'celltype' in adata.obs.columns:
             requested_groupby = 'celltype'
@@ -196,7 +201,7 @@ class DEGAnalysis(BaseAnalysis):
 
         # 比较方案：reference（默认，每簇 vs 参考组/rest）、pairwise（全部两两）、
         # custom（只运行用户列出的 A-vs-B）。pairwise/custom 会先限定参与比较的组，
-        # 使后续统计、图表和导出都只基于这些组，避免“选了比较但图里仍出现全部组”。
+        # 使统计和图表只基于参与组；保存的标准 h5ad 仍保留全部 scoped cells。
         group_labels = sorted(adata.obs[groupby].astype(str).unique().tolist())
         pairs = None
         if comparison_mode == "custom":
@@ -225,6 +230,9 @@ class DEGAnalysis(BaseAnalysis):
             if not isinstance(adata.obs[groupby].dtype, pd.CategoricalDtype):
                 adata.obs[groupby] = adata.obs[groupby].astype(str).astype('category')
             self.progress(-1, f"仅保留参与比较的 {len(involved)} 个组: {sorted(involved)}")
+
+        n_cells_in_output = int(output_adata.n_obs)
+        n_cells_used_for_contrasts = int(adata.n_obs)
 
         # Pearson residuals are intentionally not used for fold-change
         # inference.  ``de_adata`` is a short-lived log1p reconstruction from
@@ -709,7 +717,7 @@ class DEGAnalysis(BaseAnalysis):
                 self.progress(-1, f"Marker heatmap generation failed: {e}")
 
         self.progress(90, "Saving output...")
-        adata.uns['marker_selection'] = {
+        output_adata.uns['marker_selection'] = {
             'cluster_key': groupby,
             'used_in_dotplot': not bool(custom_dotplot_str),
             'cluster_markers': marker_selection.get('cluster_markers', {}),
@@ -719,7 +727,7 @@ class DEGAnalysis(BaseAnalysis):
             'warnings': marker_selection.get('warnings', []),
             'parameters': marker_selection.get('parameters', {}),
         }
-        output_path = self.save_output(adata, 'deg')
+        output_path = self.save_output(output_adata, 'deg')
 
         self.progress(100, "Done")
         return {
@@ -738,6 +746,11 @@ class DEGAnalysis(BaseAnalysis):
                 ),
                 'n_skipped_pairs': len(skipped_pairs),
                 'min_cells_per_group': min_cells_pair,
+                'n_cells_in_output': n_cells_in_output,
+                'n_cells_used_for_contrasts': n_cells_used_for_contrasts,
+                'n_cells_excluded_from_contrasts': (
+                    n_cells_in_output - n_cells_used_for_contrasts
+                ),
                 'scope_key': str(self.params.get('scope_key', '') or '').strip() or None,
                 'scope_values': ([v.strip() for v in str(self.params.get('scope_values', '') or '').split(',') if v.strip()] or None),
                 'total_deg_genes': len(deg_data),

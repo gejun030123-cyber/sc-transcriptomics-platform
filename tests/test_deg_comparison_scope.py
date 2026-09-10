@@ -68,6 +68,17 @@ class TestDegComparisonSelection:
         assert set(df['comparison'].astype(str).unique()) == {'0 vs 2'}
         assert len(df) == summary['total_deg_genes']
 
+        # The comparison subset is only for inference.  The chained output is
+        # still the complete scoped AnnData, so downstream analyses cannot
+        # silently lose the unselected cluster.
+        import anndata
+        output = anndata.read_h5ad(result['output_adata'])
+        assert output.n_obs == 90
+        assert set(output.obs['leiden'].astype(str)) == {'0', '1', '2'}
+        assert summary['n_cells_in_output'] == 90
+        assert summary['n_cells_used_for_contrasts'] == 60
+        assert summary['n_cells_excluded_from_contrasts'] == 30
+
     def test_pairwise_mode_generates_all_pairs(self, tmp_path):
         result = _run_deg(tmp_path, {
             'groupby': 'leiden', 'method': 'wilcoxon', 'n_genes': 5,

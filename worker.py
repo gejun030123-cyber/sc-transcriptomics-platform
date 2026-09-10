@@ -72,8 +72,14 @@ def _snapshot_task_artifacts(task, project_dir, result):
         path_map.setdefault(source_path, target)
         return target
 
+    # A module can return its input h5ad alongside an ``error`` merely to
+    # satisfy the historical result shape.  It is not an output and copying it
+    # both wastes storage and makes a failed task look usable downstream.
+    failed_result = bool(_result_error(result))
     output_path = result.get('output_adata')
-    if isinstance(output_path, str) and output_path:
+    if failed_result:
+        result['output_adata'] = None
+    elif isinstance(output_path, str) and output_path:
         result['output_adata'] = copy_one(output_path, 'output_adata' + os.path.splitext(output_path)[1])
 
     snapshots = []
@@ -230,6 +236,7 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
         # ORA task fail when launched from a short-lived worker process.
         if module_name != "sc_cell_go":
             # Best-effort input validation before running
+            adata = None
             try:
                 adata = module.load_adata(input_path)
                 validation_error = module.validate_input(adata)
@@ -243,6 +250,12 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
                 # 非 h5ad 文件（CSV/TSV/Excel）无法通过 load_adata 加载，
                 # 但模块内部的 run() 可能使用 read_expression_matrix() 正确处理
                 logger.debug(f"[Worker] Input validation skipped for {input_path}: {e}")
+            finally:
+                # ``module.run()`` re-reads the same h5ad.  Releasing the
+                # preflight object first keeps peak memory at one copy of the
+                # dataset instead of two (the local name would otherwise stay
+                # alive for the whole run).
+                del adata
         else:
             logger.debug(
                 "[Worker] Skipping chained h5ad preflight for sc_cell_go; "

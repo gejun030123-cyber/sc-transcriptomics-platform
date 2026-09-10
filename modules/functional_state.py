@@ -929,6 +929,11 @@ def _correlations(
         if int(finite.sum()) >= 3:
             result = spearmanr(x[finite], y[finite])
             rho, pvalue = float(result.statistic), float(result.pvalue)
+        # Cell-level rows are visual/descriptive effect-size checks.  Cells
+        # are not independent biological replicates, so retaining Spearman's
+        # mathematical P value in an exported CSV invites pseudoreplication.
+        if "cell_level_descriptive" in level:
+            pvalue = np.nan
         rows.append({
             "analysis_level": level, "condition": condition, "celltype": celltype, "x_feature": x_feature,
             "y_feature": y_feature, "n_units": int(finite.sum()), "rho": rho,
@@ -1719,7 +1724,9 @@ class FunctionalStateAnalysis(BaseAnalysis):
     MODULE_NAME = "functional_state"
     DISPLAY_NAME = "转录调控与功能状态"
     DESCRIPTION = "基因表达、网络支持的 TF 活性和通路评分；样本级条件比较"
-    INPUT_REQUIRES = []
+    # _validate_obs_column(..., "细胞类型") 硬性要求 celltype 列，因此输入
+    # 选择器必须只提供已注释的上游输出，而不是让用户在运行期才遇到报错。
+    INPUT_REQUIRES = ['celltype']
 
     def validate_input(self, adata):
         for key, label, multiple in (

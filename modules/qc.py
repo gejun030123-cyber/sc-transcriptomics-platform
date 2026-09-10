@@ -1424,11 +1424,21 @@ class QCAnalysis(BaseAnalysis):
 
         # QC 散点图（Counts vs Genes，颜色 = MT%）
         if 'total_counts' in adata.obs.columns and 'n_genes_by_counts' in adata.obs.columns:
-            x = _finite_values(adata.obs['total_counts'])
-            y = _finite_values(adata.obs['n_genes_by_counts'])
-            count = min(len(x), len(y))
-            color_vals = (_finite_values(adata.obs['pct_counts_mt'])[:count]
-                          if 'pct_counts_mt' in adata.obs.columns else None)
+            # 三列必须来自同一批细胞：逐列过滤有限值后再按下标拼接会把
+            # A 细胞的 counts 与 B 细胞的 genes/MT% 画在一起。
+            scatter_columns = ['total_counts', 'n_genes_by_counts']
+            if 'pct_counts_mt' in adata.obs.columns:
+                scatter_columns.append('pct_counts_mt')
+            scatter_frame = adata.obs[scatter_columns].apply(
+                pd.to_numeric, errors='coerce'
+            ).replace([np.inf, -np.inf], np.nan).dropna()
+            x = scatter_frame['total_counts'].to_numpy(dtype=float)
+            y = scatter_frame['n_genes_by_counts'].to_numpy(dtype=float)
+            count = int(len(scatter_frame))
+            color_vals = (
+                scatter_frame['pct_counts_mt'].to_numpy(dtype=float)
+                if 'pct_counts_mt' in scatter_frame.columns else None
+            )
             fig_scatter, axis = plt.subplots(figsize=(8.8, 5.7))
             points = axis.scatter(x[:count], y[:count], c=color_vals, cmap='RdYlBu_r'
                                   if color_vals is not None else None,
@@ -1448,9 +1458,13 @@ class QCAnalysis(BaseAnalysis):
 
         # Novelty score 散点图
         if 'novelty_score' in adata.obs.columns:
-            x = _finite_values(adata.obs['total_counts'])
-            y = _finite_values(adata.obs['novelty_score'])
-            count = min(len(x), len(y))
+            # 同样成对过滤：novelty 更容易出现 NaN，独立过滤会错位。
+            novelty_frame = adata.obs[['total_counts', 'novelty_score']].apply(
+                pd.to_numeric, errors='coerce'
+            ).replace([np.inf, -np.inf], np.nan).dropna()
+            x = novelty_frame['total_counts'].to_numpy(dtype=float)
+            y = novelty_frame['novelty_score'].to_numpy(dtype=float)
+            count = int(len(novelty_frame))
             fig_nov, axis = plt.subplots(figsize=(8.0, 5.1))
             axis.scatter(x[:count], y[:count], color=NATURE_PALETTE[2], s=11,
                          alpha=0.56, linewidths=0, rasterized=True)
@@ -1533,10 +1547,19 @@ class QCAnalysis(BaseAnalysis):
         # Preserve the representation supplied by the caller while retaining
         # all QC metrics and filters computed from counts.  AnnData indexing
         # handles both dense and sparse matrices without densifying the data.
-        obs_pos = original_obs_names.get_indexer(adata.obs_names)
-        var_pos = original_var_names.get_indexer(adata.var_names)
-        if (obs_pos >= 0).all() and (var_pos >= 0).all():
-            adata.X = original_x[obs_pos][:, var_pos]
+        # ``Index.get_indexer`` 要求索引唯一，重复基因名会抛
+        # InvalidIndexError；这里显式守卫，重复时保留 counts 表示而不是崩溃。
+        if original_obs_names.is_unique and original_var_names.is_unique:
+            obs_pos = original_obs_names.get_indexer(adata.obs_names)
+            var_pos = original_var_names.get_indexer(adata.var_names)
+            if (obs_pos >= 0).all() and (var_pos >= 0).all():
+                adata.X = original_x[obs_pos][:, var_pos]
+        else:
+            self.progress(
+                -1,
+                "输入包含重复细胞或基因名，已跳过原始表达表示回填；"
+                "输出保留基于 counts 的 QC 结果，建议先用 var_names_make_unique 清理输入。",
+            )
 
         # Save only after all provenance metadata and canonical obs fields have
         # been attached; previously these uns entries were created after the

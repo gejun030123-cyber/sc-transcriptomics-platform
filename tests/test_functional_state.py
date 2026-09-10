@@ -161,6 +161,33 @@ def test_functional_state_calculates_network_backed_tf_activity_from_project_fil
     )
 
 
+def test_cell_level_correlation_omits_nonindependent_pvalue():
+    from modules.functional_state import _correlations
+
+    obs = pd.DataFrame({
+        'celltype': ['A', 'A', 'B', 'B'],
+        'condition': ['Control', 'Control', 'IBD', 'IBD'],
+    })
+    correlations, _overlap = _correlations(
+        obs,
+        {'TF activity': [0.1, 0.3, 0.4, 0.7], 'Pathway score': [0.2, 0.1, 0.5, 0.9]},
+        {},
+        pd.DataFrame([{
+            'sample_id': 'S1', 'condition': 'Control', 'celltype': 'A',
+            'feature': 'TF activity', 'score': 0.1,
+            'eligible_for_statistics': False,
+        }]),
+        x_name='TF activity', y_name='Pathway score', celltype_key='celltype',
+        condition_key='condition', conditions=(), min_samples=2,
+        levels=('cell_level_descriptive',),
+    )
+
+    row = correlations.iloc[0]
+    assert row['analysis_level'] == 'cell_level_descriptive'
+    assert pd.notna(row['rho'])
+    assert pd.isna(row['pvalue'])
+
+
 def test_functional_state_uses_checksum_verified_managed_collectri_snapshot(tmp_path, monkeypatch):
     from config import Config
     from modules.functional_state import _sha256

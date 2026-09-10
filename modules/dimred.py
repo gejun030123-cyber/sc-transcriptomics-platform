@@ -1,4 +1,5 @@
 import logging
+import re
 
 from modules.base import BaseAnalysis
 from modules.io_utils import resolve_obs_grouping
@@ -13,6 +14,12 @@ def _embedding_color_keys(batch_key, *fallback_keys):
     return list(dict.fromkeys(
         key for key in [batch_key, *fallback_keys] if key
     ))
+
+
+def _safe_filename_token(value, fallback='column'):
+    """Turn an obs-column label into one path-safe figure filename token."""
+    token = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(value or '')).strip('._')
+    return token[:80] or fallback
 
 
 def _invalidate_pca_results(adata):
@@ -278,6 +285,14 @@ class DimredAnalysis(BaseAnalysis):
                     layer='scaled', use_highly_variable=False,
                 )
 
+        # PCA 已经消费完 scaled 矩阵。把它留在主对象上会写进每个中间
+        # h5ad，形成一份 n_cells × n_genes 的稠密 layer（10 万细胞 ×
+        # 2 万基因 ≈ 8 GB），而下游没有任何模块读取 ``layers['scaled']``。
+        scaled_layer_dropped = False
+        if hvg_mask is None and 'scaled' in adata.layers:
+            del adata.layers['scaled']
+            scaled_layer_dropped = True
+
         pca_result = np.asarray(adata.obsm['X_pca'])
         pca_fingerprint = _pca_fingerprint(pca_result)
         pca_variance_ratio = np.asarray(
@@ -296,6 +311,7 @@ class DimredAnalysis(BaseAnalysis):
                 float(pca_variance_ratio[0]) if len(pca_variance_ratio) else None
             ),
             'fingerprint_first_10_pcs': pca_fingerprint,
+            'scaled_layer_dropped_from_output': bool(scaled_layer_dropped),
         }
         adata.uns['dimred_pca'] = copy.deepcopy(pca_diagnostics)
         logger.info(
@@ -386,7 +402,8 @@ class DimredAnalysis(BaseAnalysis):
                         adata, color_key, title=f'UMAP colored by {color_key}'
                     )
                     result_files.extend(self.save_matplotlib_figure(
-                        fig_static, plots_dir, f'dimred_umap_{color_key}.png',
+                        fig_static, plots_dir,
+                        f'dimred_umap_{_safe_filename_token(color_key)}.png',
                         'umap', f'UMAP by {color_key}'
                     ))
                     import matplotlib.pyplot as plt
@@ -422,7 +439,8 @@ class DimredAnalysis(BaseAnalysis):
                         x_label='t-SNE 1', y_label='t-SNE 2',
                     )
                     result_files.extend(self.save_matplotlib_figure(
-                        fig, plots_dir, f'dimred_tsne_{color_key}.png', 'tsne',
+                        fig, plots_dir,
+                        f'dimred_tsne_{_safe_filename_token(color_key)}.png', 'tsne',
                         f't-SNE by {color_key}',
                     ))
 
@@ -557,6 +575,7 @@ class DimredAnalysis(BaseAnalysis):
                 'tsne_enabled': enable_tsne,
                 'pca_hvg_only': bool(hvg_mask is not None),
                 'pca_n_genes': pca_n_genes,
+                'scaled_layer_dropped_from_output': bool(scaled_layer_dropped),
                 'requested_batch_key': requested_batch_key,
                 'batch_key': batch_key,
                 'batch_mixing': batch_mixing,

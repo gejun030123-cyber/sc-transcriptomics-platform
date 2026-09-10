@@ -77,3 +77,34 @@ def test_write_task_manifest_creates_manifest_file(tmp_path):
     assert manifest["summary"]["cells_after"] == 45
     assert manifest["output_adata"]["exists"] is True
     assert manifest["review_evidence"]["status"] in {"pass", "review", "warning"}
+
+
+def test_manifest_records_module_declared_failure(tmp_path):
+    from models import AnalysisTask
+    from modules.reporting.result_manifest import build_task_manifest
+
+    task = AnalysisTask(
+        id="task-failed", project_id="proj-1", module_name="qc", params_json="{}",
+    )
+    manifest = build_task_manifest(task, {
+        "output_adata": str(tmp_path / "input.h5ad"),
+        "result_files": [],
+        "summary": {"error": "required dependency is unavailable"},
+    })
+
+    assert manifest["status"] == "failed"
+    assert manifest["error"] == "required dependency is unavailable"
+
+
+def test_failed_result_does_not_snapshot_its_input_h5ad(tmp_path):
+    import worker
+
+    input_h5ad = tmp_path / "input.h5ad"
+    input_h5ad.write_bytes(b"input")
+    task = type("Task", (), {"id": "task-failed", "module_name": "qc"})()
+    result = worker._snapshot_task_artifacts(task, str(tmp_path), {
+        "output_adata": str(input_h5ad), "result_files": [], "error": "failed",
+    })
+
+    assert result["output_adata"] is None
+    assert not list((tmp_path / "results" / "task_artifacts").rglob("*.h5ad"))

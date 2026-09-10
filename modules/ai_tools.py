@@ -3,6 +3,7 @@
 import os
 import json
 import math
+import re
 from config import Config
 
 
@@ -41,7 +42,64 @@ def resolve_current_analysis_input(project_id, module_name=''):
     return ctx
 
 
+_ABSOLUTE_PATH_RE = re.compile(r'^/[^\s\'"<>|]+(?:/[^\s\'"<>|]+)+$')
+# 只有这些服务器根目录下的绝对路径才需要脱敏；否则会把平台自身的
+# API 路由（例如 /api/projects/<pid>/pipeline-runs/<id>）误判为文件路径。
+_SERVER_PATH_PREFIXES = (
+    '/home/', '/data/', '/mnt/', '/srv/', '/var/', '/opt/', '/etc/',
+    '/tmp/', '/media/', '/root/', '/Users/',
+)
+
+
+def _redact_path_string(value, project_dirs):
+    """Rewrite one server path so external models never receive an absolute path."""
+    text = str(value)
+    if not text or text.lower().startswith(('http://', 'https://')):
+        return value
+    for root in project_dirs:
+        if text == root or text.startswith(root + os.sep):
+            return os.path.relpath(text, root)
+    if _ABSOLUTE_PATH_RE.match(text) and text.startswith(_SERVER_PATH_PREFIXES):
+        # 项目外路径只保留文件名：调用方（AI 工具）本来也只被允许使用
+        # 项目内文件，暴露服务器目录结构没有任何收益。
+        return os.path.basename(text)
+    return value
+
+
+def _redact_server_paths(value, project_id):
+    """Recursively strip absolute server paths from a model-facing tool result.
+
+    ``result_json`` 与若干工具会返回项目绝对路径（结果包目录、DEG 来源
+    文件、中间 h5ad 等），这些字段用于平台内部溯源；发送给外部模型前必须
+    改为项目相对路径（或仅文件名），符合“不向外部 AI 发送绝对路径”的底线。
+    """
+    try:
+        project_dir = Config.project_dir(project_id)
+    except (OSError, ValueError):
+        return value
+    # DATA_DIR 可能是符号链接，项目内路径既可能以配置路径出现，也可能以
+    # realpath 出现；两种前缀都要能识别，才能保留 intermediate/ 这样的层级。
+    project_dirs = []
+    for candidate in (os.path.abspath(project_dir), os.path.realpath(project_dir)):
+        if candidate and candidate not in project_dirs:
+            project_dirs.append(candidate)
+    if isinstance(value, dict):
+        return {key: _redact_server_paths(item, project_id) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_server_paths(item, project_id) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_server_paths(item, project_id) for item in value)
+    if isinstance(value, str):
+        return _redact_path_string(value, project_dirs)
+    return value
+
+
 def execute_tool(name, args, project_id):
+    """执行指定的工具函数（对外统一脱敏服务器绝对路径）."""
+    return _redact_server_paths(_execute_tool(name, args, project_id), project_id)
+
+
+def _execute_tool(name, args, project_id):
     """执行指定的工具函数"""
     if name == "run_analysis":
         return _run_analysis(args, project_id)
@@ -274,13 +332,13 @@ def _run_analysis(args, project_id):
         return {"error": f"方法与数据不兼容: {compatibility_error}"}
 
     # AI-triggered execution must respect the same hard experimental-design
-    # boundary as the regular form.  Keep this best-effort around malformed
-    # legacy test/placeholder files; module-specific validation remains the
-    # fallback for inputs that cannot be profiled here.
-    if module_name in {
-        'bulk_deg', 'sc_timecourse', 'batch_correct', 'bulk_normalize',
-        'functional_state', 'sc_pseudobulk_deg', 'proportion', 'neighborhood_da',
-    }:
+    # boundary as the regular form (shared PREFLIGHT_MODULES constant so the
+    # two entry points cannot drift apart again).  Keep this best-effort
+    # around malformed legacy test/placeholder files; module-specific
+    # validation remains the fallback for inputs that cannot be profiled here.
+    from modules.design_preflight import PREFLIGHT_MODULES
+
+    if module_name in PREFLIGHT_MODULES:
         try:
             from modules.design_preflight import preflight_blockers
             from modules.io_utils import read_expression_matrix
@@ -1500,6 +1558,10 @@ def _validate_project_path(path, project_id):
         return "项目不存在"
     if not path:
         return "缺少路径参数"
+    # AI 工具现在收到的是项目相对路径（绝对路径在返回前已脱敏），
+    # 因此这里需要先把相对路径解析到项目目录下。
+    if not os.path.isabs(path):
+        path = os.path.join(project_dir, path)
     if os.path.islink(path):
         return "不支持符号链接文件"
     try:

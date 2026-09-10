@@ -89,6 +89,46 @@ class SCCellLevelDEG(BaseAnalysis):
     MODULE_NAME = "sc_cell_deg"
     DISPLAY_NAME = "探索性细胞级比较"
     DESCRIPTION = "细胞级探索性比较；不将细胞当作生物学重复"
+    # 比较单元必须来自真实分组列；不含聚类/注释的上游输出（例如仅 qc）
+    # 不应出现在输入下拉里，否则只会在运行期才失败。
+    INPUT_REQUIRES = ['leiden']
+
+    def validate_input(self, adata):
+        """提前检查分组列与 counts 层，避免在运行中途才失败。
+
+        与 ``INPUT_REQUIRES`` 声明保持一致：平台标准聚类列是 ``leiden``；
+        已注释数据也可以按 ``celltype`` 分组，但两者都不存在时无法定义
+        比较单元，必须在这里给出可操作错误。
+        """
+        from modules.sc_de_utils import _matrix_is_raw_counts
+
+        annotation_key = str(
+            self.params.get("celltype_key", "celltype") or "celltype"
+        )
+        requested_cluster_key = str(
+            self.params.get("cluster_key", "leiden") or "leiden"
+        )
+        if "leiden" not in adata.obs.columns and not any(
+            key in adata.obs.columns
+            for key in {requested_cluster_key, annotation_key}
+        ):
+            return (
+                "缺少可用于分组比较的聚类/注释列：需要 'leiden' 或 "
+                f"'{requested_cluster_key}' / '{annotation_key}'。"
+                "请先运行 clustering/annotation 模块生成分组列。"
+            )
+
+        if "counts" not in adata.layers:
+            normalization = adata.uns.get("normalization", {}) or {}
+            if normalization.get("x_contains") == "pearson_residuals":
+                return (
+                    "当前 X 是 Pearson residuals 且缺少 layers['counts']，"
+                    "无法计算有可解释 log2FC 的细胞级 DEG。"
+                )
+            return "细胞级 DEG 需要 layers['counts'] 中的原始 UMI counts。"
+        if not _matrix_is_raw_counts(adata.layers["counts"]):
+            return "layers['counts'] 不是非负整数原始计数。"
+        return None
 
     def _comparison_contract(self, adata):
         """Build comparison units without conflating their statistical meaning."""

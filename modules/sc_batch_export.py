@@ -639,6 +639,8 @@ class SCPseudobulkDEG(BaseAnalysis):
     MODULE_NAME = "sc_pseudobulk_deg"
     DISPLAY_NAME = "样本级 pseudobulk 差异表达"
     DESCRIPTION = "以生物学样本为统计单位的条件 DEG；可导出每个比较的完整基因 CSV"
+    # pseudobulk 以 celltype/cluster × sample 为单元，输入必须已经带分组列。
+    INPUT_REQUIRES = ['leiden']
 
     def run(self, input_path):
         adata = self.load_adata(input_path)

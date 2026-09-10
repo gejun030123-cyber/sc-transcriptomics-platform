@@ -229,6 +229,14 @@ class BaseAnalysis(ABC):
         formats = [fmt.lower() for fmt in formats
                    if fmt.lower() in ('png', 'svg', 'pdf', 'tiff')]
         if not formats:
+            # 用户可以在界面取消全部静态图格式。此时没有任何文件需要写出，
+            # 但画布已经创建；不关闭就会在长任务里持续累积（matplotlib 的
+            # pyplot 注册表持有强引用）。
+            try:
+                import matplotlib.pyplot as plt
+                plt.close(fig)
+            except Exception:
+                pass
             return []
 
         # Figures created by the deterministic engine already carry an exact
@@ -477,11 +485,19 @@ class BaseAnalysis(ABC):
         return None
 
     def load_adata(self, input_path):
-        """加载 h5ad 并 remap 基因名。"""
+        """加载 h5ad 并 remap 基因名。
+
+        重映射可能产生重复基因名（例如数据中已存在 ``G_1``，新后缀又生成了
+        同名条目），而 ``Index.get_indexer``/``get_loc`` 要求索引唯一；在
+        入口统一保证 var_names 唯一，避免分析跑到末尾才抛 InvalidIndexError。
+        """
         import scanpy as sc
         from modules.io_utils import remap_var_names
         adata = sc.read_h5ad(input_path)
-        return remap_var_names(adata)
+        adata = remap_var_names(adata)
+        if not adata.var_names.is_unique:
+            adata.var_names_make_unique()
+        return adata
 
     def save_output(self, adata, module_name):
         """保存中间结果到 intermediate/，返回 output_path。"""

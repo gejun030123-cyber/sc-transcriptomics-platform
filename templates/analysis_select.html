@@ -246,7 +246,7 @@
                         {% endfor %}
                     </select>
                     {% if base_grn_files %}
-                    <small class="text-primary d-block mt-1">检测到 {{ base_grn_files|length }} 个可用的 base GRN 文件（.parquet/.csv/.pickle/.pkl 等）。</small>
+                    <small class="text-primary d-block mt-1">检测到 {{ base_grn_files|length }} 个可用的 base GRN 表格（.parquet/.csv/.tsv 等）。</small>
                     {% else %}
                     <small class="text-danger d-block mt-1">uploads 中未找到 base GRN 文件。可先在上传页上传，或将“base GRN 来源”切换为内置人类 promoter base GRN。</small>
                     {% endif %}

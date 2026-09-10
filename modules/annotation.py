@@ -725,6 +725,34 @@ def parse_annotation_manual_map_csv(path_or_text):
         mapping[cluster] = label
     return mapping
 
+
+def resolve_annotation_manual_map_path(project_dir, path):
+    """Resolve a review CSV only when it is a real file inside the project.
+
+    The CSV is later displayed in result tables and can be included in AI
+    summaries, so accepting an arbitrary readable server path would create an
+    avoidable read-and-exfiltration channel.
+    """
+    requested = str(path or '').strip()
+    if not requested:
+        return ''
+    project_root = os.path.realpath(project_dir)
+    candidate = requested if os.path.isabs(requested) else os.path.join(project_root, requested)
+    if os.path.islink(candidate):
+        raise ValueError('manual_map_csv 不能是符号链接。')
+    resolved = os.path.realpath(candidate)
+    try:
+        contained = os.path.commonpath([project_root, resolved]) == project_root
+    except ValueError:
+        contained = False
+    if not contained:
+        raise ValueError('manual_map_csv 必须位于当前项目目录内。')
+    if not os.path.isfile(resolved):
+        raise ValueError('manual_map_csv 文件不存在: ' + resolved)
+    if not resolved.lower().endswith('.csv'):
+        raise ValueError('manual_map_csv 必须是 .csv 文件。')
+    return resolved
+
 # Tissue-specific organoid panels.  These are intentionally compact, lineage-
 # oriented first-pass signatures rather than a reference atlas.  Organoids
 # vary across biological conditions, so the result stays
@@ -3039,6 +3067,10 @@ def build_annotation_cluster_review(
             or (np.isfinite(row['mean_confidence']) and row['mean_confidence'] < 0.2)
             or (np.isfinite(row['mean_score_margin']) and row['mean_score_margin'] < 0.05)
             or annotation_status.lower().startswith('review_')
+            # 候选 marker 一个都没检出、仅靠逐细胞投票一致性恢复的簇必须
+            # 进入人工复核：它没有任何正向 marker 证据，不能与有真实
+            # marker 支持的 provisional 调用混为一谈。
+            or row.get('final_decision_reason') == 'unknown_recovered_by_cell_vote'
         )
         if 'celltypist_conflict_fraction' in row:
             row['needs_review'] = bool(
@@ -3924,7 +3956,10 @@ class AnnotationAnalysis(BaseAnalysis):
         # 覆盖 evidence tier 为 confirmed，并保留原始 decision_reason 供审计。
         manual_map_csv_path = str(self.params.get('manual_map_csv', '') or '').strip()
         manual_map_applied = {}
-        if manual_map_csv_path and os.path.isfile(manual_map_csv_path):
+        if manual_map_csv_path:
+            manual_map_csv_path = resolve_annotation_manual_map_path(
+                self.project_dir, manual_map_csv_path,
+            )
             manual_map_applied = parse_annotation_manual_map_csv(manual_map_csv_path)
             available_clusters = set(adata.obs[leiden_key].astype(str).unique())
             unknown_clusters = sorted(set(manual_map_applied) - available_clusters)
@@ -4302,7 +4337,9 @@ class AnnotationAnalysis(BaseAnalysis):
                     'Cluster-specific Marker Dotplot'
                 ))
                 import matplotlib.pyplot as plt
-                plt.close('all')
+                # 只关闭本函数创建的画布：worker 是 2 线程进程池，
+                # close('all') 会关掉并发任务尚未保存的 figure。
+                plt.close(fig_dotplot)
             except Exception as e:
                 self.progress(-1, f"Annotation dotplot generation failed: {e}")
 

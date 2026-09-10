@@ -11,6 +11,7 @@ from modules.schemas import (
     MODULE_DISPLAY_MAP, SC_MODULE_NAMES, BULK_MODULE_NAMES,
     STATUS_MAP, PARAM_SCHEMAS, parse_form_params, list_upload_files,
 )
+from modules.design_preflight import PREFLIGHT_MODULES
 
 analysis_bp = Blueprint('analysis', __name__)
 
@@ -174,7 +175,6 @@ def _path_has_module_requirements(path, requirements):
 
 BASE_GRN_EXTENSIONS = (
     '.parquet', '.pq', '.csv', '.tsv', '.txt', '.gz',
-    '.pickle', '.pkl', '.gpickle', '.oracle', '.celloracle',
 )
 
 
@@ -499,7 +499,7 @@ def analyze(pid, module_name):
         # shown by the preflight card.  Only prerequisites that would make the
         # module fail or invalidate its declared statistical method are
         # blocked here; descriptive/exploratory warnings remain runnable.
-        if module_name in {'bulk_deg', 'sc_timecourse', 'batch_correct', 'bulk_normalize'}:
+        if module_name in PREFLIGHT_MODULES:
             try:
                 from modules.design_preflight import preflight_blockers
                 from modules.io_utils import read_expression_matrix

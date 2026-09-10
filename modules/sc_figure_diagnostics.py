@@ -751,12 +751,23 @@ def composition_by_group(obs, group_key, label_key, *, max_labels=30):
         'group': obs[group_key].astype(str),
         'label': obs[label_key].astype(str),
     })
-    counts = pd.crosstab(work['group'], work['label'])
-    if counts.empty:
-        return counts, counts
-    top_labels = counts.sum(axis=0).sort_values(ascending=False).head(int(max_labels)).index
-    counts = counts.loc[:, list(top_labels)]
-    fractions = counts.div(counts.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+    all_counts = pd.crosstab(work['group'], work['label'])
+    if all_counts.empty:
+        return all_counts, all_counts
+    max_labels = max(2, int(max_labels))
+    label_totals = all_counts.sum(axis=0).sort_values(ascending=False)
+    if len(label_totals) > max_labels:
+        kept_labels = list(label_totals.head(max_labels - 1).index)
+        other_label = 'Other'
+        if other_label in kept_labels:
+            other_label = 'Other (remaining labels)'
+        counts = all_counts.loc[:, kept_labels].copy()
+        # Keep all cells in the denominator and make the omitted labels
+        # visible instead of silently re-normalising the displayed Top-N.
+        counts[other_label] = all_counts.drop(columns=kept_labels).sum(axis=1)
+    else:
+        counts = all_counts.loc[:, list(label_totals.index)].copy()
+    fractions = counts.div(all_counts.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
     return counts, fractions
 
 
