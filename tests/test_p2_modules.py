@@ -53,7 +53,7 @@ class TestAnnotationMarkers:
         """MARKER_SETS 包含内置注释基因集。"""
         from modules.annotation import MARKER_SETS
         assert set(MARKER_SETS.keys()) == {
-            'Universal', 'Colorectal', 'TME', 'Immune', 'Blood', 'PBMC',
+            'Universal', 'Colorectal', 'Colorectal_refined', 'TME', 'Immune', 'Blood', 'PBMC',
         }
 
     def test_organoid_marker_sets_cover_common_tissues(self):
@@ -436,7 +436,7 @@ class TestBatchCorrectValidateInput:
             'X_pca_harmony': np.random.rand(10, 5),
         })
         assert mod.validate_input(adata) is None
-        assert mod._resolve_representation(adata, True) == 'X_pca_harmony'
+        assert mod._resolve_representation(adata, True) == ('X_pca_harmony', False)
 
 
 class TestClusteringValidateInput:

@@ -1,65 +1,93 @@
 import os
+import re
 import json
 import numpy as np
 import pandas as pd
 from modules.base import BaseAnalysis
 
 
-def _resolve_pca_color_groups(adata, requested_color_by='', auto_group_mapping=None):
-    """Resolve PCA colouring without silently collapsing distinct sample groups."""
-    from modules.io_utils import infer_sample_group_candidates
+_AUTO_FACTOR_LABEL = re.compile(r'^第\s*(\d+)\s*因素(?:\s*[:：].*)?$', re.IGNORECASE)
 
-    requested = str(requested_color_by or '').strip()
-    sample_names = [str(name) for name in adata.obs.index]
+
+def _auto_column_from_requested(requested):
+    """Translate supported UI aliases to real, materialized ``obs`` columns."""
+    normalized = str(requested or '').strip()
+    if normalized in {'_auto_group_', '_auto_group', 'auto_group'}:
+        return '_auto_group'
+    factor_match = _AUTO_FACTOR_LABEL.match(normalized)
+    if factor_match:
+        return f"_auto_factor{factor_match.group(1)}"
+    compact = normalized.replace('_', '').replace(' ', '').lower()
+    factor_match = re.fullmatch(r'autofactor(\d+)', compact)
+    if factor_match:
+        return f"_auto_factor{factor_match.group(1)}"
+    return normalized
+
+
+def _resolve_pca_groups(adata, requested='', auto_group_mapping=None, *, role='color'):
+    """Resolve color/marker values to real obs columns with an audit record."""
+    from modules.io_utils import materialize_auto_sample_metadata
+
+    requested = str(requested or '').strip()
+    metadata = materialize_auto_sample_metadata(adata, auto_group_mapping)
+    used = _auto_column_from_requested(requested)
     warning = ''
 
-    if requested and requested not in {'_auto_group_', '_auto_group', 'auto_group'}:
-        if requested in adata.obs.columns:
-            values = adata.obs[requested].astype(str).tolist()
-            if len(set(values)) >= 2:
-                return values, {
-                    'requested': requested, 'used': requested, 'source': 'obs',
-                    'group_counts': {str(k): int(v) for k, v in pd.Series(values).value_counts().items()},
-                    'warning': '',
-                }
-            warning = f"obs 列 '{requested}' 只有一个分组，已尝试从样本名恢复分组。"
-        else:
-            warning = f"未找到 obs 列 '{requested}'，已尝试从样本名恢复分组。"
-
-    mapping = auto_group_mapping or {}
-    if isinstance(mapping, str):
-        try:
-            mapping = json.loads(mapping)
-        except (TypeError, ValueError):
-            mapping = {}
-    if isinstance(mapping, dict) and mapping:
-        mapped_values = [str(mapping.get(name, '')) for name in sample_names]
-        if all(mapped_values) and len(set(mapped_values)) >= 2:
-            adata.obs['_auto_group'] = mapped_values
-            return mapped_values, {
-                'requested': requested or '_auto_group_', 'used': '_auto_group',
-                'source': 'sample_name_mapping',
-                'group_counts': {str(k): int(v) for k, v in pd.Series(mapped_values).value_counts().items()},
-                'warning': warning,
-            }
-
-    candidates = infer_sample_group_candidates(sample_names)
-    if candidates:
-        mapped_values = [str(candidates[0]['mapping'][name]) for name in sample_names]
-        adata.obs['_auto_group'] = mapped_values
-        return mapped_values, {
-            'requested': requested or '_auto_group_', 'used': '_auto_group',
-            'source': 'sample_name_inference',
-            'group_counts': {str(k): int(v) for k, v in pd.Series(mapped_values).value_counts().items()},
-            'warning': warning,
+    if not requested:
+        return None, {
+            'requested': '', 'used': '', 'source': 'none', 'group_counts': {},
+            'warning': '', 'display_label': '',
         }
 
-    if not warning and requested in {'_auto_group_', '_auto_group', 'auto_group'}:
-        warning = '样本名中未识别到可重复的分组模式，PCA 将以统一颜色显示。'
+    if used in adata.obs.columns:
+        values = adata.obs[used].astype(str).tolist()
+        if len(set(values)) >= 2:
+            if used == '_auto_group':
+                source = metadata.get('group_source') or 'sample_name_inference'
+            elif used.startswith('_auto_factor'):
+                source = 'sample_name_factor_inference'
+            else:
+                source = 'obs'
+            return values, {
+                'requested': requested, 'used': used, 'source': source,
+                'group_counts': {str(k): int(v) for k, v in pd.Series(values).value_counts().items()},
+                'warning': '', 'display_label': used,
+            }
+        warning = f"obs 列 '{used}' 只有一个分组，未用于 PCA {role}。"
+    else:
+        warning = f"未找到 obs 列 '{used}'，未用于 PCA {role}。"
+
+    # A colour request may recover to the inferred combined group.  Marker
+    # requests deliberately do not fall back: a wrong shape encoding is less
+    # visible than a missing one and therefore harder to audit.
+    if role == 'color' and used != '_auto_group' and '_auto_group' in adata.obs.columns:
+        values = adata.obs['_auto_group'].astype(str).tolist()
+        if len(set(values)) >= 2:
+            return values, {
+                'requested': requested, 'used': '_auto_group',
+                'source': metadata.get('group_source') or 'sample_name_inference',
+                'group_counts': {str(k): int(v) for k, v in pd.Series(values).value_counts().items()},
+                'warning': warning, 'display_label': '_auto_group',
+            }
+
+    if role == 'color':
+        if not warning:
+            warning = '样本名中未识别到可重复的分组模式，PCA 将以统一颜色显示。'
+        return None, {
+            'requested': requested or '_auto_group_', 'used': '', 'source': 'none',
+            'group_counts': {}, 'warning': warning, 'display_label': '',
+        }
     return None, {
-        'requested': requested or '_auto_group_', 'used': '', 'source': 'none',
-        'group_counts': {}, 'warning': warning,
+        'requested': requested, 'used': '', 'source': 'none',
+        'group_counts': {}, 'warning': warning, 'display_label': '',
     }
+
+
+def _resolve_pca_color_groups(adata, requested_color_by='', auto_group_mapping=None):
+    """Backward-compatible color resolver used by existing callers/tests."""
+    return _resolve_pca_groups(
+        adata, requested_color_by, auto_group_mapping, role='color',
+    )
 
 
 def _pca_label_positions(coords):
@@ -190,9 +218,15 @@ class BulkPCAAnalysis(BaseAnalysis):
         from modules.figure_style import NATURE_PALETTE
 
         self.progress(5, "加载数据...")
-        from modules.io_utils import read_expression_matrix
+        from modules.io_utils import (
+            read_expression_matrix, resolve_expression_measurement, run_bulk_sample_pca,
+        )
         adata = read_expression_matrix(input_path)
-        from modules.io_utils import infer_expression_measurement
+        input_measurement, measurement_info = resolve_expression_measurement(
+            adata, input_path, self.params.get('input_measurement', 'auto'),
+        )
+        adata.uns['input_measurement'] = input_measurement
+        adata.uns['input_measurement_provenance'] = measurement_info
 
         # 清理 inf/NaN
         import numpy as _np
@@ -200,35 +234,55 @@ class BulkPCAAnalysis(BaseAnalysis):
 
         n_comps = int(self.params.get('n_comps', 10))
         color_by = self.params.get('color_by', '')
+        batch_by = self.params.get('batch_by', '')
         dimred_method = self.params.get('dimred_method', 'pca')
 
         self.progress(20, "标准化数据...")
         if 'normalization' not in adata.uns:
-            input_measurement = infer_expression_measurement(adata, input_path)
             if input_measurement == 'raw_counts':
                 sc.pp.normalize_total(adata, target_sum=1e6)
                 sc.pp.log1p(adata)
                 adata.uns['normalization'] = {'method': 'pca_auto_cpm_log1p', 'is_log_transformed': True}
-            else:
+            elif input_measurement == 'continuous_expression':
+                if measurement_info['requires_confirmation_for_log_transform']:
+                    raise ValueError(
+                        '自动检测到非整数连续值，但无法仅靠数值区分线性 FPKM/TPM 与已 log 的表达矩阵。'
+                        '请在“输入表达量尺度”中明确选择 continuous_expression 或 log_transformed 后重试。'
+                    )
                 adata.X = np.log2(np.maximum(adata.X, 0) + 1)
                 adata.uns['normalization'] = {'method': 'pca_auto_log2', 'is_log_transformed': True}
-        sc.pp.scale(adata, max_value=10)
+            else:
+                # Explicitly recognised log-expression: preserve it.  This
+                # avoids direct PCA silently applying log2 a second time.
+                adata.uns['normalization'] = {'method': 'pca_preserve_log_input', 'is_log_transformed': True}
 
         self.progress(40, "运行 PCA...")
         actual_comps = min(n_comps, adata.n_obs - 1, adata.n_vars - 1)
         if actual_comps < 2:
             raise ValueError(f"样本数不足 ({adata.n_obs})，至少需要 3 个样本才能进行 PCA 分析。")
-        sc.pp.pca(adata, n_comps=actual_comps)
+        pca_preprocessing = run_bulk_sample_pca(adata, n_comps=actual_comps)
         pca_variance = adata.uns['pca']['variance_ratio']
 
         plots_dir = os.path.join(self.project_dir, 'plots')
         os.makedirs(plots_dir, exist_ok=True)
+        results_dir = os.path.join(self.project_dir, 'results')
+        os.makedirs(results_dir, exist_ok=True)
         result_files = []
 
-        color_values, color_info = _resolve_pca_color_groups(
-            adata, color_by, self.params.get('_auto_group_mapping', {}))
+        color_values, color_info = _resolve_pca_groups(
+            adata, color_by, self.params.get('_auto_group_mapping', {}), role='color')
+        batch_values, batch_info = _resolve_pca_groups(
+            adata, batch_by, self.params.get('_auto_group_mapping', {}), role='marker')
         if color_info['warning']:
             self.progress(-1, color_info['warning'])
+        if batch_info['warning']:
+            self.progress(-1, batch_info['warning'])
+
+        # A missing grouping is a valid exploratory PCA state.  The renderer
+        # still receives a vector of real values so later legend and CSV logic
+        # cannot fail on ``None``.
+        if color_values is None:
+            color_values = ['All'] * adata.n_obs
 
         # Sample names are useful only in small static panels.  Larger PCA
         # panels use the external legend so labels cannot cover nearby points.
@@ -237,6 +291,36 @@ class BulkPCAAnalysis(BaseAnalysis):
         self.progress(55, "生成 PCA 图...")
         pc = adata.obsm['X_pca']
         hover = adata.obs.index.tolist()
+        from modules.bulk_qc import _detect_outliers_mahal
+        outlier_samples, outlier_details = _detect_outliers_mahal(
+            pc, hover, return_details=True,
+        )
+
+        # The publication figure is static by design.  Exporting a complete
+        # sample-level score table keeps every point identifiable, including
+        # PC3+ outliers that may not be visible in the PC1/PC2 panel.
+        score_columns = [f'PC{i + 1}' for i in range(actual_comps)]
+        pca_scores = pd.DataFrame(pc[:, :actual_comps], columns=score_columns)
+        pca_scores.insert(0, 'sample_id', [str(item) for item in hover])
+        pca_scores['color_group'] = [str(item) for item in color_values]
+        pca_scores['marker_group'] = (
+            [str(item) for item in batch_values]
+            if batch_values is not None else ''
+        )
+        for number in (1, 2):
+            column = f'_auto_factor{number}'
+            pca_scores[f'factor{number}'] = (
+                adata.obs[column].astype(str).tolist() if column in adata.obs.columns else ''
+            )
+        pca_scores['pca_outlier_distance'] = outlier_details['distances']
+        pca_scores['pca_outlier_threshold'] = outlier_details['threshold']
+        pca_scores['is_pca_outlier'] = pca_scores['sample_id'].isin(outlier_samples)
+        pca_scores_path = os.path.join(results_dir, 'bulk_pca_scores.csv')
+        pca_scores.to_csv(pca_scores_path, index=False)
+        result_files.append({
+            'file_path': pca_scores_path, 'file_type': 'csv', 'category': 'table',
+            'label': 'PCA sample scores and metadata',
+        })
         color_descriptor = (
             'sample-name group' if color_info['source'].startswith('sample_name')
             else (color_info['used'] or 'single colour')
@@ -261,8 +345,6 @@ class BulkPCAAnalysis(BaseAnalysis):
 
         director = NatureFigureDirector()
         nature_formats = ('svg', 'pdf', 'png')
-        results_dir = os.path.join(self.project_dir, 'results')
-        os.makedirs(results_dir, exist_ok=True)
         unique_color_values = list(dict.fromkeys(str(value) for value in color_values))
         dense_grouping = len(unique_color_values) > 8
         dense_group_colors = ({group: '#4C78A8' for group in unique_color_values}
@@ -283,14 +365,18 @@ class BulkPCAAnalysis(BaseAnalysis):
             'pca', self.params,
             title=f'PCA analysis (n={adata.n_obs})',
             show_legend=not dense_grouping,
-        )
-        batch_by = str(self.params.get('batch_by', '') or '').strip()
-        batch_values = (
-            adata.obs[batch_by].astype(str).tolist()
-            if batch_by and batch_by in adata.obs.columns else None
+        ).with_updates(
+            # Small static panels can carry every sample ID; for larger panels
+            # label only diagnosed outliers and use the score CSV for lookup.
+            show_sample_labels=bool(self.params.get('show_sample_labels', False)) or adata.n_obs <= 12,
+            outlier_labels=tuple(outlier_samples),
         )
         if dense_grouping and batch_values is None:
             batch_values = color_values
+            batch_info = {
+                **batch_info, 'used': color_info['used'], 'source': color_info['source'],
+                'display_label': color_info['display_label'] or 'color_group',
+            }
         fig_pca = director.render(pca_spec, {
             'coordinates': pc[:, :2],
             'groups': color_values,
@@ -298,9 +384,9 @@ class BulkPCAAnalysis(BaseAnalysis):
             'group_colors': dense_group_colors,
             'samples': hover,
             'explained_variance': pca_variance[:2],
+            'group_label': color_info['display_label'] or 'Color group',
+            'batch_label': batch_info['display_label'] or 'Marker group',
         })
-        results_dir = os.path.join(self.project_dir, 'results')
-        os.makedirs(results_dir, exist_ok=True)
         exported, readiness = export_registered_figure(
             fig_pca, os.path.join(plots_dir, 'bulk_pca'), pca_spec,
             category='pca', label='PCA 分析',
@@ -318,12 +404,18 @@ class BulkPCAAnalysis(BaseAnalysis):
                 alt_spec = director.spec_from_params(
                     'pca', self.params, title=f'PCA: PC{first + 1} vs PC{second + 1}',
                     show_legend=not dense_grouping,
-                ).with_updates(formats=nature_formats, height_mm=82.0)
+                ).with_updates(
+                    formats=nature_formats, height_mm=82.0,
+                    show_sample_labels=bool(self.params.get('show_sample_labels', False)) or adata.n_obs <= 12,
+                    outlier_labels=tuple(outlier_samples),
+                )
                 fig_alt = director.render(alt_spec, {
                     'coordinates': pc[:, [first, second]], 'groups': color_values,
                     'batches': batch_values, 'group_colors': dense_group_colors,
                     'samples': hover, 'explained_variance': pca_variance[[first, second]],
                     'x_label': f'PC{first + 1}', 'y_label': f'PC{second + 1}',
+                    'group_label': color_info['display_label'] or 'Color group',
+                    'batch_label': batch_info['display_label'] or 'Marker group',
                 })
                 result_files.extend(_export_pca(
                     fig_alt, stem, f'PCA：PC{first + 1} vs PC{second + 1}', alt_spec,
@@ -403,6 +495,8 @@ class BulkPCAAnalysis(BaseAnalysis):
                 'coordinates': tsne_coords, 'groups': color_values, 'batches': batch_values,
                 'group_colors': dense_group_colors, 'samples': hover,
                 'explained_variance': [np.nan, np.nan], 'x_label': 't-SNE1', 'y_label': 't-SNE2',
+                'group_label': color_info['display_label'] or 'Color group',
+                'batch_label': batch_info['display_label'] or 'Marker group',
             })
             result_files.extend(_export_pca(fig_tsne, 'bulk_tsne', 't-SNE 分析', tsne_spec, category='tsne'))
 
@@ -419,6 +513,8 @@ class BulkPCAAnalysis(BaseAnalysis):
                 'coordinates': umap_coords, 'groups': color_values, 'batches': batch_values,
                 'group_colors': dense_group_colors, 'samples': hover,
                 'explained_variance': [np.nan, np.nan], 'x_label': 'UMAP1', 'y_label': 'UMAP2',
+                'group_label': color_info['display_label'] or 'Color group',
+                'batch_label': batch_info['display_label'] or 'Marker group',
             })
             result_files.extend(_export_pca(fig_umap, 'bulk_umap', 'UMAP 分析', umap_spec, category='umap'))
 
@@ -439,11 +535,26 @@ class BulkPCAAnalysis(BaseAnalysis):
                 'pc1_variance_pct': round(float(pca_variance[0] * 100), 2),
                 'pc2_variance_pct': round(float(pca_variance[1] * 100), 2),
                 'pc1_pc2_variance_pct': round(float((pca_variance[0] + pca_variance[1]) * 100), 2),
+                'input_measurement': input_measurement,
+                'input_measurement_source': measurement_info['source'],
+                'input_measurement_confidence': measurement_info['confidence'],
+                'pca_preprocessing': pca_preprocessing,
                 'color_by_requested': color_info['requested'],
                 'color_by_used': color_info['used'],
+                'color_by_source': color_info['source'],
+                'color_by_warning': color_info['warning'],
+                'batch_by_requested': batch_info['requested'],
+                'batch_by_used': batch_info['used'],
+                'batch_by_source': batch_info['source'],
+                'batch_by_warning': batch_info['warning'],
+                # Kept for downstream consumers of existing task summaries.
                 'grouping_source': color_info['source'],
                 'group_counts': color_info['group_counts'],
                 'grouping_warning': color_info['warning'],
+                'marker_group_counts': batch_info['group_counts'],
+                'outlier_samples': outlier_samples,
+                'outlier_pcs_used': outlier_details['n_components'],
+                'outlier_threshold': outlier_details['threshold'],
                 'dimred_method': dimred_method,
             }
         }

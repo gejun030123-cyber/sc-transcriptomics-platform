@@ -7,6 +7,8 @@ import pytest
 
 from config import Config
 from modules.workflows.nextflow import NextflowExecutor, WorkflowNotConfiguredError
+from modules.workflows.guided import guided_defaults, normalize_guided_options
+from modules.workflows.stages import first_stage, next_stage
 from modules.workflows.preflight import load_manifest_file, validate_manifest
 from modules.workflows.registry import list_workflows
 from modules.workflows.references import (
@@ -14,13 +16,14 @@ from modules.workflows.references import (
     launch_reference_readiness,
     list_capture_kit_profiles,
     list_reference_assets,
+    reference_bundle_sarek_parameters,
     register_capture_kit_profile,
     register_reference_asset,
 )
 from modules.workflows.storage import get_manifest, list_manifests, register_manifest
 from modules.workflows.assets import list_data_assets, register_data_asset
 from modules.workflows.artifacts import collect_workflow_artifacts, list_workflow_artifacts
-from modules.workflows.content import inspect_sample_files
+from modules.workflows.content import inspect_fastq, inspect_sample_files
 from modules.workflows.sarek import render_samplesheet, write_launch_bundle
 from modules.workflows.validation import (
     evaluate_metrics,
@@ -236,6 +239,71 @@ def test_preflight_api_registers_manifest_without_launching(test_project):
     assert cancel_response.get_json()["run"]["status"] == "cancelled"
 
 
+def test_preflight_api_prepares_the_first_independent_wes_stage(test_project):
+    from app import create_app
+
+    client = create_app().test_client()
+    manifest = _somatic_manifest(Config.project_dir(test_project))
+    preflight = client.post(
+        f"/api/projects/{test_project}/wes/preflight",
+        json={"workflow_key": "wes_somatic", "manifest": manifest},
+    )
+    assert preflight.status_code == 201
+    manifest_id = preflight.get_json()["manifest_id"]
+
+    prepared = client.post(
+        f"/api/projects/{test_project}/wes/stages/prepare",
+        json={"workflow_key": "wes_somatic", "manifest_id": manifest_id},
+    )
+    assert prepared.status_code == 201
+    body = prepared.get_json()
+    assert body["stage"]["key"] == "preprocess_mapping"
+    assert body["run"]["status"] == "prepared"
+    assert body["launch"]["parameters"]["step"] == "mapping"
+    assert "tools" not in body["launch"]["parameters"]
+
+
+def test_next_wes_stage_accepts_only_its_own_reviewed_parameters(test_project, tmp_path):
+    from app import create_app
+    from modules.workflows.runs import create_workflow_run
+
+    manifest = register_manifest(test_project, {
+        "reference_bundle_id": "bundle", "capture_bed_id": "kit",
+        "capture_bed_path": str(tmp_path / "capture.bed"),
+        "pipeline_options": {"filter_vcfs": True, "normalize_vcfs": True},
+        "samples": [{"sample_id": "S1", "patient_id": "P1", "role": "germline",
+                     "input_type": "fastq", "fastq_1": "r1", "fastq_2": "r2"}],
+    })
+    (tmp_path / "capture.bed").write_text("chr1\t0\t10\n", encoding="utf-8")
+    run_root = tmp_path / "completed-mapping"
+    handoff_dir = run_root / "results" / "preprocessing" / "csv"
+    handoff_dir.mkdir(parents=True)
+    cram = run_root / "results" / "preprocessing" / "S1.recal.cram"
+    crai = run_root / "results" / "preprocessing" / "S1.recal.cram.crai"
+    cram.write_bytes(b"cram")
+    crai.write_bytes(b"crai")
+    (handoff_dir / "recalibrated.csv").write_text(
+        f"patient,sample,sex,status,cram,crai\nP1,S1,NA,0,{cram},{crai}\n", encoding="utf-8"
+    )
+    parent = create_workflow_run(
+        test_project, "wes_germline", manifest["id"], status="completed",
+        run_dir=str(run_root), launch={
+            "stage_key": "preprocess_mapping", "analysis_workflow_key": "wes_germline",
+            "pipeline_options": {"filter_vcfs": True, "normalize_vcfs": True},
+        },
+    )
+
+    response = create_app().test_client().post(
+        f"/api/projects/{test_project}/wes/runs/{parent['id']}/next-stage/prepare",
+        json={"pipeline_options": {"filter_vcfs": False, "normalize_vcfs": True}},
+    )
+    assert response.status_code == 201
+    launch = response.get_json()["launch"]
+    assert launch["stage_key"] == "variant_calling"
+    assert launch["pipeline_options"]["filter_vcfs"] is False
+    assert launch["parameters"]["tools"] == "haplotypecaller"
+
+
 def test_user_capture_bed_upload_is_catalogued_as_test_only(test_project):
     from app import create_app
 
@@ -405,6 +473,140 @@ def test_nextflow_executor_only_prepares_and_refuses_launch():
         NextflowExecutor().launch(spec)
 
 
+def test_guided_options_are_whitelisted_and_preserved_in_launchspec():
+    from modules.workflows.registry import get_workflow
+
+    options = normalize_guided_options({
+        "trim_fastq": True,
+        "length_required": 30,
+        "clip_r1": 5,
+        "aligner": "bwa-mem2",
+        "save_mapped": True,
+        "save_output_as_bam": True,
+        "joint_germline": True,
+    }, "wes_germline")
+    spec = NextflowExecutor().prepare(
+        get_workflow("wes_germline"), "p1", "run-options", "manifest1",
+        "/tmp/work", "/tmp/results", intervals_path="/tmp/capture.bed",
+        pipeline_options=options,
+    )
+
+    assert spec.pipeline_options == options
+    assert spec.parameters["aligner"] == "bwa-mem2"
+    assert spec.parameters["length_required"] == 30
+    assert spec.parameters["joint_germline"] is True
+    assert spec.parameters["save_output_as_bam"] is True
+
+
+def test_guided_options_reject_unsafe_or_incompatible_values():
+    with pytest.raises(ValueError, match="不支持"):
+        normalize_guided_options({"tools": "mutect2"}, "wes_germline")
+    with pytest.raises(ValueError, match="关闭 fastp"):
+        normalize_guided_options({"trim_fastq": False, "clip_r1": 1}, "wes_germline")
+    with pytest.raises(ValueError, match="save_mapped"):
+        normalize_guided_options({"save_output_as_bam": True}, "wes_germline")
+    with pytest.raises(ValueError, match="不支持"):
+        normalize_guided_options({"only_paired_variant_calling": False}, "wes_somatic")
+    assert guided_defaults("wes_somatic")["only_paired_variant_calling"] is True
+
+
+def test_wes_stage_contracts_use_real_sarek_handoff_boundaries():
+    from modules.workflows.registry import get_workflow
+
+    mapping = first_stage("wes_germline")
+    calling = next_stage(mapping["key"], "wes_germline")
+    annotation = next_stage(calling["key"], "wes_germline")
+    assert mapping["output_csv"] == "recalibrated.csv"
+    assert calling["input_kind"] == "recalibrated_csv"
+    assert annotation["run_workflow_key"] == "wes_annotate_only"
+
+    mapping_spec = NextflowExecutor().prepare(
+        get_workflow("wes_germline"), "p1", "run-map", "manifest1",
+        "/tmp/work", "/tmp/results", intervals_path="/tmp/capture.bed",
+        stage_key=mapping["key"], analysis_workflow_key="wes_germline",
+    )
+    assert mapping_spec.parameters["step"] == "mapping"
+    assert "tools" not in mapping_spec.parameters
+    assert mapping_spec.stage_key == "preprocess_mapping"
+
+    calling_spec = NextflowExecutor().prepare(
+        get_workflow("wes_germline"), "p1", "run-call", "manifest1",
+        "/tmp/work", "/tmp/results", intervals_path="/tmp/capture.bed",
+        input_type="recalibrated_csv", stage_key=calling["key"],
+        analysis_workflow_key="wes_germline",
+    )
+    assert calling_spec.parameters["step"] == "variant_calling"
+    assert calling_spec.parameters["tools"] == "haplotypecaller"
+
+    annotation_spec = NextflowExecutor().prepare(
+        get_workflow("wes_annotate_only"), "p1", "run-annotation", "manifest1",
+        "/tmp/work", "/tmp/results", input_type="variantcalled_csv",
+        stage_key=annotation["key"], analysis_workflow_key="wes_germline",
+    )
+    assert annotation_spec.parameters["step"] == "annotate"
+    assert annotation_spec.parameters["tools"] == "vep"
+
+
+def test_stage_handoff_rejects_csv_references_outside_parent_results(tmp_path):
+    from routes.api import _controlled_stage_samplesheet
+
+    run_root = tmp_path / "parent-run"
+    result_root = run_root / "results"
+    csv_dir = result_root / "preprocessing" / "csv"
+    csv_dir.mkdir(parents=True)
+    cram = result_root / "preprocessing" / "recalibrated" / "S1" / "S1.recal.cram"
+    crai = cram.with_suffix(".cram.crai")
+    cram.parent.mkdir(parents=True)
+    cram.write_bytes(b"cram")
+    crai.write_bytes(b"crai")
+    handoff = csv_dir / "recalibrated.csv"
+    handoff.write_text(
+        f"patient,sample,sex,status,cram,crai\nP1,S1,NA,0,{cram},{crai}\n",
+        encoding="utf-8",
+    )
+    stage = next_stage("preprocess_mapping", "wes_germline")
+    assert _controlled_stage_samplesheet({"run_dir": str(run_root)}, stage) == str(handoff)
+
+    external = tmp_path / "external.cram"
+    external.write_bytes(b"external")
+    handoff.write_text(
+        f"patient,sample,sex,status,cram,crai\nP1,S1,NA,0,{external},{crai}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="不属于"):
+        _controlled_stage_samplesheet({"run_dir": str(run_root)}, stage)
+
+
+def test_preprocessing_stage_collects_its_handoff_and_qc_artifacts(test_project, tmp_path):
+    from modules.workflows.runs import create_workflow_run
+
+    manifest = register_manifest(test_project, {
+        "reference_bundle_id": "bundle", "capture_bed_id": "kit",
+        "samples": [{"sample_id": "S1", "patient_id": "P1", "role": "germline",
+                     "input_type": "fastq", "fastq_1": "r1", "fastq_2": "r2"}],
+    })
+    run_root = tmp_path / "preprocessing-stage"
+    csv_dir = run_root / "results" / "preprocessing" / "csv"
+    csv_dir.mkdir(parents=True)
+    (csv_dir / "recalibrated.csv").write_text(
+        "patient,sample,sex,status,cram,crai\nP1,S1,NA,0,/safe/S1.cram,/safe/S1.cram.crai\n",
+        encoding="utf-8",
+    )
+    multiqc = run_root / "results" / "multiqc"
+    multiqc.mkdir()
+    (multiqc / "multiqc_report.html").write_text("<html>QC</html>", encoding="utf-8")
+    run = create_workflow_run(
+        test_project, "wes_germline", manifest["id"], status="completed",
+        launch={"stage_key": "preprocess_mapping", "analysis_workflow_key": "wes_germline"},
+        run_dir=str(run_root),
+    )
+
+    collection = collect_workflow_artifacts(run["id"], test_project, strict=True)
+    assert collection["valid"] is True
+    kinds = {item["artifact_kind"] for item in collection["artifacts"]}
+    assert {"recalibrated_samplesheet", "multiqc_report"} <= kinds
+
+
 def test_nextflow_executor_refuses_calling_without_capture_bed():
     from modules.workflows.registry import get_workflow
 
@@ -517,6 +719,55 @@ def test_local_executor_records_exit_code_with_fixed_binary(test_project, tmp_pa
     assert run["exit_code"] == 0
 
 
+def test_failed_executor_records_a_safe_fastq_integrity_summary(test_project, tmp_path, monkeypatch):
+    from modules.workflows.registry import get_workflow
+    from modules.workflows.runs import create_workflow_run
+
+    monkeypatch.setattr(Config, "WES_MIN_FREE_GB", 0)
+    fake_nextflow = tmp_path / "fake-nextflow-eof"
+    fake_nextflow.write_text(
+        "#!/bin/sh\n"
+        "echo 'igzip: unexpected eof' >&2\n"
+        "exit 255\n",
+        encoding="utf-8",
+    )
+    fake_nextflow.chmod(0o750)
+    manifest = register_manifest(test_project, {
+        "reference_bundle_id": "grch38-v1", "capture_bed_id": "exome-v1",
+        "samples": [{"sample_id": "S1", "patient_id": "P1", "role": "germline",
+                     "input_type": "fastq", "fastq_1": "r1", "fastq_2": "r2"}],
+    })
+    run_root = tmp_path / "failed-run"
+    launch_dir = run_root / "launch"
+    launch_dir.mkdir(parents=True)
+    samplesheet = launch_dir / "samplesheet.csv"
+    samplesheet.write_text("patient,sample\nP1,S1\n", encoding="utf-8")
+    capture = launch_dir / "capture.bed"
+    capture.write_text("chr1\t0\t10\n", encoding="utf-8")
+    executor = NextflowExecutor(
+        nextflow_bin=str(fake_nextflow), enabled=True, enforce_reference_catalog=False
+    )
+    run_id = "wesrun_failed_summary"
+    spec = executor.prepare(
+        get_workflow("wes_germline"), test_project, run_id, manifest["id"],
+        str(run_root / "work"), str(run_root / "results"),
+        samplesheet_path=str(samplesheet), intervals_path=str(capture),
+    )
+    with open(spec.params_file_path, "w", encoding="utf-8") as handle:
+        json.dump(spec.parameters, handle)
+    create_workflow_run(
+        test_project, "wes_germline", manifest["id"], run_id=run_id,
+        launch=spec.to_dict(), run_dir=str(run_root),
+    )
+    executor.launch(spec, project_id=test_project)
+    for _ in range(20):
+        run = executor.poll(run_id, test_project, collect_artifacts=False)
+        if run["status"] == "failed":
+            break
+    assert run["status"] == "failed"
+    assert "重新下载" in run["error_text"]
+
+
 def test_asset_and_reference_registration_are_typed_and_checksum_aware(test_project):
     project_dir = Config.project_dir(test_project)
     bam_path = os.path.join(project_dir, "sample.bam")
@@ -549,6 +800,32 @@ def test_optional_content_check_is_bounded_and_dependency_aware(test_project):
     })
     assert summary["valid"] is True
     assert summary["checks"][0]["checks"]["gzip"] is True
+
+
+def test_content_check_accepts_plain_fastq_uploads(test_project):
+    path = os.path.join(Config.project_dir(test_project), "S1_R1.fastq")
+    with open(path, "wb") as handle:
+        handle.write(b"@r1\nACGT\n+\n!!!!\n")
+
+    summary = inspect_fastq(path, full_integrity=True)
+    assert summary["valid"] is True
+    assert summary["checks"]["gzip"] is False
+
+
+def test_full_fastq_integrity_check_detects_a_truncated_gzip(test_project):
+    project_dir = Config.project_dir(test_project)
+    complete = os.path.join(project_dir, "complete.fastq.gz")
+    truncated = os.path.join(project_dir, "truncated.fastq.gz")
+    # Enough incompressible trailing content ensures the small header sample
+    # can be read before the gzip trailer is reached.
+    with gzip.open(complete, "wb") as handle:
+        handle.write(b"@r1\nACGT\n+\n!!!!\n" + os.urandom(128 * 1024))
+    with open(complete, "rb") as source, open(truncated, "wb") as target:
+        target.write(source.read()[:-8])
+
+    summary = inspect_fastq(truncated, full_integrity=True)
+    assert summary["valid"] is False
+    assert "gzip" in summary["error"]
 
 
 def test_capture_profiles_are_per_kit_and_test_only_is_not_production(test_project, monkeypatch):
@@ -636,6 +913,52 @@ def test_reference_and_capture_catalog_form_a_hard_launch_gate(test_project, mon
     assert any("catalog" in error for error in wrong_path["errors"])
 
 
+def test_custom_reference_bundle_supplies_immutable_sarek_paths(test_project, monkeypatch):
+    """A legacy bundle must not inherit the deployment-wide GRCh38 genome."""
+    from modules.workflows.registry import get_workflow
+
+    project_dir = Config.project_dir(test_project)
+    monkeypatch.setenv("WES_SOURCE_ROOTS", project_dir)
+    bundle_id = "hs37d5-test-v1"
+    metadata = {"sarek_reference": {"mode": "custom"}}
+    paths = {}
+    for asset_type in (
+        "fasta", "fai", "dict", "dbsnp", "dbsnp_tbi",
+        "germline_resource", "germline_resource_tbi",
+    ):
+        suffix = {
+            "fasta": ".fa", "fai": ".fa.fai", "dict": ".dict",
+            "dbsnp": ".vcf.gz", "dbsnp_tbi": ".vcf.gz.tbi",
+            "germline_resource": ".vcf.gz", "germline_resource_tbi": ".vcf.gz.tbi",
+        }[asset_type]
+        path = os.path.join(project_dir, asset_type + suffix)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("1\t1000\t0\t50\t51\n" if asset_type == "fai" else asset_type + "\n")
+        paths[asset_type] = path
+        register_reference_asset(
+            assembly="GRCh37", bundle_version=bundle_id, asset_type=asset_type,
+            file_path=path, status="validated",
+            metadata=metadata if asset_type == "fasta" else {}, source_roots=(project_dir,),
+        )
+
+    resolved = reference_bundle_sarek_parameters(bundle_id, "wes_germline")
+    assert resolved["configured"] is True
+    assert resolved["errors"] == []
+    assert resolved["parameters"]["genome"] is None
+    assert resolved["parameters"]["igenomes_ignore"] is True
+    assert resolved["parameters"]["fasta"] == paths["fasta"]
+    assert resolved["parameters"]["dbsnp_tbi"] == paths["dbsnp_tbi"]
+
+    spec = NextflowExecutor().prepare(
+        get_workflow("wes_germline"), "p1", "run1", "manifest1", "/tmp/work", "/tmp/results",
+        intervals_path="/tmp/capture.bed", reference_bundle_id=bundle_id,
+    )
+    assert spec.parameters["genome"] is None
+    assert spec.parameters["igenomes_ignore"] is True
+    assert spec.parameters["fasta"] == paths["fasta"]
+    assert "igenomes_base" not in spec.parameters
+
+
 def _completed_run_with_results(test_project, tmp_path, *, include_multiqc=True):
     from modules.workflows.runs import create_workflow_run
 
@@ -670,6 +993,22 @@ def test_completed_run_collects_primary_vcf_index_and_multiqc(test_project, tmp_
     kinds = {item["artifact_kind"] for item in list_workflow_artifacts(run["id"], test_project)}
     assert {"filtered_vcf", "vcf_index", "multiqc_report"} <= kinds
     assert all(len(item["checksum"]) == 64 for item in collection["artifacts"])
+
+
+def test_wes_result_figures_and_reports_are_collected_for_platform_display(test_project, tmp_path):
+    run = _completed_run_with_results(test_project, tmp_path)
+    # Locate this run's controlled results folder through its stored run root.
+    from modules.workflows.runs import get_workflow_run
+    results = os.path.join(get_workflow_run(run["id"], test_project)["run_dir"], "results")
+    figure_dir = os.path.join(results, "reports")
+    os.makedirs(figure_dir)
+    for filename in ("coverage.png", "variant-summary.html", "annotation.pdf", "impact.svg"):
+        with open(os.path.join(figure_dir, filename), "wb") as handle:
+            handle.write(b"figure")
+
+    collection = collect_workflow_artifacts(run["id"], test_project)
+    kinds = {item["artifact_kind"] for item in collection["artifacts"]}
+    assert {"wes_raster_figure", "wes_html_report", "wes_document_figure"} <= kinds
 
 
 def test_missing_required_result_turns_zero_exit_completion_into_failure(test_project, tmp_path):
@@ -714,17 +1053,41 @@ def test_wes_dashboard_and_project_scoped_artifact_download(test_project, tmp_pa
     from app import create_app
 
     run = _completed_run_with_results(test_project, tmp_path)
+    visual_dir = os.path.join(run["run_dir"], "results", "reports")
+    os.makedirs(visual_dir)
+    with open(os.path.join(visual_dir, "coverage.png"), "wb") as handle:
+        handle.write(b"png")
+    with open(os.path.join(visual_dir, "variant-summary.html"), "wb") as handle:
+        handle.write(b"<html>variant summary</html>")
+    with open(os.path.join(visual_dir, "annotation.pdf"), "wb") as handle:
+        handle.write(b"pdf")
     collection = collect_workflow_artifacts(run["id"], test_project)
     report = next(item for item in collection["artifacts"]
                   if item["artifact_kind"] == "multiqc_report")
+    raster_figure = next(item for item in collection["artifacts"]
+                         if item["artifact_kind"] == "wes_raster_figure")
+    html_report = next(item for item in collection["artifacts"]
+                       if item["artifact_kind"] == "wes_html_report")
+    document_figure = next(item for item in collection["artifacts"]
+                           if item["artifact_kind"] == "wes_document_figure")
     client = create_app().test_client()
 
     page = client.get(f"/projects/{test_project}/wes")
     assert page.status_code == 200
     assert "WES 工作台" in page.get_data(as_text=True)
+    detail = client.get(f"/projects/{test_project}/wes/runs/{run['id']}")
+    assert detail.status_code == 200
+    detail_html = detail.get_data(as_text=True)
+    assert "运行日志" in detail_html
+    assert "本阶段结果图与交互报告" in detail_html
+    for item in (report, raster_figure, html_report, document_figure):
+        assert f"/projects/{test_project}/wes/artifacts/{item['id']}" in detail_html
+    assert 'alt="WES 结果图：reports/coverage.png"' in detail_html
+    assert 'sandbox="allow-scripts"' in detail_html
     download = client.get(f"/projects/{test_project}/wes/artifacts/{report['id']}")
     assert download.status_code == 200
     assert b"QC" in download.data
+    assert download.headers["Content-Security-Policy"] == "sandbox allow-scripts"
 
 
 def test_p3_restart_marks_untracked_local_process_interrupted(test_project, tmp_path):

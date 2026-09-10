@@ -114,7 +114,8 @@ def _detect_input_type(sample: Dict[str, Any]) -> str:
 def validate_manifest(manifest: Any, project_dir: Optional[str] = None,
                       workflow_key: str = "", require_files: bool = True,
                       source_roots: Iterable[str] = (), content_checks: bool = False,
-                      reference_path: Optional[str] = None) -> PreflightResult:
+                      reference_path: Optional[str] = None,
+                      full_fastq_integrity: bool = False) -> PreflightResult:
     """Validate the platform-facing WES manifest contract.
 
     The function is deterministic and side-effect free.  Registration and
@@ -235,7 +236,10 @@ def validate_manifest(manifest: Any, project_dir: Optional[str] = None,
         sample["input_type"] = input_type
         if content_checks and input_type in INPUT_VALUES:
             from .content import inspect_sample_files
-            content = inspect_sample_files(sample, reference_path=reference_path)
+            content = inspect_sample_files(
+                sample, reference_path=reference_path,
+                full_fastq_integrity=full_fastq_integrity,
+            )
             content_summaries.append(content)
             if not content.get("valid", False):
                 errors.append(f"{prefix} 内容检查失败")

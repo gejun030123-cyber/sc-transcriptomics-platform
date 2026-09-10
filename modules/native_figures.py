@@ -932,7 +932,7 @@ def grouped_box_figure(values, categories, series_labels, title='',
 def marker_dotplot_figure(mean_expression, detection_fraction, categories,
                           gene_labels, title='', x_label='Cell type',
                           y_label='Marker gene', value_label='Mean log1p expression',
-                          detection_label='% cells expressing'):
+                          detection_label='% cells expressing', gene_sections=None):
     """Draw an annotation-validation dot plot.
 
     Columns are annotated groups and rows are marker genes.  Dot colour carries
@@ -973,7 +973,7 @@ def marker_dotplot_figure(mean_expression, detection_fraction, categories,
     longest_category = max((len(category) for category in categories), default=0)
     category_rotation = 55 if longest_category > 24 else 35
     width = max(8.0, 0.95 * n_categories + 3.8)
-    height = max(5.2, 0.34 * n_genes + 2.7, 4.2 + 0.025 * longest_category)
+    height = max(5.2, 0.38 * n_genes + 2.7, 4.2 + 0.025 * longest_category)
     fig, ax = plt.subplots(figsize=(width, height), dpi=150)
     x, y = np.meshgrid(np.arange(n_categories), np.arange(n_genes))
     values = np.nan_to_num(mean_expression.T, nan=vmin).ravel()

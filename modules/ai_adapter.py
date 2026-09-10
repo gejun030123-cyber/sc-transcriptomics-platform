@@ -9,7 +9,7 @@ from modules.ai_config import get_effective_ai_config
 TOOLS_ANTHROPIC = [
     {
         "name": "run_analysis",
-        "description": "执行一个分析模块。返回任务 ID 和状态。",
+        "description": "执行一个分析模块。返回任务 ID 和状态。params 可使用网页表单中的全部用户可调参数；不确定键名、选项或联动条件时，先调用 get_module_parameters 获取当前模块的实际参数契约。",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -24,6 +24,20 @@ TOOLS_ANTHROPIC = [
                 "params": {
                     "type": "object",
                     "description": "分析参数，如 {\"method\": \"deseq2\", \"fc_threshold\": 1.5}。留空使用默认值。"
+                }
+            },
+            "required": ["module_name"]
+        }
+    },
+    {
+        "name": "get_module_parameters",
+        "description": "[只读] 获取某个分析模块与网页表单完全一致的用户可调参数、默认值、可选项、数值范围和联动条件。用户要求修改任何参数时先调用此工具，随后把用户确认的原值传给 run_analysis。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "module_name": {
+                    "type": "string",
+                    "description": "模块名称，如 sc_cell_go、bulk_deg、clustering"
                 }
             },
             "required": ["module_name"]
@@ -107,7 +121,7 @@ TOOLS_ANTHROPIC = [
             "properties": {
                 "module_name": {
                     "type": "string",
-                    "description": "要决策的分析模块，如 bulk_normalize、bulk_deg、clustering、batch_correct、sc_timecourse"
+                    "description": "要决策的分析模块，如 sc_pseudobulk_deg、functional_state、proportion、neighborhood_da、trajectory 或 bulk_deg"
                 },
                 "input_path": {
                     "type": "string",
@@ -444,6 +458,7 @@ TOOLS_OPENAI = [
 # 自动执行的只读工具（无需用户确认）
 AUTO_EXEC_TOOLS = {
     'get_project_status', 'get_task_results', 'list_modules',
+    'get_module_parameters',
     'inspect_analysis_state', 'inspect_adata', 'get_cluster_summary',
     'score_cell_type_signature', 'list_builtin_markers',
     'recommend_analysis_config',
@@ -469,7 +484,8 @@ SYSTEM_PROMPT = """你是一个生信分析助手，帮助用户进行 RNA-seq �
 6. **细胞类型打分**：使用 score_cell_type_signature 对已有分群进行 marker 评分
 7. **目标优化 Agent**：用户指定细胞类型，你使用 start_goal_agent 自动检查、生成候选参数、评分并推荐最佳分群
 8. **WES 输入审阅**：使用 list_wes_workflows、list_wes_references 和 inspect_wes_manifest 检查清单、配对、参考资源和文件能力；这些工具只读，不启动 WES。
-9. **主题驱动富集**：用户表达生物学主题（如"脂代谢和炎症"）时，使用 search_pathway_terms 映射到具体通路，再用 sc_cell_go 的 focus_terms 运行主题聚焦富集
+9. **主题驱动富集**：用户表达生物学主题（如"脂代谢和炎症"）时，使用 search_pathway_terms 映射到具体通路，再用 sc_cell_go 的 focus_terms 运行主题优先 GO 富集
+10. **参数契约查询**：用户要求修改网页中的任意参数时，使用 get_module_parameters 获取与网页一致的实际键名、范围和联动条件；不得凭记忆编造参数名或丢弃用户已确认的值。
 
 ## 目标优化 Agent 使用流程
 当用户表示对分群不满意或想找特定细胞类型时：
@@ -487,20 +503,39 @@ SYSTEM_PROMPT = """你是一个生信分析助手，帮助用户进行 RNA-seq �
 4. 只有用户确认后，才使用 recommend_analysis_config 返回的 input_path 和 recommended_params 调用 run_analysis。
 5. 不得把 DESeq2/edgeR 用于 FPKM/TPM 连续值；不得对已 log 数据重复标准化；不得在无时间列时推荐时序分析；不得把单个细胞当作多时间点的独立生物学重复。
 
+## 用户手动参数调整
+当用户说“把某参数改为…/按网页参数运行/调整阈值、图形、聚类、模型或导出设置”时：
+1. 先调用 get_module_parameters(module_name=...)，以返回的 key、options、min/max、show_if/depends_on 为唯一参数契约；这覆盖所有模块的所有网页可调字段。
+2. 将用户指定值与必要的控制字段一起回显；不得把用户值替换成推荐默认值，也不得把受 show_if 控制的有效字段静默丢弃。
+3. 对会启动任务的改动，获得用户确认后再调用 run_analysis，并原样传入已确认的用户可调参数；服务端仍会执行范围、联动和方法兼容性校验。
+4. 若参数不在契约中或违反范围/联动，解释原因并让用户选择有效值；不得猜测近似参数。
+
 ## 全流程执行
 当用户要求“全流程/一键完成/从头跑到结果”时：先检查数据和必要元数据，并给出模块顺序与关键参数；获得一次确认后，必须调用 **run_pipeline** 一次性提交整个流程，不能逐个调用 run_analysis。流程在后台按顺序等待每一步完成后再执行下一步；回复中说明可通过 pipeline run 状态查看进度和失败位置。若设计检查表明后续模块缺少分组、比较或时间元数据，只提交可安全执行的核心流程，并明确说明未提交的模块和原因。
 
 ## 可用模块（完整列表）
-单细胞：qc, normalize, hvg, dimred, batch_correct, clustering, qc_reassess, annotation, sc_timecourse, deg, trajectory, proportion, cell_communication
+单细胞：qc, normalize, hvg, dimred, batch_correct, clustering, qc_reassess, annotation, functional_state, sc_timecourse, deg, sc_pseudobulk_deg, sc_cell_go, trajectory, proportion, neighborhood_da, cell_communication
 Bulk：bulk_qc, bulk_normalize, bulk_deg, bulk_pca, bulk_heatmap, bulk_enrichment, bulk_timecourse, bulk_deg_integration
+
+## IBD / 对照类器官单细胞下游流程
+当用户的目标是“炎症/应激增强、TA/增殖改变、成熟吸收/代谢 enterocyte 下降”或相近 IBD 类器官问题时，按以下证据层次推荐，不要把不同统计单位混为一谈：
+1. 同一细胞类型内部 disease-vs-control 表达变化：先推荐 sc_pseudobulk_deg；它要求原始 counts、sample_id、condition 和 celltype/annotation，按 sample × celltype 聚合。不得以 sc_cell_deg 的细胞级 p 值替代正式结论。
+2. 炎症、TNF/NF-kB、IFN、hypoxia、ROS、UPR、apoptosis、FAO/peroxisome/OXPHOS、胆固醇/脂代谢、WNT、细胞周期等状态：推荐 functional_state；IBD/肠炎目标可选择 analysis_focus=ibd_organoid_epithelial。先检查本地冻结基因集是否可用，并将 cell-level 图解释为描述性，样本 × celltype 比较才是正式统计。
+3. 细胞组成改变：推荐 proportion，并显式设置 analysis_unit=sample、sample_key、condition_key 和 celltype groupby；不得把细胞数卡方检验作为最终生物学重复证据。
+4. 连续上皮状态中 disease 富集的局部区域：推荐 neighborhood_da。只在存在 X_pca/Harmony/scVI 等高维表示、且各条件有独立样本时使用；不可用二维 UMAP 距离代替，也不得称为完整 R/Milo 分析。
+5. Stem/progenitor → TA → absorptive/metabolic 或 secretory 分化：推荐 trajectory 的 PAGA/DPT，并要求用户确认起始 Stem/progenitor 状态。RNA velocity 只有在明确存在 spliced/unspliced 信息且平台具备专用工作流时才能声称可做；当前 trajectory 不能替代 velocity。
+6. 每个主要 celltype 的 DEG 完成后，使用 sc_cell_go 绑定该明确的 pseudobulk 任务 ID 做 Hallmark/Reactome/GO/KEGG 富集；不得扫描“最新 CSV”猜测 DEG 来源。优先关注 lipid absorption、cholesterol/FAO/peroxisome 与 inflammatory/TNF-NF-kB/hypoxia。
+7. 上皮为主的类器官中，cell_communication 是低优先级；除非用户明确要做或存在 immune/stromal 细胞，不能把通讯当作主结论。
+8. 每次要执行上述模块前，先调用 recommend_analysis_config；它会依据当前元数据和表示返回 should_run。若缺少原始 counts、sample/condition、注释或高维表示，说明缺口并停止提交。用户确认后再调用 run_analysis。
 
 ## 主题驱动富集流程
 当用户希望富集结果聚焦某个生物学主题（如"跑完差异表达了，我要关于脂代谢和炎症的富集"）时：
 1. 调用 search_pathway_terms(query="用户主题原话")；不确定平台支持哪些主题时，先传 list_themes=true 查看。
 2. 把命中的通路 term 按库分组展示给用户，说明每个库命中数量，请用户确认或增删；不要未经确认直接提交分析。
-3. 用户确认后，调用 run_analysis(module_name="sc_cell_go", params={{"deg_source_task_id": "<已完成的DEG任务ID>", "method": "ORA", "focus_terms": ["term1", "term2"]}})。focus_terms 不会改变全量统计：富集照常在全部通路上运行，FDR 在全库上校正，另输出主题子表与聚焦图。
-4. 任务完成后，用 get_task_results 找到富集结果表 file_id，再调用 read_task_table(file_id=..., contains=..., fdr_max=...) 摘要主题结果并解读。
-5. 解读时明确：主题图只是从全量结果中筛选展示，不构成独立的校正检验；聚焦 term 无显著结果时如实说明，不得夸大。
+3. 用户确认后，调用 run_analysis(module_name="sc_cell_go", params={{"deg_source_task_id": "<已完成的DEG任务ID>", "method": "ORA", "focus_terms": ["term1", "term2"]}})。focus_terms 不会改变全量统计：富集照常在全部通路上运行，FDR 在全库上校正；GO 图在每个本体内优先炎症、再脂代谢/确认主题，并以普通 Top 通路补足，输出可审计的三分区气泡图与柱状图。
+4. 用户要求调整展示名额时，先调用 get_module_parameters(module_name="sc_cell_go")；提交时必须保留 go_priority_allocation_mode="custom" 及相应的 go_inflammation_slots、go_lipid_slots、go_confirmed_theme_slots、go_top_pathway_slots。四者之和不得超过 plot_top_n；这些参数只改变展示名额，不改变 ORA 或 FDR。
+5. 任务完成后，用 get_task_results 找到富集结果表 file_id，再调用 read_task_table(file_id=..., contains=..., fdr_max=...) 摘要主题结果并解读。
+6. 解读时明确：主题优先图不是独立的校正检验，仍要结合完整结果表；某主题未命中时仍展示 FDR Top 通路，某本体没有任何显著通路时才如实标为空，不得夸大。
 
 ## 回复规则
 - 用中文回复

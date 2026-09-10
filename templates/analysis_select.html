@@ -224,7 +224,7 @@
                     <select name="{{ param.key }}" class="form-select">
                         <option value="">-- 请选择一个已完成的 DEG 任务 --</option>
                         {% for source in sc_enrichment_deg_sources %}
-                        <option value="{{ source.task_id }}" data-clusters="{{ source.clusters|tojson|forceescape }}" {% if source.task_id == param.default %}selected{% endif %}>
+                        <option value="{{ source.task_id }}" data-clusters="{{ source.clusters|tojson|forceescape }}" data-group-label="{{ source.group_label|default('cluster') }}" {% if source.task_id == param.default %}selected{% endif %}>
                             {{ source.label }}
                         </option>
                         {% endfor %}
@@ -232,7 +232,7 @@
                     {% if sc_enrichment_deg_sources %}
                     <small class="text-primary d-block mt-1">富集会绑定该任务记录的内部 DEG 表，并核对 AnnData 版本；不会按 CSV 修改时间自动选择来源。</small>
                     {% else %}
-                    <small class="text-danger d-block mt-1">未找到已完成且可用的单细胞 DEG 任务。请先运行细胞级探索性比较或样本级 pseudobulk DEG。</small>
+                    <small class="text-danger d-block mt-1">未找到已完成且可用的单细胞 DEG 任务。请先运行细胞类型/簇 Marker、细胞级探索性比较或样本级 pseudobulk DEG。</small>
                     {% endif %}
                     {% elif module.name == 'sc_cell_go' and param.key == 'target_clusters' %}
                     <div id="sc-go-cluster-picker" class="border rounded p-2" style="max-height:180px;overflow-y:auto;">
@@ -323,11 +323,11 @@
                     <small class="text-danger d-block mt-1">未找到可用的单个 DEG 比较，请先完成差异表达分析。</small>
                     {% endif %}
                     {% else %}
-                    <input type="text" name="{{ param.key }}" class="form-control{% if param.key in ('groupby', 'group_column', 'batch_key', 'cluster_key', 'color_by', 'sample_key', 'condition_key', 'timepoint_key', 'celltype_key', 'scope_key') %} groupby-field{% endif %}"
+                    <input type="text" name="{{ param.key }}" class="form-control{% if param.key in ('groupby', 'group_column', 'outlier_group_column', 'batch_key', 'batch_by', 'cluster_key', 'color_by', 'sample_key', 'condition_key', 'timepoint_key', 'celltype_key', 'scope_key') %} groupby-field{% endif %}"
                            value="{{ param.default }}" data-key="{{ param.key }}"
-                           {% if param.key in ('groupby', 'group_column', 'batch_key', 'cluster_key', 'color_by', 'sample_key', 'condition_key', 'timepoint_key', 'celltype_key', 'scope_key') %}list="obs-columns-datalist"{% endif %}
-                           placeholder="{% if param.key in ('groupby', 'group_column', 'color_by') %}输入分组列名，选择文件后自动填充{% elif param.key == 'batch_key' %}输入批次列名{% elif param.key in ('sample_key', 'condition_key', 'timepoint_key', 'celltype_key') %}选择文件后自动填充{% elif param.key == 'scope_key' %}输入范围列名（如 sample_id），留空=全部{% else %}{{ param.default }}{% endif %}">
-                    {% if param.key in ('groupby', 'group_column', 'batch_key', 'cluster_key', 'color_by', 'sample_key', 'condition_key', 'timepoint_key', 'celltype_key', 'scope_key') %}
+                           {% if param.key in ('groupby', 'group_column', 'outlier_group_column', 'batch_key', 'batch_by', 'cluster_key', 'color_by', 'sample_key', 'condition_key', 'timepoint_key', 'celltype_key', 'scope_key') %}list="obs-columns-datalist"{% endif %}
+                           placeholder="{% if param.key in ('groupby', 'group_column', 'outlier_group_column', 'color_by') %}输入分组列名，选择文件后自动填充{% elif param.key in ('batch_key', 'batch_by') %}输入批次或第二因素列名{% elif param.key in ('sample_key', 'condition_key', 'timepoint_key', 'celltype_key') %}选择文件后自动填充{% elif param.key == 'scope_key' %}输入范围列名（如 sample_id），留空=全部{% else %}{{ param.default }}{% endif %}">
+                    {% if param.key in ('groupby', 'group_column', 'outlier_group_column', 'batch_key', 'batch_by', 'cluster_key', 'color_by', 'sample_key', 'condition_key', 'timepoint_key', 'celltype_key', 'scope_key') %}
                     <select class="form-select form-select-sm mt-1 obs-column-select"
                             data-target-key="{{ param.key }}">
                         <option value="">-- 从 obs 列选择并填入 {{ param.label }} --</option>
@@ -777,6 +777,7 @@ function updateSCEnrichmentClusterPicker() {
         Array.from(picker.querySelectorAll('input:checked')).map(input => input.value)
     );
     const option = sourceSelect.options[sourceSelect.selectedIndex];
+    const groupLabel = option?.dataset.groupLabel || '细胞类型 / cluster';
     let clusters = [];
     try {
         clusters = option && option.dataset.clusters ? JSON.parse(option.dataset.clusters) : [];
@@ -794,7 +795,7 @@ function updateSCEnrichmentClusterPicker() {
     if (!clusters.length) {
         const hint = document.createElement('span');
         hint.className = 'text-warning small';
-        hint.textContent = '未从该 DEG 任务读取到 cluster；留空将按全部范围运行。';
+        hint.textContent = `未从该 DEG 任务读取到${groupLabel}；留空将按全部范围运行。`;
         picker.appendChild(hint);
         return;
     }
@@ -877,7 +878,7 @@ function renderObsColumnPicker(columns, errorMessage = '') {
         button.title = '填入当前选中的分组参数';
         button.addEventListener('click', () => {
             const target = activeObsColumnField || Array.from(groupbyFields).find(
-                field => ['groupby', 'group_column', 'color_by', 'scope_key'].includes(field.dataset.key)
+                field => ['groupby', 'group_column', 'color_by', 'batch_by', 'scope_key'].includes(field.dataset.key)
             );
             if (!target) return;
             target.value = name;
@@ -1047,22 +1048,38 @@ function renderAutoGroupHint(field) {
     }
     hint.innerHTML = '';
 
+    const isMarkerField = field.dataset.key === 'batch_by';
+    const candidates = isMarkerField
+        ? autoGroupCandidates.filter(candidate => String(candidate.key).startsWith('factor_'))
+        : autoGroupCandidates;
+    if (!candidates.length) {
+        hint.remove();
+        return;
+    }
     const title = document.createElement('div');
-    title.textContent = '已从样本名检测到分组：';
+    title.textContent = isMarkerField
+        ? '已从样本名检测到可用于 marker 的实验因素：'
+        : '已从样本名检测到分组：';
     hint.appendChild(title);
 
-    if (autoGroupCandidates.length > 1) {
+    if (candidates.length > 1 || isMarkerField) {
         const select = document.createElement('select');
         select.className = 'form-select form-select-sm mt-1 auto-group-candidate-select';
-        autoGroupCandidates.forEach(candidate => {
+        candidates.forEach(candidate => {
             const option = document.createElement('option');
             option.value = candidate.key;
             option.textContent = candidate.label + '：' + candidate.values.join(', ');
-            option.selected = autoGroupMapping && candidate.key === autoGroupMapping.key;
+            option.selected = isMarkerField
+                ? field.value === `_auto_${String(candidate.key).replace('_', '')}`
+                : (autoGroupMapping && candidate.key === autoGroupMapping.key);
             select.appendChild(option);
         });
         select.addEventListener('change', () => {
-            autoGroupMapping = autoGroupCandidates.find(c => c.key === select.value) || autoGroupCandidates[0];
+            if (isMarkerField) {
+                field.value = `_auto_${String(select.value).replace('_', '')}`;
+            } else {
+                autoGroupMapping = autoGroupCandidates.find(c => c.key === select.value) || autoGroupCandidates[0];
+            }
             renderAutoGroupHint(field);
             updateDynamicSelects();
         });
@@ -1071,11 +1088,36 @@ function renderAutoGroupHint(field) {
 
     const preview = document.createElement('div');
     preview.className = 'mt-1 text-muted';
-    const sizes = autoGroupMapping && autoGroupMapping.group_sizes
-        ? Object.entries(autoGroupMapping.group_sizes).map(([name, count]) => `${name} (n=${count})`)
-        : (autoGroupMapping ? autoGroupMapping.values : []);
-    preview.textContent = sizes.join(', ') + '；提交前可切换分组方式或手动修改分组列。';
+    const selectedCandidate = isMarkerField
+        ? candidates.find(candidate => field.value === `_auto_${String(candidate.key).replace('_', '')}`) || candidates[0]
+        : autoGroupMapping;
+    const sizes = selectedCandidate && selectedCandidate.group_sizes
+        ? Object.entries(selectedCandidate.group_sizes).map(([name, count]) => `${name} (n=${count})`)
+        : (selectedCandidate ? selectedCandidate.values : []);
+    preview.textContent = sizes.join(', ') + (isMarkerField
+        ? '；提交时会保存为真实 obs 列（如 _auto_factor2），而不是 UI 文本。'
+        : '；提交前可切换分组方式或手动修改分组列。');
     hint.appendChild(preview);
+}
+
+function applyBulkQcMeasurementTerminology(measurement) {
+    if (MODULE_NAME !== 'bulk_qc') return;
+    const isRawCounts = measurement === 'raw_counts';
+    const setFieldText = (key, label, help) => {
+        const field = document.querySelector(`.param-field[data-param-key="${key}"]`);
+        if (!field) return;
+        const labelNode = field.querySelector('label.form-label');
+        const helpNode = field.querySelector('small.text-muted');
+        if (labelNode) labelNode.textContent = label;
+        if (helpNode) helpNode.textContent = help;
+    };
+    if (isRawCounts) {
+        setFieldText('min_counts', '最小文库大小（counts）', '原始 count 输入的最小文库大小。低于此值的样本会被过滤。');
+        setFieldText('min_count_threshold', '最小表达值（counts）', '基因 count 达到此值才算有效表达（配合最低表达样本数使用）。');
+    } else {
+        setFieldText('min_counts', '最小总表达量（continuous expression）', '连续表达输入使用 total expression 术语；此 count 专用硬过滤会被自动跳过。');
+        setFieldText('min_count_threshold', '最小表达值（continuous expression）', '基因表达值达到此值才算有效表达（配合最低表达样本数使用）。');
+    }
 }
 
 async function fetchColumnValues(filePath, column) {
@@ -1323,6 +1365,8 @@ async function suggestGroupbyColumns() {
     const sampleCandidates = result.sample_candidates || [];
     const sampleGroups = result.sample_groups || {};
 
+    applyBulkQcMeasurementTerminology(result.input_measurement || '');
+
     autoGroupMapping = sampleGroups.auto_group || null;
     autoGroupCandidates = sampleGroups.auto_group_candidates || (autoGroupMapping ? [autoGroupMapping] : []);
 
@@ -1343,6 +1387,9 @@ async function suggestGroupbyColumns() {
                    && ['groupby', 'group_column', 'color_by'].includes(key)) {
             // 没有可靠的 obs 生物分组时，再从样本名自动检测分组
             f.value = '_auto_group_';
+            renderAutoGroupHint(f);
+        }
+        if (key === 'batch_by' && autoGroupCandidates.some(candidate => String(candidate.key).startsWith('factor_'))) {
             renderAutoGroupHint(f);
         }
     });

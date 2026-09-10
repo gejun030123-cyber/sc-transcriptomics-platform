@@ -34,6 +34,25 @@ _BUNDLE_REQUIREMENTS = {
     "wes_annotate_only": {"vep_cache_manifest"},
 }
 
+# A bundle normally uses the deployment-wide iGenomes configuration.  A
+# legacy reference such as hs37d5 needs a separately pinned custom-reference
+# contract instead: its complete, catalogued file set is rendered into the
+# Sarek params file for that run only.  Keeping this declaration on the FASTA
+# asset avoids a mutable second reference registry and leaves existing GRCh38
+# runs completely unchanged.
+_SAREK_REFERENCE_METADATA_KEY = "sarek_reference"
+_SAREK_CUSTOM_PARAM_BY_ASSET_TYPE = {
+    "fasta": "fasta",
+    "fai": "fasta_fai",
+    "dict": "dict",
+    "dbsnp": "dbsnp",
+    "dbsnp_tbi": "dbsnp_tbi",
+    "germline_resource": "germline_resource",
+    "germline_resource_tbi": "germline_resource_tbi",
+    "pon": "pon",
+    "pon_tbi": "pon_tbi",
+}
+
 
 def _checksum(path: str) -> str:
     digest = hashlib.sha256()
@@ -357,6 +376,51 @@ def _resolve_capture_calling_asset(capture_bed_id: str):
     return (profile.get("assets") or {}).get("calling") if profile else None
 
 
+def reference_bundle_sarek_parameters(bundle_version: str, workflow_key: str) -> Dict[str, Any]:
+    """Return immutable, catalog-derived Sarek reference parameters.
+
+    Most deployed bundles continue to inherit the existing global iGenomes
+    settings and therefore return an empty dict.  A custom bundle opts in by
+    placing ``{"mode": "custom"}`` under ``sarek_reference`` on its FASTA
+    asset.  All paths then come from checksum-tracked catalog assets, never
+    from the browser or a manifest.
+    """
+    assets = list_reference_assets(bundle_version=str(bundle_version or ""), status="validated")
+    fasta = next((asset for asset in assets if asset.get("asset_type") == "fasta"), None)
+    declaration = dict(((fasta or {}).get("metadata") or {}).get(
+        _SAREK_REFERENCE_METADATA_KEY
+    ) or {})
+    if not declaration:
+        return {"configured": False, "parameters": {}, "errors": []}
+    if declaration.get("mode") != "custom":
+        return {
+            "configured": True,
+            "parameters": {},
+            "errors": ["sarek_reference.mode 仅支持 custom"],
+        }
+
+    required = _BUNDLE_REQUIREMENTS.get(workflow_key, set())
+    by_type = {asset.get("asset_type"): asset for asset in assets}
+    missing = sorted(required - set(by_type))
+    errors = []
+    if missing:
+        errors.append("custom Sarek bundle 缺少 validated assets: " + ", ".join(missing))
+    params: Dict[str, Any] = {
+        # Sarek documents this combination for a fully local custom
+        # reference.  ``None`` is intentionally serialized as JSON null.
+        "genome": None,
+        "igenomes_ignore": True,
+    }
+    for asset_type, parameter in _SAREK_CUSTOM_PARAM_BY_ASSET_TYPE.items():
+        asset = by_type.get(asset_type)
+        if asset and asset_type in required:
+            try:
+                params[parameter] = Config.validate_wes_reference_path(asset.get("file_path", ""))
+            except ValueError as exc:
+                errors.append(f"{asset_type} 路径无效: {exc}")
+    return {"configured": True, "parameters": params, "errors": errors}
+
+
 def reference_bundle_readiness(bundle_version: str, workflow_key: str) -> Dict[str, Any]:
     required = _BUNDLE_REQUIREMENTS.get(workflow_key, set())
     assets = list_reference_assets(bundle_version=bundle_version, status="validated")
@@ -370,6 +434,8 @@ def reference_bundle_readiness(bundle_version: str, workflow_key: str) -> Dict[s
     if len(assemblies) > 1:
         errors.append("reference bundle 混用了 assembly")
     by_type = {asset["asset_type"]: asset for asset in assets}
+    sarek_reference = reference_bundle_sarek_parameters(bundle_version, workflow_key)
+    errors.extend(sarek_reference["errors"])
     configured_base = str(Config.WES_NEXTFLOW_IGENOMES_BASE or "").strip()
     # Only enforce the deployment base when it is itself inside the currently
     # approved WES roots.  Test/admin bundles may deliberately use a temporary
@@ -413,6 +479,7 @@ def reference_bundle_readiness(bundle_version: str, workflow_key: str) -> Dict[s
         "present_asset_types": sorted(present),
         "assembly": next(iter(assemblies), "") if len(assemblies) <= 1 else "mixed",
         "checks": checks,
+        "sarek_reference": sarek_reference,
         "errors": errors,
     }
 

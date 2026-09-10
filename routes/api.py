@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 import shutil
@@ -6,6 +7,7 @@ import base64
 import uuid
 import logging
 import psutil
+from collections.abc import Mapping
 from flask import Blueprint, jsonify, request, send_file
 from models import AnalysisTask, Project, ResultFile
 from config import Config
@@ -84,6 +86,28 @@ def _load_preset(filepath):
         return data
     except (json.JSONDecodeError, IOError):
         return None
+
+
+def _load_accessible_preset(preset_id, project_id=''):
+    """Load one project-local preset first, then a shared preset.
+
+    Pipeline templates are server-owned JSON records.  The one-click endpoint
+    intentionally resolves them here instead of trusting a browser copy of
+    module names or parameter values.
+    """
+    if not preset_id or '..' in preset_id or '/' in preset_id:
+        return None
+    if project_id:
+        preset = _load_preset(os.path.join(
+            _get_project_presets_dir(project_id), f'{preset_id}.json'
+        ))
+        if preset:
+            preset['_scope'] = 'project'
+            return preset
+    preset = _load_preset(os.path.join(PRESETS_GLOBAL_DIR, f'{preset_id}.json'))
+    if preset:
+        preset['_scope'] = 'global'
+    return preset
 
 
 def _list_presets_in_dir(directory, scope):
@@ -209,6 +233,7 @@ def adata_info(pid):
         logger.exception("API error")
         return jsonify({'error': str(e)}), 500
 
+
 @api_bp.route('/projects/<pid>/result-file/<file_id>')
 @api_bp.route('/result-file/<file_id>')
 def get_result_file(file_id, pid=None):
@@ -333,7 +358,7 @@ def column_values():
     if not _validate_file_path(file_path):
         return jsonify({'error': '文件路径不在允许范围内'}), 403
     try:
-        from modules.io_utils import read_expression_matrix
+        from modules.io_utils import read_expression_matrix, infer_expression_measurement
         adata = read_expression_matrix(file_path)
         if column in adata.obs.columns:
             values = sorted(adata.obs[column].astype(str).unique().tolist())
@@ -538,6 +563,7 @@ def data_info():
             'n_vars': adata.n_vars,
             'obs_columns': obs_cols,
             'sample_names': list(adata.obs.index),
+            'input_measurement': infer_expression_measurement(adata, file_path),
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -556,7 +582,7 @@ def obs_columns():
         return jsonify({'error': '文件路径不在允许范围内'}), 403
     try:
         from modules.io_utils import (
-            read_expression_matrix, infer_sample_group_candidates,
+            read_expression_matrix, infer_expression_measurement, infer_sample_group_candidates,
             rank_obs_grouping_candidates, QC_OBS_COLUMNS,
         )
         import pandas as pd
@@ -646,6 +672,7 @@ def obs_columns():
             'time_candidates': time_candidates,
             'sample_candidates': sample_candidates,
             'suggestions': suggestions,
+            'input_measurement': infer_expression_measurement(adata, file_path),
         })
     except Exception:
         return jsonify({
@@ -691,12 +718,19 @@ def list_presets():
         presets = [p for p in presets if p.get('analysis_type') == filter_type]
     result = []
     for p in presets:
+        pipeline = p.get('pipeline')
+        modules = pipeline.get('modules') if isinstance(pipeline, Mapping) else None
+        has_pipeline = isinstance(modules, list) and bool(modules)
         result.append({
             'id': p['_id'],
             'name': p.get('name', ''),
             'description': p.get('description', ''),
             'analysis_type': p.get('analysis_type', ''),
             'scope': p['_scope'],
+            # Do not expose parameter values in a list response.  The
+            # one-click endpoint resolves the saved template server-side.
+            'has_pipeline': has_pipeline,
+            'pipeline': {'modules': list(modules)} if has_pipeline else None,
         })
     return jsonify({'presets': result})
 
@@ -706,13 +740,7 @@ def get_preset(preset_id):
     if '..' in preset_id or '/' in preset_id:
         return jsonify({'error': '无效的预设 ID'}), 400
     project_id = request.args.get('project_id', '')
-    if project_id:
-        fpath = os.path.join(_get_project_presets_dir(project_id), f'{preset_id}.json')
-        p = _load_preset(fpath)
-        if p:
-            return jsonify({'preset': p})
-    fpath = os.path.join(PRESETS_GLOBAL_DIR, f'{preset_id}.json')
-    p = _load_preset(fpath)
+    p = _load_accessible_preset(preset_id, project_id)
     if p:
         return jsonify({'preset': p})
     return jsonify({'error': '预设不存在'}), 404
@@ -950,6 +978,228 @@ def wes_run_artifacts(pid, run_id):
     })
 
 
+def _controlled_stage_samplesheet(parent_run, stage):
+    """Return a validated Sarek CSV produced by the immediately prior stage.
+
+    Only a completed run's own results directory is trusted.  Every path in
+    the generated sheet must be an absolute, non-symlink file under that same
+    directory; this prevents a hand-edited CSV from becoming a general file
+    reference mechanism for downstream Nextflow runs.
+    """
+    run_root = os.path.realpath(str(parent_run.get('run_dir') or ''))
+    results_dir = os.path.realpath(os.path.join(run_root, 'results'))
+    if not run_root or not results_dir.startswith(run_root + os.sep):
+        raise ValueError('上游 run 结果目录无效')
+    expected_name = str(stage.get('input_kind') or '')
+    filename = {
+        'recalibrated_csv': 'recalibrated.csv',
+        'variantcalled_csv': 'variantcalled.csv',
+    }.get(expected_name)
+    if not filename:
+        raise ValueError('该 WES 阶段不接受上游 samplesheet')
+    candidates = (
+        os.path.join(results_dir, 'preprocessing', 'csv', filename),
+        os.path.join(results_dir, 'csv', filename),
+    )
+    source = next((path for path in candidates if os.path.isfile(path) and not os.path.islink(path)), '')
+    real_source = os.path.realpath(source) if source else ''
+    if not real_source or not real_source.startswith(results_dir + os.sep):
+        raise ValueError(f'上游阶段未产生可用的 {filename}')
+    try:
+        with open(real_source, encoding='utf-8-sig', newline='') as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+            fields = set(reader.fieldnames or [])
+    except (OSError, csv.Error) as exc:
+        raise ValueError(f'无法读取上游 {filename}: {exc}') from exc
+    if not rows:
+        raise ValueError(f'上游 {filename} 没有样本行')
+    required = {'patient', 'sample'}
+    if expected_name == 'recalibrated_csv':
+        if not required.issubset(fields) or not ({'cram', 'crai'}.issubset(fields) or {'bam', 'bai'}.issubset(fields)):
+            raise ValueError('上游 recalibrated.csv 列不符合 Sarek 接口')
+        path_fields = ('cram', 'crai') if {'cram', 'crai'}.issubset(fields) else ('bam', 'bai')
+    else:
+        if not required.issubset(fields) or 'vcf' not in fields:
+            raise ValueError('上游 variantcalled.csv 列不符合 Sarek 接口')
+        path_fields = ('vcf',)
+    for row in rows:
+        for field in path_fields:
+            path = str(row.get(field) or '').strip()
+            if not path or not os.path.isabs(path) or os.path.islink(path):
+                raise ValueError(f'上游 {filename} 包含无效的 {field} 路径')
+            real_path = os.path.realpath(path)
+            if not os.path.isfile(real_path) or not real_path.startswith(results_dir + os.sep):
+                raise ValueError(f'上游 {filename} 的 {field} 不属于已完成阶段结果')
+    return real_source
+
+
+def _prepare_wes_stage_run(pid, manifest, stage, *, parent_run=None, stage_options=None):
+    """Create one reviewable stage run; this never starts Nextflow."""
+    from modules.workflows.registry import get_workflow
+    from modules.workflows.sarek import write_launch_bundle
+    from modules.workflows.nextflow import NextflowExecutor, WorkflowNotConfiguredError
+    from modules.workflows.runs import create_workflow_run
+
+    workflow = get_workflow(stage['run_workflow_key'])
+    if not workflow:
+        raise ValueError(f"未登记 WES 阶段 workflow: {stage['run_workflow_key']}")
+    run_id = 'wesrun_' + uuid.uuid4().hex[:16]
+    run_root = os.path.join(Config.project_dir(pid), 'workflow_runs', run_id)
+    work_dir = os.path.join(run_root, 'work')
+    results_dir = os.path.join(run_root, 'results')
+    launch_dir = os.path.join(run_root, 'launch')
+    logs_dir = os.path.join(run_root, 'logs')
+    for directory in (work_dir, results_dir, launch_dir, logs_dir):
+        os.makedirs(directory, exist_ok=True)
+    samplesheet_path = os.path.join(launch_dir, 'samplesheet.csv')
+    source_sheet = _controlled_stage_samplesheet(parent_run, stage) if parent_run else ''
+    manifest_body = dict(manifest.get('manifest') or {})
+    if stage_options is not None:
+        if not isinstance(stage_options, dict):
+            raise ValueError('阶段参数必须是对象')
+        allowed = set(stage.get('parameter_keys') or ())
+        unexpected = sorted(set(stage_options) - allowed)
+        if unexpected:
+            raise ValueError('该 WES 阶段不支持参数: ' + ', '.join(unexpected))
+        selected_options = dict(manifest_body.get('pipeline_options') or {})
+        selected_options.update(stage_options)
+        manifest_body['pipeline_options'] = selected_options
+    manifest_samples = manifest_body.get('samples') or []
+    raw_input_types = {
+        str(sample.get('input_type') or '').strip().lower()
+        for sample in manifest_samples
+        if str(sample.get('input_type') or '').strip()
+    }
+    if not parent_run and len(raw_input_types) != 1:
+        raise ValueError('WES manifest 必须只包含一种已校验的 input_type')
+    raw_input_type = next(iter(raw_input_types), '')
+    executor = NextflowExecutor()
+    try:
+        launch = executor.prepare(
+            workflow, pid, run_id, manifest['id'], work_dir, results_dir,
+            samplesheet_path=samplesheet_path,
+            profile=Config.WES_NEXTFLOW_PROFILE,
+            stdout_path=os.path.join(logs_dir, 'stdout.log'),
+            stderr_path=os.path.join(logs_dir, 'stderr.log'),
+            intervals_path=manifest_body.get('capture_bed_path', ''),
+            input_type=raw_input_type if not parent_run else str(stage['input_kind']),
+            reference_bundle_id=manifest_body.get('reference_bundle_id', ''),
+            capture_bed_id=manifest_body.get('capture_bed_id', ''),
+            pipeline_options=manifest_body.get('pipeline_options') or {},
+            stage_key=stage['key'],
+            analysis_workflow_key=stage['analysis_workflow_key'],
+        )
+    except (ValueError, WorkflowNotConfiguredError) as exc:
+        raise ValueError(f'WES 阶段固定参数无效: {exc}') from exc
+    try:
+        bundle = write_launch_bundle(
+            run_root, workflow=workflow.to_dict(), run_id=run_id, project_id=pid,
+            # Preserve the originally registered manifest ID and checksum in
+            # provenance, while storing the stage-specific parameter snapshot
+            # that was actually reviewed for this independent run.
+            manifest_record={**manifest, 'manifest': manifest_body},
+            launch=launch.to_dict(), parameters=launch.parameters,
+            profile=Config.WES_NEXTFLOW_PROFILE, samplesheet_source=source_sheet,
+        )
+    except (OSError, ValueError) as exc:
+        raise ValueError(f'WES 阶段 launch bundle 生成失败: {exc}') from exc
+    launch_payload = launch.to_dict()
+    launch_payload['bundle'] = bundle
+    launch_payload['stage'] = stage
+    if parent_run:
+        launch_payload['parent_run_id'] = parent_run['id']
+    record = create_workflow_run(
+        pid, workflow.key, manifest['id'], run_id=run_id, status='prepared',
+        launch=launch_payload, executor=workflow.executor, workflow_release=workflow.release,
+        profile=Config.WES_NEXTFLOW_PROFILE, run_dir=run_root,
+        stdout_path=launch.stdout_path, stderr_path=launch.stderr_path,
+        provenance={
+            'workflow_release': workflow.release,
+            'executor': workflow.executor,
+            'profile': Config.WES_NEXTFLOW_PROFILE,
+            'manifest_checksum': manifest.get('checksum', ''),
+            'bundle_checksums': bundle.get('checksums', {}),
+            'stage_key': stage['key'],
+            'parent_run_id': parent_run['id'] if parent_run else '',
+        },
+    )
+    return record, launch_payload
+
+
+@api_bp.route('/projects/<pid>/wes/stages/prepare', methods=['POST'])
+def prepare_first_wes_stage(pid):
+    """Prepare the first explicit preprocessing/mapping stage."""
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    payload = request.get_json(silent=True) or {}
+    workflow_key = str(payload.get('workflow_key', '') or '').strip()
+    manifest_id = str(payload.get('manifest_id', '') or '').strip()
+    from modules.workflows.stages import first_stage, get_stage
+    from modules.workflows.storage import get_manifest
+    manifest = get_manifest(manifest_id, pid) if manifest_id else None
+    if not manifest:
+        return jsonify({'error': '需要有效的胚系/体细胞 workflow_key 和 manifest_id'}), 422
+    input_types = {
+        str(sample.get('input_type') or '').strip().lower()
+        for sample in (manifest.get('manifest') or {}).get('samples') or []
+        if str(sample.get('input_type') or '').strip()
+    }
+    if len(input_types) != 1:
+        return jsonify({'error': 'WES manifest 必须只包含一种已校验的 input_type'}), 422
+    input_type = next(iter(input_types))
+    # FASTQ requires preprocessing/mapping.  Existing BAM/CRAM submissions
+    # retain their supported path and enter at caller stage, rather than being
+    # forced through an invalid FASTQ-only mapping stage.
+    stage = first_stage(workflow_key) if input_type == 'fastq' else get_stage('variant_calling', workflow_key)
+    if input_type not in {'fastq', 'bam', 'cram'} or not stage:
+        return jsonify({'error': '仅支持已校验的 FASTQ、BAM 或 CRAM WES manifest'}), 422
+    try:
+        record, launch = _prepare_wes_stage_run(pid, manifest, stage)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 422
+    return jsonify({
+        'run': record, 'launch': launch, 'stage': stage,
+        'message': f"已准备“{stage['title']}”的 LaunchSpec；尚未启动 Nextflow。",
+    }), 201
+
+
+@api_bp.route('/projects/<pid>/wes/runs/<run_id>/next-stage/prepare', methods=['POST'])
+def prepare_next_wes_stage(pid, run_id):
+    """Prepare exactly the next stage from a completed, controlled Sarek output."""
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    from modules.workflows.runs import get_workflow_run
+    from modules.workflows.storage import get_manifest
+    from modules.workflows.stages import next_stage, stage_from_launch
+    parent = get_workflow_run(run_id, pid)
+    if not parent:
+        return jsonify({'error': 'WES run 不存在'}), 404
+    if parent.get('status') != 'completed':
+        return jsonify({'error': '仅已完成的 WES 阶段可以进入下一步', 'run': parent}), 409
+    current_stage = stage_from_launch(parent.get('launch') or {})
+    if not current_stage:
+        return jsonify({'error': '该 run 不是可串联的分步 WES run'}), 422
+    stage = next_stage(current_stage['key'], current_stage['analysis_workflow_key'])
+    if not stage:
+        return jsonify({'error': '当前 WES 阶段已经是最终步骤'}), 409
+    manifest = get_manifest(parent.get('manifest_id', ''), pid)
+    if not manifest:
+        return jsonify({'error': '上游 run 的 manifest 不存在'}), 422
+    payload = request.get_json(silent=True) or {}
+    try:
+        record, launch = _prepare_wes_stage_run(
+            pid, manifest, stage, parent_run=parent,
+            stage_options=payload.get('pipeline_options') if 'pipeline_options' in payload else None,
+        )
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 422
+    return jsonify({
+        'run': record, 'launch': launch, 'stage': stage,
+        'message': f"已准备“{stage['title']}”的 LaunchSpec；尚未启动 Nextflow。",
+    }), 201
+
+
 @api_bp.route('/projects/<pid>/wes/runs/prepare', methods=['POST'])
 def prepare_wes_run(pid):
     """Create a reproducible, reviewable launch bundle without starting Nextflow."""
@@ -1005,6 +1255,7 @@ def prepare_wes_run(pid):
             input_type=input_type,
             reference_bundle_id=(manifest.get('manifest') or {}).get('reference_bundle_id', ''),
             capture_bed_id=(manifest.get('manifest') or {}).get('capture_bed_id', ''),
+            pipeline_options=(manifest.get('manifest') or {}).get('pipeline_options') or {},
         )
     except (ValueError, WorkflowNotConfiguredError) as exc:
         return jsonify({'error': f'WES 固定运行参数无效: {exc}'}), 422
@@ -1068,6 +1319,9 @@ def launch_wes_run(pid, run_id):
             input_type=launch.get('input_type', ''),
             reference_bundle_id=launch.get('reference_bundle_id', ''),
             capture_bed_id=launch.get('capture_bed_id', ''),
+            pipeline_options=launch.get('pipeline_options') or {},
+            stage_key=launch.get('stage_key', ''),
+            analysis_workflow_key=launch.get('analysis_workflow_key', ''),
         )
         runtime = executor.launch(spec, project_id=pid)
     except (ValueError, WorkflowNotConfiguredError) as exc:
@@ -1124,6 +1378,9 @@ def resume_wes_run(pid, run_id):
             resume=True,
             reference_bundle_id=launch.get('reference_bundle_id', ''),
             capture_bed_id=launch.get('capture_bed_id', ''),
+            pipeline_options=launch.get('pipeline_options') or {},
+            stage_key=launch.get('stage_key', ''),
+            analysis_workflow_key=launch.get('analysis_workflow_key', ''),
         )
         runtime = executor.launch(
             spec, project_id=pid,
@@ -1206,6 +1463,14 @@ def wes_preflight(pid):
     # explicitly and remain blocked at production launch unless catalogued.
     capture_profile = None
     if isinstance(manifest, dict):
+        from modules.workflows.guided import normalize_guided_options
+        try:
+            manifest = dict(manifest)
+            manifest['pipeline_options'] = normalize_guided_options(
+                manifest.get('pipeline_options'), workflow_key
+            )
+        except ValueError as exc:
+            return jsonify({'valid': False, 'errors': [str(exc)], 'warnings': []}), 422
         capture_id = str(manifest.get('capture_bed_id', '') or '').strip()
         if capture_id:
             from modules.workflows.references import get_capture_kit_profile
@@ -1229,7 +1494,16 @@ def wes_preflight(pid):
         require_files=bool(payload.get('check_files', True)),
         source_roots=Config.wes_source_roots(),
         content_checks=bool(payload.get('check_content', False)),
+        full_fastq_integrity=bool(payload.get('full_fastq_integrity', False)),
     )
+    # Reject a mistyped display label before it becomes an immutable manifest.
+    # The full checksum/path readiness check remains at the actual launch gate.
+    if result.valid and Config.WES_EXECUTOR_ENABLED:
+        from modules.workflows.references import list_reference_assets
+        bundle_id = str((result.normalized_manifest or {}).get('reference_bundle_id', '') or '')
+        if not list_reference_assets(bundle_version=bundle_id, status='validated'):
+            result.valid = False
+            result.errors.append(f'reference_bundle_id 未匹配已认证的 bundle: {bundle_id}')
     if capture_profile and not capture_profile.get('production_allowed'):
         result.warnings.append(
             f"capture kit profile {capture_profile['capture_kit_id']} 仅为 "
@@ -1251,123 +1525,180 @@ def wes_preflight(pid):
 
 # ============ Pipeline Run API ============
 
-@api_bp.route('/projects/<pid>/pipeline-runs', methods=['POST'])
-def create_pipeline_run(pid):
-    """创建并启动 pipeline run。"""
+def _build_pipeline_submission(pid, data):
+    """Validate one constrained SC/Bulk pipeline submission.
+
+    This is shared by the manual API and saved-template launcher.  A template
+    may choose only registered module names and schema-recognised parameters;
+    it cannot become an alternate route for arbitrary worker code or file
+    paths.
+    """
     from modules import MODULE_REGISTRY, SC_MODULE_NAMES, BULK_MODULE_NAMES, validate_pipeline_order
+    from modules.schemas import PARAM_SCHEMAS, filter_active_params
+
+    if not isinstance(data, Mapping):
+        raise ValueError('请求体必须是对象')
+    name = str(data.get('name', '') or '').strip()
+    analysis_type = str(data.get('analysis_type', '') or '').strip()
+    modules = data.get('modules', [])
+    params = data.get('params', {})
+    input_path = str(data.get('input_path', '') or '').strip()
+
+    if not name:
+        raise ValueError('缺少流程名称')
+    if len(name) > 160:
+        raise ValueError('流程名称不能超过 160 个字符')
+    if analysis_type not in {'sc', 'bulk'}:
+        raise ValueError('analysis_type 必须是 sc 或 bulk')
+    if not isinstance(modules, list) or not modules:
+        raise ValueError('模块列表为空')
+    if any(not isinstance(module, str) or not module.strip() for module in modules):
+        raise ValueError('模块列表包含无效项')
+    if len(set(modules)) != len(modules):
+        raise ValueError('流程模板不能重复包含同一模块')
+    if not isinstance(params, Mapping):
+        raise ValueError('流程参数必须是对象')
+    if not input_path:
+        raise ValueError('缺少输入文件路径')
+
+    module_set = SC_MODULE_NAMES if analysis_type == 'sc' else BULK_MODULE_NAMES
+    for module in modules:
+        if module not in MODULE_REGISTRY:
+            raise ValueError(f'未知模块: {module}')
+        if module not in module_set:
+            raise ValueError(f'模块 {module} 不属于 {analysis_type} 类型')
+    is_valid, errors = validate_pipeline_order(modules)
+    if not is_valid:
+        raise ValueError('模块顺序不满足依赖约束: ' + '；'.join(errors))
+
+    project_dir = os.path.abspath(Config.project_dir(pid))
+    abs_input = os.path.abspath(input_path)
+    valid_path, error = Config._validate_path(abs_input, pid)
+    if not valid_path or not abs_input.startswith(project_dir + os.sep):
+        raise ValueError(error or '输入文件不在项目目录内')
+    if os.path.islink(abs_input):
+        raise ValueError('输入文件不能是符号链接')
+    if not os.path.isfile(abs_input):
+        raise ValueError('输入文件不存在')
+
+    # Templates saved by older page versions contain a flat object.  Apply
+    # those values to every matching module *after* default construction;
+    # applying them only when a default is absent silently ignored templates.
+    params_by_module = {}
+    module_keys = set(MODULE_REGISTRY)
+    flat_params = {
+        key: value for key, value in params.items()
+        if key not in module_keys
+    }
+    for module in modules:
+        schema = PARAM_SCHEMAS.get(module, [])
+        schema_keys = {field['key'] for field in schema}
+        default_params = {}
+        for field in schema:
+            default = field.get('default')
+            if field.get('type') == 'select' and field.get('options'):
+                options = field['options']
+                if default not in options:
+                    default = options[0]
+            default_params[field['key']] = default
+        module_params = params.get(module)
+        if module_params is not None:
+            if not isinstance(module_params, Mapping):
+                raise ValueError(f'{module} 的参数必须是对象')
+            default_params.update({
+                key: value for key, value in module_params.items()
+                if key in schema_keys
+            })
+        default_params.update({
+            key: value for key, value in flat_params.items()
+            if key in schema_keys
+        })
+        params_by_module[module] = filter_active_params(schema, default_params)
+    return {
+        'name': name,
+        'analysis_type': analysis_type,
+        'modules': modules,
+        'params_by_module': params_by_module,
+        'input_path': abs_input,
+        'project_dir': project_dir,
+    }
+
+
+def _start_pipeline_submission(pid, data):
+    """Persist and submit a validated pipeline to the existing background worker."""
     from models import PipelineRun
     from worker import submit_pipeline_run
 
-    # 校验项目
-    p = Project.get_by_id(pid)
-    if not p:
-        return jsonify({'error': '项目不存在'}), 404
-
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': '请求体为空'}), 400
-
-    # 解析参数
-    name = data.get('name', '').strip()
-    analysis_type = data.get('analysis_type', '').strip()
-    modules = data.get('modules', [])
-    params = data.get('params', {})
-    input_path = data.get('input_path', '').strip()
-
-    # 校验必填字段
-    if not name:
-        return jsonify({'error': '缺少流程名称'}), 400
-    if not analysis_type:
-        return jsonify({'error': '缺少分析类型'}), 400
-    if not modules:
-        return jsonify({'error': '模块列表为空'}), 400
-    if not input_path:
-        return jsonify({'error': '缺少输入文件路径'}), 400
-
-    # 校验 analysis_type
-    if analysis_type not in ('sc', 'bulk'):
-        return jsonify({'error': 'analysis_type 必须是 sc 或 bulk'}), 400
-
-    # 校验模块类型
-    module_set = SC_MODULE_NAMES if analysis_type == 'sc' else BULK_MODULE_NAMES
-    for mod in modules:
-        if mod not in MODULE_REGISTRY:
-            return jsonify({'error': f'未知模块: {mod}'}), 400
-        if mod not in module_set:
-            return jsonify({'error': f'模块 {mod} 不属于 {analysis_type} 类型'}), 400
-
-    # 校验依赖顺序
-    is_valid, errors = validate_pipeline_order(modules)
-    if not is_valid:
-        return jsonify({'error': '模块顺序不满足依赖约束', 'details': errors}), 400
-
-    # 校验输入文件路径
-    abs_input = os.path.abspath(input_path)
-    project_dir = os.path.abspath(Config.project_dir(pid))
-    if not abs_input.startswith(project_dir + os.sep):
-        return jsonify({'error': '输入文件不在项目目录内'}), 400
-    if os.path.islink(abs_input):
-        return jsonify({'error': '输入文件不能是符号链接'}), 400
-    if not os.path.isfile(abs_input):
-        return jsonify({'error': '输入文件不存在'}), 400
-
-    # 构建参数（从 schema 默认值 + 请求参数合并）
-    from modules.schemas import PARAM_SCHEMAS, filter_active_params
-    params_by_module = {}
-    for mod in modules:
-        # 从 schema 获取默认值
-        schema = PARAM_SCHEMAS.get(mod, [])
-        default_params = {}
-        for field in schema:
-            key = field['key']
-            default = field.get('default')
-            if field.get('type') == 'select' and 'options' in field:
-                opts = field['options']
-                if default not in opts and opts:
-                    default = opts[0]
-            default_params[key] = default
-        # 合并请求参数（新形态：按模块名分组）
-        if mod in params:
-            module_params = params[mod]
-            if isinstance(module_params, dict):
-                default_params.update(module_params)
-        # 兼容旧形态：扁平参数应用到所有匹配的模块
-        for key, val in params.items():
-            if key not in ('qc', 'normalize', 'hvg', 'dimred', 'batch_correct',
-                          'clustering', 'subcluster', 'qc_reassess', 'annotation', 'deg',
-                          'sc_cell_deg', 'sc_cell_go', 'sc_pseudobulk_deg', 'trajectory', 'sc_timecourse', 'proportion', 'cell_communication',
-                          'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca',
-                          'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
-                          'bulk_deg_integration', 'convert_10x'):
-                if isinstance(val, (str, int, float, bool)):
-                    # 检查该模块的 schema 是否有这个 key
-                    schema_keys = {f['key'] for f in PARAM_SCHEMAS.get(mod, [])}
-                    if key in schema_keys and key not in default_params:
-                        default_params[key] = val
-        params_by_module[mod] = filter_active_params(schema, default_params)
-
-    # 创建 PipelineRun
+    submission = _build_pipeline_submission(pid, data)
     pipeline_run = PipelineRun(
         project_id=pid,
-        name=name,
-        analysis_type=analysis_type,
-        input_path=input_path,
-        modules_json=json.dumps(modules),
-        params_json=json.dumps(params_by_module, ensure_ascii=False)
+        name=submission['name'],
+        analysis_type=submission['analysis_type'],
+        input_path=submission['input_path'],
+        modules_json=json.dumps(submission['modules']),
+        params_json=json.dumps(submission['params_by_module'], ensure_ascii=False),
     )
     pipeline_run.save()
-
-    # 提交到线程池
     submit_pipeline_run(
         run_id=pipeline_run.id,
         project_id=pid,
-        modules=modules,
-        params_by_module=params_by_module,
-        project_dir=project_dir,
-        input_path=abs_input
+        modules=submission['modules'],
+        params_by_module=submission['params_by_module'],
+        project_dir=submission['project_dir'],
+        input_path=submission['input_path'],
     )
+    return pipeline_run, submission
 
+@api_bp.route('/projects/<pid>/pipeline-runs', methods=['POST'])
+def create_pipeline_run(pid):
+    """创建并启动 pipeline run。"""
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': '请求体为空'}), 400
+    try:
+        pipeline_run, _ = _start_pipeline_submission(pid, data)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
     return jsonify({'id': pipeline_run.id, 'message': '流程已启动'}), 201
+
+
+@api_bp.route('/projects/<pid>/pipeline-templates/<preset_id>/run', methods=['POST'])
+def run_pipeline_template(pid, preset_id):
+    """Start a saved SC/Bulk template without trusting browser-supplied steps.
+
+    The user still explicitly clicks the launch control, while the server reads
+    the modules and parameters from the saved template and applies the same
+    path, dependency and schema validation as the normal pipeline endpoint.
+    """
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    template = _load_accessible_preset(preset_id, pid)
+    if not template:
+        return jsonify({'error': '流程模板不存在'}), 404
+    pipeline = template.get('pipeline')
+    if not isinstance(pipeline, Mapping) or not pipeline.get('modules'):
+        return jsonify({'error': '该预设不是可运行的流程模板'}), 422
+    request_data = request.get_json(silent=True) or {}
+    payload = {
+        'name': str(template.get('name') or '').strip(),
+        'analysis_type': template.get('analysis_type'),
+        'modules': pipeline.get('modules'),
+        'params': template.get('params') or {},
+        'input_path': request_data.get('input_path', ''),
+    }
+    try:
+        pipeline_run, submission = _start_pipeline_submission(pid, payload)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 422
+    return jsonify({
+        'id': pipeline_run.id,
+        'template_id': preset_id,
+        'template_scope': template.get('_scope'),
+        'modules': submission['modules'],
+        'message': '流程模板已在后台启动。',
+    }), 201
 
 
 @api_bp.route('/projects/<pid>/pipeline-runs')

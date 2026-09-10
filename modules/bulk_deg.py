@@ -293,6 +293,54 @@ def _welch_ttest_log_expression(data, group1_samples, group2_samples, padj_metho
     }, index=data.index)
 
 
+def _comparison_filter_diagnostics(deg_df, fc_threshold, padj_threshold):
+    """Explain, per comparison, why genes did or did not become DEG calls."""
+    log2fc_threshold = float(np.log2(max(float(fc_threshold), np.finfo(float).tiny)))
+    pvalues = pd.to_numeric(deg_df.get('pvalue', pd.Series(dtype=float)), errors='coerce').to_numpy(dtype=float)
+    padj = pd.to_numeric(deg_df.get('padj', pd.Series(dtype=float)), errors='coerce').to_numpy(dtype=float)
+    log2fc = pd.to_numeric(deg_df.get('log2FC', pd.Series(dtype=float)), errors='coerce').to_numpy(dtype=float)
+
+    finite_pvalue = np.isfinite(pvalues)
+    finite_padj = np.isfinite(padj)
+    finite_log2fc = np.isfinite(log2fc)
+    # Prefer the unrounded, exact gate calls retained by _run_single_comparison.
+    # Falling back to numerical reconstruction keeps this helper useful for
+    # legacy result CSVs that predate these columns.
+    if 'passes_padj' in deg_df.columns:
+        passes_padj = deg_df['passes_padj'].fillna(False).astype(bool).to_numpy()
+    else:
+        passes_padj = finite_padj & (padj < float(padj_threshold))
+    if 'passes_fc' in deg_df.columns:
+        passes_fc = deg_df['passes_fc'].fillna(False).astype(bool).to_numpy()
+    else:
+        passes_fc = finite_log2fc & (np.abs(log2fc) >= log2fc_threshold)
+    if 'significant' in deg_df.columns:
+        both = deg_df['significant'].fillna(False).astype(bool).to_numpy()
+    else:
+        both = passes_padj & passes_fc
+
+    def _minimum(values, mask):
+        return float(np.min(values[mask])) if np.any(mask) else None
+
+    abs_log2fc = np.abs(log2fc[finite_log2fc])
+    return {
+        'n_tested_genes': int(len(deg_df)),
+        'n_raw_p_lt_0_05': int(np.sum(finite_pvalue & (pvalues < 0.05))),
+        'n_raw_p_lt_threshold': int(np.sum(finite_pvalue & (pvalues < float(padj_threshold)))),
+        'n_padj_lt_threshold': int(np.sum(passes_padj)),
+        'n_abs_log2fc_ge_threshold': int(np.sum(passes_fc)),
+        'n_both_padj_and_fc': int(np.sum(both)),
+        'min_pvalue': _minimum(pvalues, finite_pvalue),
+        'min_padj': _minimum(padj, finite_padj),
+        'max_abs_log2fc': float(np.max(abs_log2fc)) if abs_log2fc.size else None,
+        'median_abs_log2fc': float(np.median(abs_log2fc)) if abs_log2fc.size else None,
+        'effective_log2fc_threshold': log2fc_threshold,
+        'significance_metric': 'padj',
+        'padj_threshold': float(padj_threshold),
+        'multiple_testing_scope': 'per_comparison',
+    }
+
+
 def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1, group2,
                            method, fc_threshold, pval_threshold, top_n, gene_id_to_name,
                            plots_dir, results_dir, suffix='', viz_params=None,
@@ -375,16 +423,16 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         _, padj, _, _ = multipletests(np.nan_to_num(pvalues, nan=1.0), method=padj_method)
     n_genes = len(gene_names)
 
-    # Regulation direction
-    log2fc_threshold = np.log2(fc_threshold)
-    regulation = []
-    for i in range(n_genes):
-        if padj[i] < pval_threshold and log2fc[i] >= log2fc_threshold:
-            regulation.append('Up')
-        elif padj[i] < pval_threshold and log2fc[i] <= -log2fc_threshold:
-            regulation.append('Down')
-        else:
-            regulation.append('NS')
+    # A FC entered as 2 means |log2FC| >= log2(2) = 1, not >= 2.
+    log2fc_threshold = np.log2(max(float(fc_threshold), np.finfo(float).tiny))
+    finite_padj = np.isfinite(padj)
+    finite_log2fc = np.isfinite(log2fc)
+    passes_padj = finite_padj & (padj < pval_threshold)
+    passes_fc = finite_log2fc & (np.abs(log2fc) >= log2fc_threshold)
+    significant = passes_padj & passes_fc
+    regulation = np.full(n_genes, 'NS', dtype=object)
+    regulation[significant & (log2fc >= log2fc_threshold)] = 'Up'
+    regulation[significant & (log2fc <= -log2fc_threshold)] = 'Down'
 
     # Group means — 使用 dds 去重后的数据计算（避免重复基因均值错位）
     if not hasattr(dds, 'data') or dds.data is None:
@@ -404,6 +452,9 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         'padj': padj,
         'mean_group1': np.round(mean1, 2),
         'mean_group2': np.round(mean2, 2),
+        'passes_padj': passes_padj,
+        'passes_fc': passes_fc,
+        'significant': significant,
         'regulation': regulation
     })
     deg_df = deg_df.sort_values('padj')
@@ -637,6 +688,22 @@ class BulkDEGAnalysis(BaseAnalysis):
         auto_comparisons = self.params.get('auto_comparisons', 'manual')
         reference_group = self.params.get('reference_group', '').strip()
         test_type = self.params.get('test_type', 'pairwise')
+        if not np.isfinite(fc_threshold) or fc_threshold <= 0:
+            raise ValueError('fc_threshold 必须是大于 0 的 Fold Change。')
+        if not np.isfinite(pval_threshold) or not 0 < pval_threshold <= 1:
+            raise ValueError('padj 显著性阈值必须在 (0, 1] 范围内。')
+        threshold_summary = {
+            # Retain the historical keys while making their meanings explicit
+            # in every manifest consumed by the UI or an audit script.
+            'fc_threshold': fc_threshold,
+            'fc_threshold_input': fc_threshold,
+            'effective_log2fc_threshold': float(np.log2(fc_threshold)),
+            'pval_threshold': pval_threshold,
+            'padj_threshold': pval_threshold,
+            'significance_metric': 'padj',
+            'padj_method': padj_method,
+            'multiple_testing_scope': 'per_comparison',
+        }
 
         self.progress(15, "构建计数矩阵...")
 
@@ -892,6 +959,9 @@ class BulkDEGAnalysis(BaseAnalysis):
                 per_comparison[comp_name] = {
                     'n_up': int((deg_df['regulation'] == 'Up').sum()),
                     'n_down': int((deg_df['regulation'] == 'Down').sum()),
+                    'filter_diagnostics': _comparison_filter_diagnostics(
+                        deg_df, fc_threshold, pval_threshold,
+                    ),
                 }
 
             summary = {
@@ -903,8 +973,7 @@ class BulkDEGAnalysis(BaseAnalysis):
                 'shared_up_genes': shared_up,
                 'shared_down_genes': shared_down,
                 'skipped_comparisons': skipped,
-                'fc_threshold': fc_threshold,
-                'pval_threshold': pval_threshold,
+                **threshold_summary,
                 'lrt_n_sig': lrt_n_sig,
                 'input_measurement': input_measurement,
                 'auto_transform': 'log2(x+1)' if auto_log2_continuous else None,
@@ -953,8 +1022,10 @@ class BulkDEGAnalysis(BaseAnalysis):
                 'n_genes_total': len(deg_df),
                 'n_up': n_up,
                 'n_down': n_down,
-                'fc_threshold': fc_threshold,
-                'pval_threshold': pval_threshold,
+                'filter_diagnostics': _comparison_filter_diagnostics(
+                    deg_df, fc_threshold, pval_threshold,
+                ),
+                **threshold_summary,
                 'lrt_n_sig': lrt_n_sig,
                 'input_measurement': input_measurement,
                 'auto_transform': 'log2(x+1)' if auto_log2_continuous else None,

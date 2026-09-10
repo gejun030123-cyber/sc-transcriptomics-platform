@@ -7,8 +7,9 @@
 
 | 研究问题 | 平台入口 | 统计单位与结论边界 |
 | --- | --- | --- |
+| 注释后各细胞类型的 marker / 富集 | `细胞类型 / 簇 Marker（探索性）`；留空分组时自动使用 `celltype`，随后在 `通路富集（绑定 DEG 任务）` 中选择该任务 | 细胞；celltype-versus-rest 用于注释与功能描述，不能替代样本级条件推断。 |
 | 同一样本的不同簇 | 细胞级探索性比较：`within_sample_clusters` | 细胞；用于 marker/状态描述，不报告生物学样本推断。 |
-| 不同样本的同一簇 | 细胞级探索性比较：`between_samples_within_cluster`；有条件组重复时用 per-cluster pseudobulk | 单样本对只能描述；正式条件结论使用样本×簇 pseudobulk。 |
+| 不同样本的同一细胞类型 / 簇 | 细胞级探索性比较：`between_samples_within_cluster`；有条件组重复时用 per-celltype pseudobulk | 单样本对只能描述；正式条件结论使用样本×细胞类型 pseudobulk。 |
 | 不同样本全部细胞 | 细胞级探索性比较：`between_samples_all_cells`；有条件组重复时用 all-cells pseudobulk | 整体 pseudobulk 也可能受细胞组成变化影响，需结合比例分析解释。 |
 | 不同条件 | 细胞级条件比较用于探索；pseudobulk 用于正式结论 | 前者不把细胞当重复；后者以独立生物学样本为重复。 |
 
@@ -23,6 +24,8 @@ DESeq2 拟合失败，对应单元会明确标记为不可运行/模型失败；
 
 富集必须从页面中选择一个已经完成的 DEG 任务。系统读取该任务记录的
 内部结果和 AnnData 版本，拒绝混用，不再按目录中“最新 CSV”推断来源。
+注释后生成的 celltype marker 任务同样会提供任务专属的内部全基因表；
+富集选择器会显示“细胞类型分组”，并将每个 celltype 作为可选运行范围。
 
 ## 批量基因集富集
 

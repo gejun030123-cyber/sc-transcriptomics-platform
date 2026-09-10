@@ -62,6 +62,7 @@ def test_batch_zip_endpoint_defaults_sample_id_to_batch_name(test_project, monke
     from app import create_app
     from config import Config
     from models import AnalysisTask
+    from werkzeug.datastructures import MultiDict
 
     submitted = []
     import worker

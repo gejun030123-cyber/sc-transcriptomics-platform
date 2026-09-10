@@ -20,7 +20,10 @@ def new():
             os.makedirs(os.path.join(proj_dir, sub), exist_ok=True)
         p.save()
         flash(f'项目 "{name}" 已创建', 'success')
-        return redirect(url_for('projects.detail', pid=p.id))
+        # A newly created project has no useful dashboard state yet.  Enter
+        # the agent workspace immediately so the researcher can provide the
+        # biological question and upload data in the same place.
+        return redirect(url_for('workspace.index', pid=p.id))
     return render_template('project_new.html')
 
 @projects_bp.route('/<pid>')

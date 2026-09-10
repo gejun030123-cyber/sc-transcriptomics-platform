@@ -27,6 +27,7 @@ import pandas as pd
 
 from modules.base import BaseAnalysis
 from modules.figure_style import NATURE_PALETTE, nature_continuous_cmap
+from modules.gene_set_registry import load_selected_managed_gene_sets
 from modules.native_figures import heatmap_figure, marker_dotplot_figure
 from modules.sc_de_utils import _matrix_is_raw_counts, log1p_expression_from_counts
 
@@ -64,24 +65,41 @@ GENE_EXPRESSION_PANEL_SECTIONS = {
     "Regulatory TF genes": METABOLIC_TF_GENES,
     "Carnitine shuttle": ("CPT1A", "CPT2", "SLC25A20"),
     "Mitochondrial beta-oxidation": ("ACADM", "ACADVL", "ACADS", "HADHA", "HADHB", "ECHS1", "ETFDH", "ACAA2"),
-    "Peroxisomal FAO": ("ACOX1", "EHHADH", "ACAA1", "HSD17B4", "ABCD3", "SCP2"),
-    "Lipid transport": ("FABP1", "FABP2", "SLC27A2"),
+    "Peroxisomal lipid metabolism (FAO)": ("ACOX1", "EHHADH", "ACAA1", "HSD17B4", "ABCD3", "SCP2"),
+    "Intracellular epithelial FA transport": ("FABP1", "FABP2", "SLC27A2"),
     "Ketogenesis": ("HMGCS2", "HMGCL", "BDH1"),
-    "Inflammation": INFLAMMATORY_GENES,
+    "Acute myeloid chemokine inflammation": INFLAMMATORY_GENES,
 }
 DEFAULT_EXPRESSION_GENES = tuple(dict.fromkeys(
     gene for genes in GENE_EXPRESSION_PANEL_SECTIONS.values() for gene in genes
 ))
 
-PPARA_TARGET_MODULE_NAME = "Curated PPARA-target module"
+PPARA_TARGET_MODULE_NAME = "PPARA-associated lipid-oxidation programme"
+CARNITINE_SHUTTLE_MODULE_NAME = "Carnitine shuttle (mitochondrial FA entry)"
+PEROXISOMAL_LIPID_METABOLISM_MODULE_NAME = "Peroxisomal lipid metabolism (FAO)"
+INTRACELLULAR_FA_TRANSPORT_MODULE_NAME = "Intracellular epithelial FA transport"
+ACUTE_MYELOID_INFLAMMATION_MODULE_NAME = "Acute myeloid chemokine inflammation"
+TYPE_I_II_IFN_MODULE_NAME = "Type I and II IFN response"
+
+# A renamed built-in module must not invalidate saved heatmap, correlation or
+# concordance selections.  These aliases only resolve user-provided feature
+# names; new outputs and manifests always contain the more precise names.
+LEGACY_BUILTIN_PATHWAY_NAMES = {
+    "Curated PPARA-target module": PPARA_TARGET_MODULE_NAME,
+    "FA import": CARNITINE_SHUTTLE_MODULE_NAME,
+    "Peroxisomal FAO": PEROXISOMAL_LIPID_METABOLISM_MODULE_NAME,
+    "FA transport": INTRACELLULAR_FA_TRANSPORT_MODULE_NAME,
+    "Inflammatory response": ACUTE_MYELOID_INFLAMMATION_MODULE_NAME,
+    "IFN response": TYPE_I_II_IFN_MODULE_NAME,
+}
 DEFAULT_CONCORDANCE_TF_FEATURES = (
     "PPARA activity", "HNF4A activity", "ESRRA activity",
     "RELA activity", "STAT1 activity", "IRF1 activity",
 )
 DEFAULT_CONCORDANCE_PATHWAY_FEATURES = (
-    "FA import score", "Mitochondrial beta-oxidation score",
-    "Peroxisomal FAO score", "Inflammatory response score",
-    "TNF-NFkB response score", "IFN response score",
+    f"{CARNITINE_SHUTTLE_MODULE_NAME} score", "Mitochondrial beta-oxidation score",
+    f"{PEROXISOMAL_LIPID_METABOLISM_MODULE_NAME} score", f"{ACUTE_MYELOID_INFLAMMATION_MODULE_NAME} score",
+    "TNF-NFkB response score", f"{TYPE_I_II_IFN_MODULE_NAME} score",
 )
 
 
@@ -95,17 +113,50 @@ BUILTIN_PATHWAYS = {
         "HSD17B4", "ABCD3", "SCP2", "FABP1", "FABP2", "SLC27A2", "HMGCS2",
         "HMGCL", "BDH1",
     ),
-    "FA import": ("CPT1A", "CPT2", "SLC25A20"),
+    CARNITINE_SHUTTLE_MODULE_NAME: ("CPT1A", "CPT2", "SLC25A20"),
     "Mitochondrial beta-oxidation": (
         "ACADM", "ACADVL", "ACADS", "HADHA", "HADHB", "ECHS1", "ETFDH", "ACAA2",
     ),
-    "Peroxisomal FAO": ("ACOX1", "EHHADH", "ACAA1", "HSD17B4", "ABCD3", "SCP2"),
-    "FA transport": ("FABP1", "FABP2", "SLC27A2"),
+    PEROXISOMAL_LIPID_METABOLISM_MODULE_NAME: ("ACOX1", "EHHADH", "ACAA1", "HSD17B4", "ABCD3", "SCP2"),
+    INTRACELLULAR_FA_TRANSPORT_MODULE_NAME: ("FABP1", "FABP2", "SLC27A2"),
     "Ketogenesis": ("HMGCS2", "HMGCL", "BDH1"),
-    "Inflammatory response": INFLAMMATORY_GENES,
+    ACUTE_MYELOID_INFLAMMATION_MODULE_NAME: INFLAMMATORY_GENES,
     "TNF-NFkB response": TNF_NFKB_RESPONSE_GENES,
-    "IFN response": ("STAT1", "IRF1", "IRF7", "CXCL10", "ISG15", "IFIT1", "IFIT3", "MX1", "OAS1"),
+    TYPE_I_II_IFN_MODULE_NAME: ("STAT1", "IRF1", "IRF7", "CXCL10", "ISG15", "IFIT1", "IFIT3", "MX1", "OAS1"),
 }
+
+# This focused panel is opt-in.  It is intentionally not an automatic cell
+# annotation and the three short epithelial signatures remain hypothesis
+# scores; the standard Hallmark terms below are loaded from the frozen local
+# registry when this focus is selected.
+IBD_EPITHELIAL_QUICK_PATHWAYS = {
+    "Mature absorptive/enterocyte differentiation": (
+        "ALPI", "KRT20", "FABP1", "FABP2", "APOA4", "SI", "DPP4", "VIL1", "CA1",
+    ),
+    "Stem/TA regenerative state": (
+        "LGR5", "OLFM4", "SMOC2", "ASCL2", "SOX9", "EPCAM", "MKI67", "TOP2A",
+    ),
+    "Cell-cycle proliferation": (
+        "MKI67", "TOP2A", "CDK1", "CCNB1", "UBE2C", "TYMS", "HMGB2", "TUBA1B",
+    ),
+}
+IBD_EPITHELIAL_MANAGED_TERMS = (
+    "HALLMARK_INFLAMMATORY_RESPONSE",
+    "HALLMARK_TNFA_SIGNALING_VIA_NFKB",
+    "HALLMARK_INTERFERON_ALPHA_RESPONSE",
+    "HALLMARK_INTERFERON_GAMMA_RESPONSE",
+    "HALLMARK_HYPOXIA",
+    "HALLMARK_REACTIVE_OXYGEN_SPECIES_PATHWAY",
+    "HALLMARK_UNFOLDED_PROTEIN_RESPONSE",
+    "HALLMARK_APOPTOSIS",
+    "HALLMARK_OXIDATIVE_PHOSPHORYLATION",
+    "HALLMARK_FATTY_ACID_METABOLISM",
+    "HALLMARK_CHOLESTEROL_HOMEOSTASIS",
+    "HALLMARK_BILE_ACID_METABOLISM",
+    "HALLMARK_WNT_BETA_CATENIN_SIGNALING",
+    "HALLMARK_E2F_TARGETS",
+    "HALLMARK_G2M_CHECKPOINT",
+)
 
 
 def _safe_name(value, fallback="feature"):
@@ -174,6 +225,36 @@ def _wrapped_label(value, width=18):
     for part in text.splitlines() or [text]:
         lines.extend(textwrap.wrap(part, width=width, break_long_words=False) or [part])
     return "\n".join(lines)
+
+
+def _pathway_display_label(feature, width=18):
+    """Return a compact, wrapped label for pathway-score axes.
+
+    Managed Hallmark terms are stored with machine-readable underscores.  Those
+    identifiers must remain intact in tables, but plotting them verbatim makes
+    wide concordance matrices unreadable.  This helper is display-only.
+    """
+    name = str(feature or "").removesuffix(" score")
+    if name.startswith("HALLMARK_"):
+        name = "Hallmark: " + name.removeprefix("HALLMARK_").replace("_", " ")
+    else:
+        name = name.replace("_", " ")
+    replacements = {
+        "TNFA": "TNFα",
+        "NFKB": "NF-κB",
+        "INTERFERON GAMMA": "IFNγ",
+        "INTERFERON ALPHA": "IFNα",
+        "REACTIVE OXYGEN SPECIES PATHWAY": "ROS pathway",
+        "UNFOLDED PROTEIN RESPONSE": "unfolded-protein response",
+        "OXIDATIVE PHOSPHORYLATION": "oxidative phosphorylation",
+        "FATTY ACID METABOLISM": "fatty-acid metabolism",
+        "CHOLESTEROL HOMEOSTASIS": "cholesterol homeostasis",
+        "BILE ACID METABOLISM": "bile-acid metabolism",
+        "INFLAMMATORY RESPONSE": "inflammatory response",
+    }
+    for old, new in replacements.items():
+        name = name.replace(old, new)
+    return _wrapped_label(name, width=width)
 
 
 def _parse_gene_list(value):
@@ -721,6 +802,9 @@ def _feature_statistics(sample_table, reference, comparison, min_samples, method
 
 def _resolve_feature_name(value, feature_values):
     text = str(value or "").strip()
+    suffix = " score" if text.endswith(" score") else ""
+    bare_name = text[:-len(suffix)] if suffix else text
+    text = LEGACY_BUILTIN_PATHWAY_NAMES.get(bare_name, bare_name) + suffix
     if text in feature_values:
         return text
     normalized = re.sub(r"[^a-z0-9]+", "", text.lower())
@@ -814,7 +898,7 @@ def _requested_correlation_feature(params, axis):
     if selected == "__custom__":
         selected = str(params.get(f"correlation_{axis}_custom", "") or "").strip()
     if not selected:
-        return "PPARA activity" if axis == "x" else "Inflammatory response score"
+        return "PPARA activity" if axis == "x" else f"{ACUTE_MYELOID_INFLAMMATION_MODULE_NAME} score"
     return selected
 
 
@@ -1498,7 +1582,9 @@ def _regulator_pathway_concordance_figure(concordance, tf_features, pathway_feat
     cmap = LinearSegmentedColormap.from_list(
         "functional_concordance", ["#2166AC", "#F7F7F7", "#B2182B"], N=256,
     )
-    width = max(8.5, min(14.0, 3.7 + 1.20 * len(pathway_features)))
+    # Pathway labels can be long (especially managed Hallmark identifiers).
+    # Allocate enough horizontal room for one readable wrapped label per score.
+    width = max(9.5, min(20.0, 4.0 + 1.35 * len(pathway_features)))
     height = max(4.8, min(11.0, 2.8 + 0.43 * len(tf_features)))
     fig, axis = plt.subplots(figsize=(width, height), dpi=150)
     image = axis.imshow(matrix, aspect="auto", cmap=cmap, vmin=-1, vmax=1)
@@ -1506,7 +1592,7 @@ def _regulator_pathway_concordance_figure(concordance, tf_features, pathway_feat
     axis.set_yticks(np.arange(len(tf_features)), [labels.get(item, item) for item in tf_features], fontsize=8)
     axis.set_xticks(
         np.arange(len(pathway_features)),
-        [_wrapped_label(item.replace(" score", ""), width=17) for item in pathway_features],
+        [_pathway_display_label(item, width=18) for item in pathway_features],
         fontsize=8,
     )
     axis.tick_params(axis="x", pad=5)
@@ -1559,10 +1645,14 @@ def _regulator_pathway_condition_concordance_figure(
     cmap = LinearSegmentedColormap.from_list(
         "functional_concordance_condition", ["#2166AC", "#F7F7F7", "#B2182B"], N=256,
     )
-    fig = plt.figure(figsize=(6.05 * len(conditions) + 0.85, 5.55), dpi=150)
-    grid = fig.add_gridspec(1, len(conditions) + 1, width_ratios=[1.0] * len(conditions) + [0.040], wspace=0.075)
-    axes = [fig.add_subplot(grid[0, index]) for index in range(len(conditions))]
-    colorbar_axis = fig.add_subplot(grid[0, len(conditions)])
+    # Stack conditions vertically: with many pathway columns, a side-by-side
+    # layout leaves no room for readable x-axis labels.
+    width = max(9.5, min(20.0, 4.0 + 1.35 * len(pathway_features)))
+    height = max(5.9, 2.45 * len(conditions) + 2.5)
+    fig = plt.figure(figsize=(width, height), dpi=150)
+    grid = fig.add_gridspec(len(conditions), 2, width_ratios=[1.0, 0.035], hspace=0.52, wspace=0.05)
+    axes = [fig.add_subplot(grid[index, 0]) for index in range(len(conditions))]
+    colorbar_axis = fig.add_subplot(grid[:, 1])
     labels = tf_labels or {}
     image = None
     for index, (axis, condition) in enumerate(zip(axes, conditions)):
@@ -1579,7 +1669,7 @@ def _regulator_pathway_condition_concordance_figure(
         image = axis.imshow(matrix, aspect="auto", cmap=cmap, vmin=-1, vmax=1)
         axis.set_xticks(
             np.arange(len(pathway_features)),
-            [_wrapped_label(item.replace(" score", ""), width=15) for item in pathway_features], fontsize=7.6,
+            [_pathway_display_label(item, width=18) for item in pathway_features], fontsize=7.6,
         )
         axis.tick_params(axis="x", pad=4)
         if index == 0:
@@ -1619,7 +1709,7 @@ def _regulator_pathway_condition_concordance_figure(
         "Exploratory condition-stratified sample × cell-type means; P/FDR omitted because donors repeat across cell types.",
         ha="left", va="top", fontsize=7.2, color="#475467",
     )
-    fig.subplots_adjust(left=0.10, right=0.965, bottom=0.22, top=0.84)
+    fig.subplots_adjust(left=0.10, right=0.965, bottom=0.13, top=0.84)
     return fig
 
 
@@ -1697,8 +1787,39 @@ class FunctionalStateAnalysis(BaseAnalysis):
         ).strip()
         if pathway_scoring_method != "scanpy_score_genes":
             raise ValueError("当前功能状态模块只支持 scanpy_score_genes 通路评分。")
-        pathway_sets = {name: tuple(genes) for name, genes in BUILTIN_PATHWAYS.items()}
+        include_builtin_panels = _as_bool(self.params.get("include_builtin_pathway_panels"), True)
+        analysis_focus = str(self.params.get("analysis_focus", "custom") or "custom").strip()
+        if analysis_focus not in {"custom", "ibd_organoid_epithelial"}:
+            raise ValueError("未知的功能状态分析重点。")
+        pathway_sets = (
+            {name: tuple(genes) for name, genes in BUILTIN_PATHWAYS.items()}
+            if include_builtin_panels else {}
+        )
         pathway_sources = {name: "builtin_lipid_inflammation" for name in pathway_sets}
+        if analysis_focus == "ibd_organoid_epithelial":
+            pathway_sets.update({
+                name: tuple(genes) for name, genes in IBD_EPITHELIAL_QUICK_PATHWAYS.items()
+            })
+            pathway_sources.update({
+                name: "builtin_ibd_epithelial_hypothesis"
+                for name in IBD_EPITHELIAL_QUICK_PATHWAYS
+            })
+        managed_term_requests = [
+            self.params.get("managed_gene_set_terms", ""),
+            self.params.get("managed_gene_set_terms_advanced", ""),
+        ]
+        if analysis_focus == "ibd_organoid_epithelial":
+            managed_term_requests.append(";".join(IBD_EPITHELIAL_MANAGED_TERMS))
+        managed_sets, managed_provenance = load_selected_managed_gene_sets([
+            *managed_term_requests,
+        ])
+        duplicated_managed = sorted(set(pathway_sets).intersection(managed_sets))
+        if duplicated_managed:
+            raise ValueError("托管基因集不能覆盖内置名称: " + "、".join(duplicated_managed))
+        pathway_sets.update(managed_sets)
+        pathway_sources.update({
+            name: managed_provenance[name]["source"] for name in managed_sets
+        })
         custom_sets = _parse_custom_gene_sets(self.params.get("custom_gene_sets", ""))
         duplicated_custom = sorted(set(pathway_sets).intersection(custom_sets))
         if duplicated_custom:
@@ -1719,10 +1840,17 @@ class FunctionalStateAnalysis(BaseAnalysis):
         for name, genes in pathway_sets.items():
             detected = tuple(gene_lookup[gene] for gene in genes if gene in gene_lookup)
             missing = tuple(gene for gene in genes if gene not in gene_lookup)
-            is_builtin_small = name in {"FA import", "FA transport", "Ketogenesis"}
+            is_builtin_small = name in {
+                CARNITINE_SHUTTLE_MODULE_NAME,
+                INTRACELLULAR_FA_TRANSPORT_MODULE_NAME,
+                "Ketogenesis",
+            }
             source = pathway_sources[name]
+            is_managed_standard = source.startswith("managed_")
             signature_kind = "standard_pathway"
-            if len(genes) < min_general_genes:
+            if source == "builtin_ibd_epithelial_hypothesis":
+                signature_kind = "focused_epithelial_hypothesis_signature"
+            elif len(genes) < min_general_genes:
                 signature_kind = (
                     "exploratory_custom_signature" if source == "custom_inline"
                     else "small_signature"
@@ -1730,19 +1858,40 @@ class FunctionalStateAnalysis(BaseAnalysis):
             # The three curated short modules and explicit inline signatures
             # may be useful hypotheses at 2+ detected genes, but they must
             # remain visibly distinct from a standard pathway score.
-            threshold = 2 if (is_builtin_small or signature_kind == "exploratory_custom_signature") else min_general_genes
+            threshold = 2 if (
+                is_builtin_small
+                or signature_kind in {
+                    "exploratory_custom_signature", "focused_epithelial_hypothesis_signature",
+                }
+            ) else min_general_genes
+            if is_managed_standard:
+                threshold = max(threshold, 10)
+            coverage_fraction = len(detected) / max(len(genes), 1)
+            coverage_level = (
+                "good_coverage" if coverage_fraction >= 0.70
+                else "coverage_warning" if coverage_fraction >= 0.40
+                else "unreliable_coverage"
+            )
             status = "good"
             if len(detected) < threshold:
                 status = "insufficient_detected_genes"
+            elif len(genes) >= 10 and coverage_fraction < 0.40:
+                # Do not turn a tiny fraction of a standard pathway into a
+                # deceptively precise score.  Small curated hypotheses retain
+                # their explicit exploratory/small-signature status below.
+                status = "unreliable_coverage_not_scored"
+            elif coverage_fraction < 0.70 and len(genes) >= 10:
+                status = "coverage_warning"
             elif len(genes) < min_general_genes:
                 status = signature_kind
             coverage_rows.append({
                 "gene_set": name, "source": source, "signature_kind": signature_kind,
                 "n_original": len(genes), "n_detected": len(detected),
-                "coverage": len(detected) / max(len(genes), 1), "missing_genes": ";".join(missing),
-                "status": status, "coverage_status": status,
+                "coverage": coverage_fraction, "coverage_level": coverage_level,
+                "minimum_detected_genes": threshold, "missing_genes": ";".join(missing),
+                "status": status, "coverage_status": coverage_level,
             })
-            if status == "insufficient_detected_genes":
+            if status in {"insufficient_detected_genes", "unreliable_coverage_not_scored"}:
                 continue
             values, method = _score_gene_set(
                 expression, var_names, detected, score_name=name,
@@ -1756,7 +1905,8 @@ class FunctionalStateAnalysis(BaseAnalysis):
             feature_definitions[feature] = tuple(gene.upper() for gene in detected)
             score_provenance[feature] = {
                 "column": column, "method": method, "source": source,
-                "evidence_class": signature_kind,
+                "evidence_class": signature_kind, "coverage": coverage_fraction,
+                "coverage_level": coverage_level,
             }
 
         self.progress(35, "计算关键基因表达与可选 TF 靶基因活性...")
@@ -2095,12 +2245,21 @@ class FunctionalStateAnalysis(BaseAnalysis):
             elif network_resource_metadata:
                 tf_network_manifest["resource_metadata"] = network_resource_metadata
 
-        pathway_resource_versions = {
-            "builtin_lipid_inflammation": {
+        pathway_resource_versions = {}
+        if include_builtin_panels:
+            pathway_resource_versions["builtin_lipid_inflammation"] = {
                 "version": "functional_state_builtin_lipid_inflammation_v2",
                 "sha256": _json_sha256(BUILTIN_PATHWAYS),
-            },
-        }
+            }
+        if analysis_focus == "ibd_organoid_epithelial":
+            pathway_resource_versions["builtin_ibd_epithelial_hypothesis"] = {
+                "version": "ibd_organoid_epithelial_hypothesis_v1",
+                "sha256": _json_sha256(IBD_EPITHELIAL_QUICK_PATHWAYS),
+                "interpretation": (
+                    "Focused epithelial differentiation, regenerative/TA and proliferation "
+                    "signatures; they are hypothesis scores, not a clinical or universal cell-state ontology."
+                ),
+            }
         if custom_sets:
             pathway_resource_versions["custom_inline"] = {
                 "version": "inline_run_definition",
@@ -2112,6 +2271,14 @@ class FunctionalStateAnalysis(BaseAnalysis):
                 "sha256": _sha256(gmt_path),
                 "selected_terms": list(gmt_sets),
             }
+        for details in managed_provenance.values():
+            source = details["source"]
+            if source in pathway_resource_versions:
+                continue
+            pathway_resource_versions[source] = {
+                key: details[key]
+                for key in ("library_key", "resource", "version", "file", "sha256", "license", "license_url", "source_url")
+            }
 
         manifest = {
             "module": self.MODULE_NAME,
@@ -2122,6 +2289,7 @@ class FunctionalStateAnalysis(BaseAnalysis):
             "expression_qc": expression_qc,
             "sample_key": sample_key, "condition_key": condition_key, "celltype_key": celltype_key,
             "organism": organism,
+            "analysis_focus": analysis_focus,
             "reference_condition": reference, "comparison_condition": comparison,
             "min_cells_per_sample_celltype": min_cells, "min_samples_per_group": min_samples,
             "statistic_method": statistic_method,
@@ -2146,6 +2314,28 @@ class FunctionalStateAnalysis(BaseAnalysis):
                 }),
             },
             "pathway_gene_sets": {name: list(genes) for name, genes in pathway_sets.items()},
+            "builtin_quick_panels": {
+                "included": include_builtin_panels,
+                "interpretation": "Transparent FAO/inflammation hypothesis signatures; retain for focused exploratory use, but prefer managed Hallmark/Reactome for standard pathway claims.",
+            },
+            "ibd_epithelial_focus": {
+                "enabled": analysis_focus == "ibd_organoid_epithelial",
+                "hypothesis_signatures": (
+                    {name: list(genes) for name, genes in IBD_EPITHELIAL_QUICK_PATHWAYS.items()}
+                    if analysis_focus == "ibd_organoid_epithelial" else {}
+                ),
+                "managed_hallmark_terms": (
+                    list(IBD_EPITHELIAL_MANAGED_TERMS)
+                    if analysis_focus == "ibd_organoid_epithelial" else []
+                ),
+            },
+            "gene_set_coverage_policy": {
+                "managed_standard_min_detected_genes": 10,
+                "good": "detected / original ≥ 70%",
+                "warning": "40% ≤ detected / original < 70%; score retained and flagged",
+                "unreliable": "detected / original < 40% for a standard set; score not calculated",
+                "small_signatures": "curated short or inline exploratory signatures retain their separately labelled 2-gene minimum",
+            },
             "pathway_gene_set_overlap_qc": {
                 "table": "pathway_gene_set_overlap_qc.csv",
                 "policy": "block identical requested or input-detected gene sets; flag detected Jaccard overlap >=0.80 for review",
@@ -2169,6 +2359,10 @@ class FunctionalStateAnalysis(BaseAnalysis):
             "tf_network": tf_network_manifest,
             "pathway_gmt": ({"path": str(gmt_path.relative_to(Path(self.project_dir))), "sha256": _sha256(gmt_path),
                               "selected_terms": list(gmt_sets)} if gmt_path else {"status": "not_configured"}),
+            "managed_gene_sets": ({
+                "selected_terms": list(managed_sets),
+                "term_provenance": managed_provenance,
+            } if managed_sets else {"status": "not_selected"}),
             "correlation": {
                 "x_feature_requested": x_requested,
                 "y_feature_requested": y_requested,

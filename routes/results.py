@@ -3,11 +3,133 @@ import os
 import io
 import re
 import zipfile
+from collections.abc import Mapping, Sequence
+from numbers import Number
 from flask import Blueprint, render_template, send_file, flash, redirect, url_for
 from models import Project, AnalysisTask, ResultFile, PipelineRun
 from modules.schemas import MODULE_DISPLAY_MAP, STATUS_MAP
 from modules import PIPELINE_ORDER
 from config import Config
+
+
+# ``result_json`` is an audit record shared by the worker, reports and APIs.
+# It may therefore contain paths, checksums, per-batch dictionaries or long
+# lists that are useful for reproducibility but unsuitable for a result-page
+# summary. Keep the stored result intact and apply this presentation policy
+# only at the HTML boundary.
+_RESULT_SUMMARY_MAX_ITEMS = 16
+_RESULT_VALUE_MAX_CHARS = 96
+_RESULT_VALUE_MAX_COLLECTION_ITEMS = 5
+_TECHNICAL_RESULT_KEY_TOKENS = {
+    'path', 'paths', 'file', 'files', 'dir', 'directory', 'checksum',
+    'sha256', 'hash', 'fingerprint', 'manifest', 'provenance', 'request_id',
+    'request_hash',
+}
+
+
+def _result_key_is_technical(key):
+    """Whether a result key is an implementation detail, not a page metric."""
+    tokens = set(re.findall(r'[a-z0-9]+', str(key or '').lower()))
+    return bool(tokens & _TECHNICAL_RESULT_KEY_TOKENS) or str(key or '').startswith('_')
+
+
+def _looks_like_absolute_path(value):
+    value = str(value or '').strip()
+    return (
+        value.startswith(('/', '\\\\'))
+        or bool(re.match(r'^[A-Za-z]:[\\\\/]', value))
+    )
+
+
+def _compact_result_value(value, *, max_chars=_RESULT_VALUE_MAX_CHARS):
+    """Return a safe, single-line result preview, or ``None`` when omitted.
+
+    A compact scalar and a very small scalar collection are meaningful in a
+    summary card. Nested/large data belongs in registered result files or the
+    manifest, where it can be inspected without making the page unreadable.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return '是' if value else '否'
+    if isinstance(value, Number):
+        return str(value)
+    if isinstance(value, str):
+        text = ' '.join(value.split())
+        if not text or len(text) > max_chars or _looks_like_absolute_path(text):
+            return None
+        return text
+
+    if isinstance(value, Mapping):
+        if not value or len(value) > _RESULT_VALUE_MAX_COLLECTION_ITEMS:
+            return None
+        entries = []
+        child_limit = max(24, max_chars // _RESULT_VALUE_MAX_COLLECTION_ITEMS)
+        for key, child in value.items():
+            is_nested = (
+                isinstance(child, (Mapping, Sequence))
+                and not isinstance(child, (str, bytes, bytearray))
+            )
+            if _result_key_is_technical(key) or is_nested:
+                return None
+            compact_child = _compact_result_value(child, max_chars=child_limit)
+            if compact_child is None:
+                return None
+            entries.append(f'{str(key).replace("_", " ")}: {compact_child}')
+        text = '；'.join(entries)
+        return text if len(text) <= max_chars else None
+
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        if not value or len(value) > _RESULT_VALUE_MAX_COLLECTION_ITEMS:
+            return None
+        child_limit = max(24, max_chars // _RESULT_VALUE_MAX_COLLECTION_ITEMS)
+        entries = [
+            _compact_result_value(item, max_chars=child_limit)
+            for item in value
+        ]
+        if any(item is None for item in entries):
+            return None
+        text = '；'.join(entries)
+        return text if len(text) <= max_chars else None
+    return None
+
+
+def _result_summary_items(result_data):
+    """Select compact, user-facing metrics from a task result summary."""
+    if not isinstance(result_data, Mapping):
+        return [], 0
+
+    items = []
+    omitted = 0
+    for key, value in result_data.items():
+        if _result_key_is_technical(key):
+            omitted += 1
+            continue
+        compact_value = _compact_result_value(value)
+        if compact_value is None or len(items) >= _RESULT_SUMMARY_MAX_ITEMS:
+            omitted += 1
+            continue
+        items.append({'key': str(key), 'value': compact_value})
+    return items, omitted
+
+
+def _review_evidence_for_display(evidence):
+    """Copy review evidence with only compact values available to the template."""
+    if not isinstance(evidence, Mapping):
+        return evidence
+    display = dict(evidence)
+    checks = []
+    for check in evidence.get('checks') or []:
+        item = dict(check)
+        if 'value' in item:
+            compact_value = _compact_result_value(item['value'])
+            if compact_value is None:
+                item.pop('value', None)
+            else:
+                item['display_value'] = compact_value
+        checks.append(item)
+    display['checks'] = checks
+    return display
 
 
 def _validate_path(file_path, project_id):
@@ -116,6 +238,9 @@ def task_detail(pid, task_id):
     except Exception:
         review_evidence = None
 
+    result_summary_items, omitted_result_fields = _result_summary_items(result_data)
+    review_evidence = _review_evidence_for_display(review_evidence)
+
     # 计算下一步模块
     next_module = None
     current_module = t.module_name
@@ -131,7 +256,8 @@ def task_detail(pid, task_id):
                           json_files=json_files,
                           review_evidence=review_evidence,
                           result_interpretation=result_interpretation,
-                          result_data=result_data,
+                          result_summary_items=result_summary_items,
+                          omitted_result_fields=omitted_result_fields,
                           module_display=MODULE_DISPLAY_MAP.get(t.module_name, t.module_name),
                           status_cn=STATUS_MAP.get(t.status, t.status),
                           next_module=next_module,

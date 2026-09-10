@@ -16,6 +16,10 @@ from .spec import FigureSpec
 from .templates import (
     NatureEnrichmentDotplot,
     NatureEnrichmentOverview,
+    NatureGOPriorityDotplot,
+    NatureGOPriorityBarplot,
+    NaturePathwayTriptychDotplot,
+    NaturePathwayTriptychBarplot,
     NatureEnrichmentBarplot,
     NatureEnrichmentChord,
     NatureEnrichmentCnetplot,
@@ -49,6 +53,18 @@ _PLOT_ALIASES = {
     "enrichment_overview": "enrichment_overview",
     "multi_database_overview": "enrichment_overview",
     "pathway_overview": "enrichment_overview",
+    "go_priority_dotplot": "go_priority_dotplot",
+    "go_theme_dotplot": "go_priority_dotplot",
+    "go_triptych_dotplot": "go_priority_dotplot",
+    "go_priority_barplot": "go_priority_barplot",
+    "go_theme_barplot": "go_priority_barplot",
+    "go_triptych_barplot": "go_priority_barplot",
+    "pathway_triptych_dotplot": "pathway_triptych_dotplot",
+    "human_pathway_triptych_dotplot": "pathway_triptych_dotplot",
+    "pathway_priority_dotplot": "pathway_triptych_dotplot",
+    "pathway_triptych_barplot": "pathway_triptych_barplot",
+    "human_pathway_triptych_barplot": "pathway_triptych_barplot",
+    "pathway_priority_barplot": "pathway_triptych_barplot",
     "barplot": "enrichment_barplot",
     "enrichment_barplot": "enrichment_barplot",
     "chord": "enrichment_chord",
@@ -103,6 +119,10 @@ class NatureFigureDirector:
             "gsea": NatureGSEA(),
             "enrichment_dotplot": NatureEnrichmentDotplot(),
             "enrichment_overview": NatureEnrichmentOverview(),
+            "go_priority_dotplot": NatureGOPriorityDotplot(),
+            "go_priority_barplot": NatureGOPriorityBarplot(),
+            "pathway_triptych_dotplot": NaturePathwayTriptychDotplot(),
+            "pathway_triptych_barplot": NaturePathwayTriptychBarplot(),
             "enrichment_barplot": NatureEnrichmentBarplot(),
             "enrichment_chord": NatureEnrichmentChord(),
             "enrichment_cnetplot": NatureEnrichmentCnetplot(),
@@ -170,7 +190,10 @@ class NatureFigureDirector:
         width = (
             source.get("_figure_width")
             or visualization.get("width_profile")
-            or ("double" if normalized in {"heatmap", "enrichment_overview"} else "single")
+            or ("double" if normalized in {
+                "heatmap", "enrichment_overview", "go_priority_dotplot", "go_priority_barplot",
+                "pathway_triptych_dotplot", "pathway_triptych_barplot",
+            } else "single")
         )
         style = source.get("_nature_style") or visualization.get("nature_style") or "nature"
 
@@ -221,6 +244,8 @@ class NatureFigureDirector:
             )
         elif normalized in {
             "gsea", "enrichment_dotplot", "enrichment_overview", "enrichment_barplot",
+            "go_priority_dotplot", "go_priority_barplot",
+            "pathway_triptych_dotplot", "pathway_triptych_barplot",
             "enrichment_chord", "enrichment_cnetplot",
             "enrichment_emapplot", "gsea_running",
         }:

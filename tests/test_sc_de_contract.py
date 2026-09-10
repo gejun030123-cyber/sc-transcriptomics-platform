@@ -134,6 +134,91 @@ def test_pseudobulk_rejects_batch_condition_perfect_confounding():
     assert "完全混杂" in reason
 
 
+def test_pseudobulk_uses_annotated_celltypes_as_distinct_deg_units(tmp_path):
+    """Post-annotation DEG must aggregate sample × celltype, not Leiden IDs."""
+    import anndata as ad
+    from modules.sc_batch_export import SCPseudobulkDEG
+
+    rows = []
+    metadata = []
+    for sample, condition in (
+        ("C1", "Control"), ("C2", "Control"),
+        ("T1", "Treatment"), ("T2", "Treatment"),
+    ):
+        for celltype, counts in (("T cells", [20, 2, 1]), ("B cells", [2, 20, 1])):
+            for index in range(2):
+                rows.append(counts)
+                metadata.append({
+                    "sample_id": sample, "condition": condition,
+                    # Deliberately collapse Leiden labels: only the reviewed
+                    # annotation can recover the two biological units here.
+                    "leiden": "0", "celltype": celltype,
+                })
+    values = np.asarray(rows, dtype=np.int64)
+    adata = ad.AnnData(
+        X=values.astype(np.float32), obs=pd.DataFrame(metadata),
+        var=pd.DataFrame(index=["G1", "G2", "G3"]),
+    )
+    adata.layers["counts"] = values
+    input_path = tmp_path / "annotated.h5ad"
+    adata.write_h5ad(input_path)
+
+    result = SCPseudobulkDEG(
+        project_dir=str(tmp_path),
+        params={
+            "sample_key": "sample_id", "condition_key": "condition",
+            "analysis_scope": "per_cluster",
+            "grouping_mode": "annotated_celltype", "celltype_key": "celltype",
+            "method": "welch_logcpm", "min_samples_per_group": 2,
+            "min_cells_per_sample_celltype": 2,
+            "show_deg_figures": False, "export_full_tables": False,
+        }, progress_callback=lambda *_: None,
+    ).run(str(input_path))
+
+    assert result["summary"]["analysis_grouping"] == "annotated_celltype"
+    assert result["summary"]["analysis_group_key"] == "celltype"
+    table = pd.read_csv(result["summary"]["deg_source_file"])
+    assert set(table["cluster"]) == {"T cells", "B cells"}
+    assert table["analysis_group_label"].eq("细胞类型").all()
+    assert table["inference_unit"].eq("biological_sample").all()
+
+
+def test_celltype_marker_deg_creates_task_bound_enrichment_sources(tmp_path):
+    import anndata as ad
+    from modules.deg import DEGAnalysis
+
+    values = np.asarray(
+        [[18, 2, 1]] * 6 + [[2, 18, 1]] * 6,
+        dtype=np.int64,
+    )
+    adata = ad.AnnData(
+        X=values.astype(np.float32),
+        obs=pd.DataFrame({"celltype": ["T cells"] * 6 + ["B cells"] * 6}),
+        var=pd.DataFrame(index=["G1", "G2", "G3"]),
+    )
+    adata.layers["counts"] = values
+    input_path = tmp_path / "celltype_markers.h5ad"
+    adata.write_h5ad(input_path)
+
+    result = DEGAnalysis(
+        project_dir=str(tmp_path),
+        params={
+            "groupby": "celltype", "method": "wilcoxon", "n_genes": 2,
+            "show_dotplot": False, "show_marker_heatmap": False,
+            "show_top_marker_umap_panel": False, "show_deg_counts_bar": False,
+        }, progress_callback=lambda *_: None,
+    ).run(str(input_path))
+
+    summary = result["summary"]
+    assert summary["analysis_grouping"] == "annotated_celltype"
+    assert summary["deg_source_task_contract"] == "celltype_marker_vs_rest"
+    assert len(summary["deg_source_files"]) == 2
+    source = pd.read_csv(summary["deg_source_files"][0])
+    assert source["analysis_group_label"].eq("细胞类型").all()
+    assert source["inference_unit"].eq("cell").all()
+    assert {"comparison_id", "log2FC", "padj", "cluster"}.issubset(source.columns)
+
+
 def test_go_route_binds_the_selected_deg_task_instead_of_scanning_csv(tmp_path, monkeypatch):
     from app import create_app
     from config import Config
@@ -162,11 +247,13 @@ def test_go_route_binds_the_selected_deg_task_instead_of_scanning_csv(tmp_path, 
         "log2FC": [1.0], "padj": [0.01], "inference_unit": ["cell"],
     }).to_csv(source_path, index=False)
     source_task = AnalysisTask(
-        project_id=project_id, module_name="sc_cell_deg", status="completed",
+        project_id=project_id, module_name="deg", status="completed",
         output_adata_path=input_path,
         result_json=json.dumps({
             "deg_source_files": [source_path], "deg_source_level": "cell_level",
-            "deg_source_task_contract": "condition",
+            "deg_source_task_contract": "celltype_marker_vs_rest",
+            "analysis_grouping": "annotated_celltype",
+            "analysis_group_label": "细胞类型",
         }),
     )
     source_task.save()
@@ -185,6 +272,7 @@ def test_go_route_binds_the_selected_deg_task_instead_of_scanning_csv(tmp_path, 
     assert page.status_code == 200
     assert 'id="sc-go-cluster-picker"' in page.get_data(as_text=True)
     assert 'data-clusters=' in page.get_data(as_text=True)
+    assert 'data-group-label="细胞类型"' in page.get_data(as_text=True)
     assert response.status_code == 302
     assert submitted
     params = submitted[0][3]

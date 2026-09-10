@@ -350,11 +350,124 @@ class TestFocusTermHelpers:
         assert selected["Term"].tolist() == ["lipid transport", "lipoprotein particle"]
         assert selected["Database"].tolist() == ["GO_BP", "GO_CC"]
 
+    def test_go_priority_selection_keeps_theme_terms_then_top_pathway_fill(self):
+        import pandas as pd
+        from modules.sc_cell_go import _select_go_priority_rows
+
+        frame = pd.DataFrame({
+            "status": ["completed"] * 4,
+            "Significant": [True] * 4,
+            "gene_set": ["GO_Biological_Process_2023"] * 4,
+            "Term": [
+                "cell migration (GO:0001)", "lipid transport (GO:0002)",
+                "neutrophil migration (GO:0003)", "cell cycle (GO:0004)",
+            ],
+            "method": ["ORA"] * 4,
+            "direction": ["Up"] * 4,
+            "Adjusted P-value": [.0001, .03, .04, .0002],
+            "Overlap": ["8/100", "4/100", "3/100", "7/100"],
+        })
+        selected, audit = _select_go_priority_rows(
+            frame, ["inflammatory response", "lipid transport"], top_n=4,
+        )
+        assert selected["Term"].tolist() == [
+            "neutrophil migration (GO:0003)", "lipid transport (GO:0002)",
+            "cell migration (GO:0001)", "cell cycle (GO:0004)",
+        ]
+        assert selected["selection_reason"].tolist() == [
+            "inflammation_priority", "lipid_metabolism_priority",
+            "top_pathway_fill", "top_pathway_fill",
+        ]
+        assert audit["ontologies"]["GO_BP"]["n_selected"] == 4
+
+    def test_go_priority_selection_reserves_lipid_and_top_slots_when_inflammation_is_abundant(self):
+        import pandas as pd
+        from modules.sc_cell_go import _select_go_priority_rows
+
+        terms = [f"neutrophil response {index} (GO:{index:07d})" for index in range(10)]
+        terms += ["lipid transport (GO:0001000)"]
+        terms += [f"ordinary pathway {index} (GO:{index + 100:07d})" for index in range(6)]
+        frame = pd.DataFrame({
+            "status": ["completed"] * len(terms), "Significant": [True] * len(terms),
+            "gene_set": ["GO_Biological_Process_2023"] * len(terms),
+            "Term": terms, "method": ["ORA"] * len(terms), "direction": ["Up"] * len(terms),
+            "Adjusted P-value": [.001 + index * .001 for index in range(len(terms))],
+            "Overlap": ["5/100"] * len(terms),
+        })
+        selected, audit = _select_go_priority_rows(frame, ["lipid transport"], top_n=8)
+        assert selected["selection_reason"].value_counts().to_dict() == {
+            "inflammation_priority": 4,
+            "lipid_metabolism_priority": 1,
+            "top_pathway_fill": 3,
+        }
+        assert "lipid transport (GO:0001000)" in selected["Term"].tolist()
+        assert audit["ontologies"]["GO_BP"]["selection_caps"] == {
+            "inflammation_priority": 4, "lipid_metabolism_priority": 2,
+            "top_pathway_fill": 2,
+        }
+
+    def test_go_priority_custom_allocation_is_audited_without_changing_candidates(self):
+        import pandas as pd
+        from modules.sc_cell_go import _select_go_priority_rows
+
+        terms = [f"neutrophil response {index} (GO:{index:07d})" for index in range(5)]
+        terms += [f"lipid transport {index} (GO:{index + 100:07d})" for index in range(4)]
+        terms += [f"ordinary pathway {index} (GO:{index + 200:07d})" for index in range(4)]
+        frame = pd.DataFrame({
+            "status": ["completed"] * len(terms), "Significant": [True] * len(terms),
+            "gene_set": ["GO_Biological_Process_2023"] * len(terms),
+            "Term": terms, "method": ["ORA"] * len(terms), "direction": ["Up"] * len(terms),
+            "Adjusted P-value": [.001 + index * .001 for index in range(len(terms))],
+            "Overlap": ["5/100"] * len(terms),
+        })
+
+        allocation = {
+            "inflammation_priority": 2,
+            "lipid_metabolism_priority": 3,
+            "confirmed_theme_priority": 0,
+            "top_pathway_fill": 2,
+        }
+        selected, audit = _select_go_priority_rows(
+            frame, [], top_n=8, priority_allocation=allocation,
+        )
+
+        assert selected["selection_reason"].value_counts().to_dict() == {
+            "top_pathway_fill": 3,
+            "lipid_metabolism_priority": 3,
+            "inflammation_priority": 2,
+        }
+        ontology = audit["ontologies"]["GO_BP"]
+        assert ontology["allocation_mode"] == "custom"
+        assert ontology["requested_allocation"] == allocation
+        assert ontology["selection_caps"] == allocation
+
+    def test_go_priority_custom_allocation_rejects_non_integer_or_overflow(self):
+        import pytest
+        from modules.sc_cell_go import _go_priority_allocation_from_params
+
+        with pytest.raises(ValueError, match="不能超过"):
+            _go_priority_allocation_from_params({
+                "go_priority_allocation_mode": "custom",
+                "go_inflammation_slots": 4,
+                "go_lipid_slots": 3,
+                "go_confirmed_theme_slots": 0,
+                "go_top_pathway_slots": 2,
+            }, top_n=8)
+        with pytest.raises(ValueError, match="必须为整数"):
+            _go_priority_allocation_from_params({
+                "go_priority_allocation_mode": "custom",
+                "go_inflammation_slots": 2.5,
+            }, top_n=8)
+
     def test_focus_params_registered_in_schema(self):
         from modules.schemas import PARAM_SCHEMAS
 
         keys = {item["key"] for item in PARAM_SCHEMAS["sc_cell_go"]}
         assert "focus_terms" in keys
+        assert {
+            "go_priority_allocation_mode", "go_inflammation_slots",
+            "go_lipid_slots", "go_confirmed_theme_slots", "go_top_pathway_slots",
+        }.issubset(keys)
 
     def test_validate_analysis_params_keeps_focus_terms(self):
         from modules.ai_tools import _validate_analysis_params

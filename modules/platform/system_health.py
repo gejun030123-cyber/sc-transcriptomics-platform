@@ -22,9 +22,13 @@ DEPENDENCY_GROUPS = {
     "single_cell": [
         ("scanpy", "scanpy"),
         ("omicverse", "omicverse"),
+        ("decoupler", "decoupler"),
         ("statsmodels", "statsmodels"),
         ("scikit-learn", "sklearn"),
         ("matplotlib", "matplotlib"),
+        ("igraph", "igraph"),
+        ("leidenalg", "leidenalg"),
+        ("pyscdblfinder", "pyscdblfinder"),
     ],
     "bulk": [
         ("gseapy", "gseapy"),
@@ -56,19 +60,22 @@ WES_EXTERNAL_TOOLS = (
 )
 
 MODULE_DEPENDENCIES = {
-    "qc": ["scanpy", "omicverse"],
+    "qc": ["scanpy", "omicverse", "pyscdblfinder"],
     "normalize": ["scanpy", "omicverse"],
     "hvg": ["scanpy", "omicverse"],
     "dimred": ["scanpy"],
     "batch_correct": ["scanpy"],
-    "clustering": ["scanpy"],
+    "clustering": ["scanpy", "igraph", "leidenalg"],
     "subcluster": ["scanpy"],
     "qc_reassess": ["scanpy", "pandas"],
     "annotation": ["scanpy"],
+    "functional_state": ["scanpy", "pandas"],
+    "scenic": ["scanpy", "pandas", "scipy"],
     "deg": ["scanpy"],
     "trajectory": ["scanpy"],
     "sc_timecourse": ["anndata", "pandas", "scipy"],
     "proportion": ["anndata", "pandas", "scipy"],
+    "neighborhood_da": ["anndata", "pandas", "scipy", "scikit-learn"],
     "cell_communication": ["scanpy", "liana"],
     "virtual_ko": ["anndata", "pandas", "numpy"],
     "sc_batch_import": ["anndata", "pandas", "scanpy"],
@@ -100,6 +107,9 @@ MODULE_OPTIONAL_DEPENDENCIES = {
     ],
     "subcluster": [("gseapy", "子簇通路富集")],
     "annotation": [("celltypist", "CellTypist 参考交叉验证")],
+    "functional_state": [
+        ("decoupler", "CollecTRI 网络支持的 ULM TF activity"),
+    ],
     "virtual_ko": [("celloracle", "CellOracle 虚拟敲除（经独立 Python 3.9/3.10 环境调用）")],
     "bulk_deg": [("inmoose", "DESeq2/edgeR/limma 兼容统计方法")],
     "bulk_enrichment": [("gseapy", "兼容旧版 Enrichr 富集路径")],

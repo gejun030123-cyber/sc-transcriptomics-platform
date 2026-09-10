@@ -147,7 +147,9 @@
         if (node) node.textContent = text;
         const dot = $('#workspace-status-dot');
         if (dot) {
-            dot.style.background = kind === 'error' ? '#ef4444' : '#22c55e';
+            // Keep status presentation within the workspace's single blue
+            // visual scale; the adjacent text carries the actual state.
+            dot.style.background = kind === 'error' ? '#6f8fb9' : '#74aaff';
         }
     }
 
@@ -326,6 +328,13 @@
         }
     }
 
+    function newConversation() {
+        clearChat().finally(() => {
+            const input = $('#workspace-input');
+            if (input) input.focus();
+        });
+    }
+
     function autosize() {
         const input = $('#workspace-input');
         if (!input) return;
@@ -398,6 +407,8 @@
         });
         const clear = $('#workspace-clear');
         if (clear) clear.addEventListener('click', clearChat);
+        const newChat = $('#workspace-new-chat');
+        if (newChat) newChat.addEventListener('click', newConversation);
     }
 
     window.workspaceSend = sendMessage;

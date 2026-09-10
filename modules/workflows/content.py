@@ -18,13 +18,23 @@ def _pysam():
         return None, str(exc)
 
 
-def inspect_fastq(path: str) -> Dict[str, Any]:
+def inspect_fastq(path: str, *, full_integrity: bool = False) -> Dict[str, Any]:
     result = {"path": path, "available": True, "valid": True, "checks": {}}
     try:
-        with gzip.open(path, "rb") as handle:
+        # Both uploaded plain FASTQ and the platform's .fastq.gz conversion
+        # output are accepted.  Do not infer compression from a user-supplied
+        # filename; the magic bytes are the actual file contract.
+        with open(path, "rb") as probe:
+            is_gzip = probe.read(2) == b"\x1f\x8b"
+        opener = gzip.open if is_gzip else open
+        with opener(path, "rb") as handle:
             payload = handle.read(16 * 1024)
+            if full_integrity:
+                while handle.read(8 * 1024 * 1024):
+                    pass
         lines = payload.splitlines()
-        result["checks"]["gzip"] = True
+        result["checks"]["gzip"] = is_gzip
+        result["checks"]["full_integrity"] = bool(full_integrity)
         result["checks"]["sample_lines"] = len(lines)
         if len(lines) < 4:
             result["valid"] = False
@@ -108,7 +118,8 @@ def inspect_vcf(path: str, sample_id: str = "") -> Dict[str, Any]:
     return result
 
 
-def inspect_sample_files(sample: Dict[str, Any], *, reference_path: Optional[str] = None) -> Dict[str, Any]:
+def inspect_sample_files(sample: Dict[str, Any], *, reference_path: Optional[str] = None,
+                         full_fastq_integrity: bool = False) -> Dict[str, Any]:
     """Run optional checks for one sample and return a structured summary."""
     input_type = str(sample.get("input_type", "") or "").lower()
     sample_id = str(sample.get("sample_id", "") or "")
@@ -116,7 +127,9 @@ def inspect_sample_files(sample: Dict[str, Any], *, reference_path: Optional[str
     if input_type == "fastq":
         for key in ("fastq_1", "fastq_2"):
             if sample.get(key):
-                checks.append(inspect_fastq(str(sample[key])))
+                checks.append(inspect_fastq(
+                    str(sample[key]), full_integrity=full_fastq_integrity
+                ))
     elif input_type in {"bam", "cram"}:
         checks.append(inspect_alignment(str(sample[input_type]), input_type, sample_id, reference_path))
     elif input_type == "vcf" and sample.get("vcf"):

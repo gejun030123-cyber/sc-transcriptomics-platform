@@ -16,6 +16,11 @@ adjustText
 Pillow
 plotly
 anndata
+# Excel input/output is advertised by the upload and result interfaces; pandas
+# intentionally treats this engine as optional, so declare it explicitly.
+openpyxl
+# Used directly to compare installed pyscdblfinder versions in the QC gate.
+packaging
 
 # Single-cell analysis
 scanpy

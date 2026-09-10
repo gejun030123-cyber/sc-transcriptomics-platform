@@ -1718,10 +1718,10 @@ class TestWorkerIntegration:
 
         expected_sc = {'qc', 'normalize', 'hvg', 'dimred', 'batch_correct',
                        'clustering', 'qc_reassess', 'annotation', 'deg',
-                       'trajectory', 'sc_timecourse', 'proportion',
+                       'trajectory', 'sc_timecourse', 'proportion', 'neighborhood_da',
                        'cell_communication', 'subcluster', 'sc_batch_import',
                        'sc_cell_deg', 'sc_cell_go', 'sc_pseudobulk_deg',
-                       'sc_csv_export', 'virtual_ko'}
+                       'sc_csv_export', 'virtual_ko', 'functional_state', 'scenic'}
         expected_bulk = {'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca',
                         'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
                         'bulk_deg_integration'}

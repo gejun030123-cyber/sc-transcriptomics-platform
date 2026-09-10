@@ -81,13 +81,22 @@ def check_importable_sc_files(uploads_dir):
     from modules.io_utils import infer_sc_data_format
 
     supported = []
-    skip_names = {'converted_10x.h5ad'}
+    # A 10x Matrix Market dataset must be imported as its complete three-file
+    # set.  Do not mistakenly offer its barcodes/features files as standalone
+    # expression matrices merely because they are TSV files.
+    skip_names = {
+        'converted_10x.h5ad',
+        'matrix.mtx', 'matrix.mtx.gz',
+        'barcodes.tsv', 'barcodes.tsv.gz',
+        'features.tsv', 'features.tsv.gz',
+        'genes.tsv', 'genes.tsv.gz',
+    }
     for name in sorted(os.listdir(uploads_dir)):
         if name in skip_names or name.endswith('_imported.h5ad'):
             continue
         path = os.path.join(uploads_dir, name)
         fmt = infer_sc_data_format(path)
-        if fmt in {'h5ad', '10x_h5', 'loom', 'zarr'}:
+        if fmt in {'h5ad', '10x_h5', 'loom', 'zarr', 'expression_matrix'}:
             try:
                 size_mb = round(os.path.getsize(path) / (1024 * 1024), 1) if os.path.isfile(path) else None
             except OSError:
@@ -222,7 +231,9 @@ def import_sc(pid):
         return jsonify({'error': f'文件不存在: {source_file}'}), 404
 
     input_format = request.form.get('input_format', '').strip() or infer_sc_data_format(source_path)
-    if input_format not in {'h5ad', '10x_h5', 'loom', 'zarr', 'auto'}:
+    if input_format not in {
+        'h5ad', '10x_h5', 'loom', 'zarr', 'expression_matrix', 'auto',
+    }:
         return jsonify({'error': f'不支持的单细胞导入格式: {input_format}'}), 400
 
     species = request.form.get('species', '').strip() or None

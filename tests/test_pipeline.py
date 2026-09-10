@@ -23,7 +23,7 @@ class TestModuleRegistry:
     def test_all_modules_registered(self):
         """所有注册模块都在注册表中。"""
         from modules import MODULE_REGISTRY
-        assert len(MODULE_REGISTRY) == 29
+        assert len(MODULE_REGISTRY) == 32
 
     def test_registry_values_are_classes(self):
         """注册表的值都是类（有 run 方法）。"""
@@ -35,7 +35,7 @@ class TestModuleRegistry:
         """关键模块存在。"""
         from modules import MODULE_REGISTRY
         expected = ['qc', 'normalize', 'hvg', 'dimred', 'clustering',
-                    'sc_timecourse', 'sc_cell_deg', 'sc_cell_go', 'sc_pseudobulk_deg', 'sc_csv_export',
+                    'functional_state', 'sc_timecourse', 'sc_cell_deg', 'sc_cell_go', 'sc_pseudobulk_deg', 'sc_csv_export', 'neighborhood_da',
                     'sc_batch_import', 'virtual_ko', 'bulk_qc', 'bulk_normalize', 'bulk_deg', 'convert_10x']
         for mod in expected:
             assert mod in MODULE_REGISTRY, f"缺少模块: {mod}"
@@ -217,3 +217,64 @@ def test_pipeline_worker_persists_successful_module_summary(test_project, monkey
     task = AnalysisTask.get_by_id(task_id)
     assert task.status == "completed"
     assert json.loads(task.result_json) == {"status": "ok"}
+
+
+def test_saved_pipeline_template_runs_from_server_side_definition(test_project, monkeypatch):
+    """A one-click template must not depend on browser-copied modules/params."""
+    import json
+    from app import create_app
+    from config import Config
+    from models import PipelineRun
+    import worker
+
+    monkeypatch.setattr(Config, "PLATFORM_ACCESS_PASSWORD", "")
+    input_path = os.path.join(Config.project_dir(test_project), "uploads", "input.h5ad")
+    with open(input_path, "wb") as handle:
+        handle.write(b"placeholder")
+
+    submitted = []
+    monkeypatch.setattr(worker, "submit_pipeline_run", lambda **kwargs: submitted.append(kwargs))
+    client = create_app().test_client()
+    saved = client.post("/api/presets", json={
+        "name": "标准单细胞基础流程",
+        "description": "QC 到标准化",
+        "scope": "project",
+        "project_id": test_project,
+        "analysis_type": "sc",
+        "pipeline": {"modules": ["qc", "normalize"]},
+        # Older saved pipeline templates used this flat parameter shape.
+        "params": {"nUMIs": 777, "normalize": {"target_sum": 20000}},
+    })
+    assert saved.status_code == 200
+    template_id = saved.get_json()["id"]
+
+    listed = client.get(f"/api/presets?project_id={test_project}&type=sc")
+    assert listed.status_code == 200
+    template_summary = next(
+        item for item in listed.get_json()["presets"] if item["id"] == template_id
+    )
+    assert template_summary["has_pipeline"] is True
+    assert template_summary["pipeline"]["modules"] == ["qc", "normalize"]
+    assert "params" not in template_summary
+
+    launched = client.post(
+        f"/api/projects/{test_project}/pipeline-templates/{template_id}/run",
+        json={
+            "input_path": input_path,
+            # These untrusted browser fields must be ignored by the endpoint.
+            "modules": ["bulk_qc"],
+            "params": {"nUMIs": 1},
+        },
+    )
+    assert launched.status_code == 201
+    body = launched.get_json()
+    assert body["modules"] == ["qc", "normalize"]
+    assert body["template_id"] == template_id
+    assert len(submitted) == 1
+    assert submitted[0]["modules"] == ["qc", "normalize"]
+
+    run = PipelineRun.get_by_id(body["id"])
+    assert run is not None
+    saved_params = json.loads(run.params_json)
+    assert saved_params["qc"]["nUMIs"] == 777
+    assert saved_params["normalize"]["target_sum"] == 20000

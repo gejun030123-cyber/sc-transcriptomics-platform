@@ -1,0 +1,3 @@
+# Developer and CI checks.  The application itself only needs requirements.txt.
+-r requirements.txt
+pytest

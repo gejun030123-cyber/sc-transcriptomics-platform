@@ -3,52 +3,40 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}生信分析平台{% endblock %}</title>
+    <title>{% block title %}智能生信工作台{% endblock %} · oelab agent</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        body { background: #f5f7fa; font-family: -apple-system, sans-serif; }
-        .navbar { background: linear-gradient(135deg, #1a237e, #283593); }
-        .navbar-brand, .nav-link { color: #fff !important; }
-        .card { border: none; box-shadow: 0 2px 8px rgba(0,0,0,.08); border-radius: 12px; }
-        .btn-primary { background: #1a237e; border-color: #1a237e; }
-        .btn-primary:hover { background: #283593; }
-        .status-badge { font-size: .85rem; padding: 4px 12px; border-radius: 20px; }
-        .status-running { background: #fff3cd; color: #856404; }
-        .status-completed { background: #d4edda; color: #155724; }
-        .status-failed { background: #f8d7da; color: #721c24; }
-        .status-pending { background: #e2e3e5; color: #383d41; }
-        .sidebar-module { padding: 10px 15px; border-left: 3px solid transparent; cursor: pointer; }
-        .sidebar-module:hover, .sidebar-module.active { background: #e8eaf6; border-left-color: #1a237e; }
-        .progress-container { height: 6px; background: #e0e0e0; border-radius: 3px; overflow: hidden; }
-        .progress-bar-inner { height: 100%; background: #1a237e; transition: width 0.3s; }
-        .upload-zone { border: 2px dashed #1a237e; border-radius: 12px; padding: 40px; text-align: center; background: #f8f9ff; }
-        .upload-zone.dragover { background: #e8eaf6; }
-        .param-form label { font-weight: 500; margin-bottom: 4px; }
-        .param-form input, .param-form select { border-radius: 8px; }
-        .system-card { font-size: .9rem; }
-        .system-card .value { font-size: 1.4rem; font-weight: 700; color: #1a237e; }
-        .pipeline-section-title { font-size: 0.75rem; color: #6c757d; text-transform: uppercase; letter-spacing: 1px; padding: 8px 15px 2px; margin-top: 8px; }
-    </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
     {% block extra_css %}{% endblock %}
 </head>
-<body>
-    <nav class="navbar navbar-expand-lg mb-4">
+<body class="{% block body_class %}{% endblock %}">
+    <nav class="navbar navbar-expand-lg app-navbar">
         <div class="container-fluid">
-            <a class="navbar-brand fw-bold" href="/">生信分析平台</a>
-            <div class="navbar-nav">
-                <a class="nav-link" href="/">控制台</a>
-                <a class="nav-link" href="/projects/new">新建项目</a>
-                <a class="nav-link" href="/settings/ai">AI API 设置</a>
-            </div>
-            <div class="d-flex align-items-center" id="system-status">
-                <span class="text-white-50 small" id="sys-info">加载中...</span>
-                {% if config.PLATFORM_ACCESS_PASSWORD %}
-                <a class="nav-link ms-3" href="{{ url_for('platform_logout') }}">退出</a>
-                {% endif %}
+            <a class="brand-lockup" href="/" aria-label="oelab agent 首页">
+                <span class="brand-mark" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none"><path d="M5 7.5 12 3l7 4.5v9L12 21l-7-4.5v-9Z" stroke="currentColor" stroke-width="1.8"/><path d="m8.5 10.2 3.5 2.1 3.5-2.1M12 12.3V17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </span>
+                <span><span class="brand-name">oelab agent</span><span class="brand-tagline">research intelligence</span></span>
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#primary-nav" aria-controls="primary-nav" aria-expanded="false" aria-label="展开导航">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="primary-nav">
+                <div class="navbar-nav me-auto">
+                    <a class="nav-link {% if request.path == '/' %}active{% endif %}" href="/">AI 工作台</a>
+                    <a class="nav-link {% if request.path == '/projects' %}active{% endif %}" href="/projects">研究项目</a>
+                    <a class="nav-link {% if request.path == '/projects/new' %}active{% endif %}" href="/projects/new">新建项目</a>
+                    <a class="nav-link {% if request.path.startswith('/settings/ai') %}active{% endif %}" href="/settings/ai">AI 设置</a>
+                </div>
+                <div class="system-status" id="system-status">
+                    <span id="sys-info">读取系统状态…</span>
+                    {% if config.PLATFORM_ACCESS_PASSWORD %}
+                    <a class="nav-link" href="{{ url_for('platform_logout') }}">退出</a>
+                    {% endif %}
+                </div>
             </div>
         </div>
     </nav>
-    <div class="container-fluid px-4">
+    <main class="container-fluid px-4 app-content">
         {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
             {% for cat, msg in messages %}
@@ -60,7 +48,11 @@
         {% endif %}
         {% endwith %}
         {% block content %}{% endblock %}
-    </div>
+    </main>
+    <footer class="app-footer">
+        <span><strong>oelab agent</strong> · 研究智能工作空间</span>
+        <span>Internal research environment</span>
+    </footer>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         async function updateSystemStatus() {

@@ -11,6 +11,19 @@ from database import get_conn
 from .runs import get_workflow_run, transition_workflow_run
 
 
+VISUAL_ARTIFACT_KINDS = frozenset({
+    "multiqc_report",
+    "wes_html_report",
+    "wes_raster_figure",
+    "wes_document_figure",
+})
+
+
+def is_visual_artifact(item: Dict[str, Any]) -> bool:
+    """Whether a registered artifact can be rendered in the WES result page."""
+    return str(item.get("artifact_kind") or "") in VISUAL_ARTIFACT_KINDS
+
+
 def _sha256(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -71,6 +84,14 @@ def _kind(relative_path: str) -> str:
     name = relative_path.lower()
     if name.endswith("multiqc_report.html"):
         return "multiqc_report"
+    if name.endswith("recalibrated.csv") and "/csv/" in "/" + name:
+        return "recalibrated_samplesheet"
+    if name.endswith("variantcalled.csv") and "/csv/" in "/" + name:
+        return "variant_samplesheet"
+    if name.endswith((".recal.cram", ".recal.bam")):
+        return "recalibrated_alignment"
+    if name.endswith((".recal.cram.crai", ".recal.bam.bai")):
+        return "recalibrated_alignment_index"
     if name.endswith(".vcf.gz.tbi"):
         return "vcf_index"
     if name.endswith(".ann.vcf.gz"):
@@ -83,6 +104,15 @@ def _kind(relative_path: str) -> str:
         return "pipeline_provenance"
     if name.endswith("variantcalled.csv"):
         return "variant_summary"
+    # Keep only formats browsers can safely display in the result page.  They
+    # are collected from the controlled per-run results directory, never from
+    # arbitrary user paths.
+    if name.endswith((".html", ".htm")):
+        return "wes_html_report"
+    if name.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+        return "wes_raster_figure"
+    if name.endswith((".pdf", ".svg")):
+        return "wes_document_figure"
     return ""
 
 
@@ -154,15 +184,43 @@ def collect_workflow_artifacts(run_id: str, project_id: str, *, strict: bool = T
         return {"valid": False, "artifacts": [], "errors": errors}
 
     workflow_key = run.get("workflow_key")
-    primary_kinds = {
-        "wes_germline": {"filtered_vcf"},
-        "wes_somatic": {"variant_vcf"},
-        "wes_annotate_only": {"annotated_vcf"},
-    }.get(workflow_key, set())
+    launch = run.get("launch") or {}
+    stage_key = str(launch.get("stage_key") or "")
+    if stage_key == "preprocess_mapping":
+        primary_kinds = {"recalibrated_samplesheet"}
+        required_kinds = {"recalibrated_samplesheet", "multiqc_report"}
+    elif stage_key == "variant_calling":
+        # Filtering is an explicit, reviewable germline option.  When it is
+        # disabled, the unfiltered caller VCF is the intended primary output
+        # rather than evidence of a failed run.
+        options = launch.get("pipeline_options") or {}
+        germline_kind = (
+            {"filtered_vcf"}
+            if options.get("filter_vcfs", True)
+            else {"variant_vcf"}
+        )
+        primary_kinds = germline_kind if workflow_key == "wes_germline" else {"variant_vcf"}
+        required_kinds = primary_kinds | {"vcf_index", "variant_samplesheet", "multiqc_report"}
+    elif stage_key == "annotation":
+        primary_kinds = {"annotated_vcf"}
+        required_kinds = primary_kinds | {"vcf_index", "multiqc_report"}
+    else:
+        options = launch.get("pipeline_options") or {}
+        germline_kind = (
+            {"filtered_vcf"}
+            if options.get("filter_vcfs", True)
+            else {"variant_vcf"}
+        )
+        primary_kinds = {
+            "wes_germline": germline_kind,
+            "wes_somatic": {"variant_vcf"},
+            "wes_annotate_only": {"annotated_vcf"},
+        }.get(workflow_key, set())
+        required_kinds = primary_kinds | {"vcf_index", "multiqc_report"}
     artifacts = []
     for path, kind in _candidate_paths(results_dir):
         relative = os.path.relpath(path, results_dir)
-        required = kind in primary_kinds or kind in {"vcf_index", "multiqc_report"}
+        required = kind in required_kinds
         artifacts.append(_register(
             run_id, path, kind, required,
             {"relative_path": relative, "size_bytes": os.path.getsize(path)},
@@ -171,11 +229,21 @@ def collect_workflow_artifacts(run_id: str, project_id: str, *, strict: bool = T
     kinds = {item["artifact_kind"] for item in artifacts}
     errors = []
     if primary_kinds and not kinds.intersection(primary_kinds):
-        errors.append("缺少 workflow 主 VCF 工件")
-    if "vcf_index" not in kinds:
-        errors.append("缺少 VCF tabix index")
-    if "multiqc_report" not in kinds:
-        errors.append("缺少 MultiQC HTML")
+        if stage_key == "preprocess_mapping":
+            errors.append("缺少供下一步使用的 recalibrated.csv")
+        elif stage_key == "annotation":
+            errors.append("缺少注释后的主 VCF 工件")
+        else:
+            errors.append("缺少 workflow 主 VCF 工件")
+    requirement_errors = {
+        "recalibrated_samplesheet": "缺少供下一步使用的 recalibrated.csv",
+        "variant_samplesheet": "缺少供下一步使用的 variantcalled.csv",
+        "vcf_index": "缺少 VCF tabix index",
+        "multiqc_report": "缺少 MultiQC HTML",
+    }
+    for kind, message in requirement_errors.items():
+        if kind in required_kinds and kind not in kinds and message not in errors:
+            errors.append(message)
     if strict and errors and run.get("status") == "completed":
         transition_workflow_run(
             run_id, project_id, "failed", expected_statuses=("completed",),

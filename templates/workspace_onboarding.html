@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}AI 工作台{% endblock %}
+{% block body_class %}workspace-body{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/workspace.css') }}">
+{% endblock %}
+
+{% block content %}
+<div class="agent-shell agent-onboarding-shell">
+    <aside class="agent-sidebar" aria-label="oelab agent 导航">
+        <a class="agent-brand" href="/" aria-label="oelab agent 首页">
+            <span class="agent-brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M5 7.5 12 3l7 4.5v9L12 21l-7-4.5v-9Z" stroke="currentColor" stroke-width="1.8"/><path d="m8.5 10.2 3.5 2.1 3.5-2.1M12 12.3V17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+            <span>oelab agent<small>research intelligence</small></span>
+        </a>
+        <div class="agent-onboarding-side-copy"><span class="agent-sidebar-heading">开始研究</span><p>创建项目后，AI 才能以你的数据、样本与分析历史为科学上下文。</p></div>
+        <div class="agent-sidebar-footer"><a href="/settings/ai"><span aria-hidden="true">⚙</span> AI API 设置</a></div>
+    </aside>
+    <section class="agent-onboarding" aria-label="创建研究项目">
+        <div class="agent-welcome-mark" aria-hidden="true">✦</div>
+        <div class="agent-welcome-kicker">oelab agent</div>
+        <h1>先建立研究上下文，再开始对话。</h1>
+        <p>项目会把研究问题、样本与数据文件、分析任务和结果组织在一起，使 AI 的建议可以追溯、核对并用于下一步分析。</p>
+        <div class="agent-onboarding-actions"><a class="agent-primary-action" href="/projects/new">创建研究项目 <span aria-hidden="true">→</span></a><a class="agent-secondary-action" href="/settings/ai">配置 AI API</a></div>
+        <div class="agent-onboarding-notes"><span>项目隔离</span><span>数据上下文</span><span>确认后执行</span></div>
+    </section>
+</div>
+{% endblock %}

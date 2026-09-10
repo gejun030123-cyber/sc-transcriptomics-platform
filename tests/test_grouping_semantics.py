@@ -137,6 +137,28 @@ def test_bulk_pca_uses_sample_name_groups_when_obs_group_is_missing_or_constant(
     assert '_auto_group' in adata.obs
 
 
+def test_bulk_pca_materializes_and_uses_second_auto_factor_from_ui_text():
+    from modules.bulk_pca import _resolve_pca_groups
+
+    adata = _adata(n_obs=8, n_vars=5)
+    adata.obs.index = [
+        'Ctr_B_1', 'Ctr_B_2', 'Ctr_En_1', 'Ctr_En_2',
+        'PEA_B_1', 'PEA_B_2', 'PEA_En_1', 'PEA_En_2',
+    ]
+
+    colors, color_info = _resolve_pca_groups(adata, '_auto_group_', role='color')
+    markers, marker_info = _resolve_pca_groups(
+        adata, '第2因素：B, En', role='marker',
+    )
+
+    assert color_info['used'] == '_auto_group'
+    assert marker_info['used'] == '_auto_factor2'
+    assert marker_info['source'] == 'sample_name_factor_inference'
+    assert set(colors) == {'Ctr_B', 'Ctr_En', 'PEA_B', 'PEA_En'}
+    assert set(markers) == {'B', 'En'}
+    assert {'_auto_group', '_auto_factor1', '_auto_factor2'} <= set(adata.obs.columns)
+
+
 def test_sample_name_groups_support_attached_replicate_suffixes():
     from modules.io_utils import infer_sample_group_candidates
 

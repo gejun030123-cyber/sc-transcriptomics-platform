@@ -45,6 +45,25 @@
     </div>
 </div>
 
+<div class="card p-3 mb-4 border-primary-subtle">
+    <h6 class="mb-2">分阶段 WES 向导</h6>
+    <div class="row g-2 small">
+        {% for stage in guided_stages %}
+        <div class="col-md">
+            <div class="border rounded h-100 p-2">
+                <strong>{{ stage.title }}</strong>
+                <div class="text-muted mt-1">{{ stage.description }}</div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    <p class="small text-muted mb-0 mt-2">
+        每一步的设置会写入不可变 manifest 和 LaunchSpec。底层仍以一个受控的 Sarek run 顺序执行，
+        因此可使用 <code>-resume</code>，且不会将中间文件暴露为任意命令输入。请在下方按编号逐步设置，
+        第 5 步才会上传、完整性预检并生成 manifest；随后按“预处理与比对 → 变异调用 → 注释”逐项运行和查看结果。
+    </p>
+</div>
+
 <div class="card p-3 mb-4">
     <h6>上传自有 capture BED</h6>
     <p class="text-muted small mb-2">
@@ -156,6 +175,14 @@
         并执行预检，不需要手写 JSON。SRA 不作为直接输入；请先转换为 FASTQ。
     </p>
     <form id="wes-manifest-form">
+        <div class="btn-group btn-group-sm mb-3 flex-wrap" role="group" aria-label="WES 向导步骤">
+            <button type="button" class="btn btn-primary" data-wes-go-step="1">1. 输入</button>
+            <button type="button" class="btn btn-outline-primary" data-wes-go-step="2">2. FASTQ 预处理</button>
+            <button type="button" class="btn btn-outline-primary" data-wes-go-step="3">3. 比对与 QC</button>
+            <button type="button" class="btn btn-outline-primary" data-wes-go-step="4">4. 调用与过滤</button>
+            <button type="button" class="btn btn-outline-primary" data-wes-go-step="5">5. 审阅与提交</button>
+        </div>
+        <div class="wes-guided-pane" data-wes-stage="1">
         <div class="row g-2 mb-3">
             <div class="col-md-3">
                 <label class="form-label small">分析流程</label>
@@ -169,8 +196,16 @@
             </div>
             <div class="col-md-3">
                 <label class="form-label small">Reference bundle</label>
-                <input class="form-control form-control-sm" id="wes-reference-bundle"
-                       value="gatk-grch38-lab-v1" required>
+                <select class="form-select form-select-sm" id="wes-reference-bundle" required>
+                    <option value="">请选择已认证 bundle</option>
+                    {% for bundle in reference_bundles %}
+                    <option value="{{ bundle.id }}" data-assembly="{{ bundle.assembly }}"
+                            {% if bundle.id == 'gatk-grch38-lab-v1' %}selected{% endif %}
+                            {% if not bundle.production_allowed %}disabled{% endif %}>
+                        {{ bundle.id }} · {{ bundle.assembly }} · {{ 'validated' if bundle.production_allowed else 'incomplete' }}
+                    </option>
+                    {% endfor %}
+                </select>
             </div>
             <div class="col-md-3">
                 <label class="form-label small">Capture kit</label>
@@ -229,15 +264,129 @@
         </div>
         <div class="d-flex gap-2 align-items-center">
             <button type="button" class="btn btn-sm btn-outline-secondary" id="wes-add-sample">添加样本</button>
-            <button type="submit" class="btn btn-sm btn-primary">预检并生成 manifest</button>
-            <span class="small text-muted" id="wes-manifest-status"></span>
+            <button type="button" class="btn btn-sm btn-primary" data-wes-go-step="2">下一步：FASTQ 预处理</button>
+        </div>
+        </div>
+
+        <div class="wes-guided-pane d-none" data-wes-stage="2">
+            <div class="border rounded p-3">
+                <h6 class="small mb-2">2. FASTQ 质控与预处理</h6>
+                <p class="small text-muted">仅 FASTQ 输入需要此步；BAM/CRAM 从变异检测开始，下面选项将自动停用。</p>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" id="wes-trim-fastq" checked>
+                    <label class="form-check-label small" for="wes-trim-fastq">运行 fastp 剪切</label>
+                </div>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" id="wes-trim-nextseq">
+                    <label class="form-check-label small" for="wes-trim-nextseq">去除 NextSeq poly-G tail</label>
+                </div>
+                <div class="row g-2">
+                    <div class="col-md-3"><label class="form-label small">最短 read</label><input class="form-control form-control-sm" id="wes-length-required" type="number" min="1" max="300" value="15" required></div>
+                    <div class="col-md-3"><label class="form-label small">R1 5′剪切</label><input class="form-control form-control-sm" id="wes-clip-r1" type="number" min="0" max="75" value="0" required></div>
+                    <div class="col-md-3"><label class="form-label small">R2 5′剪切</label><input class="form-control form-control-sm" id="wes-clip-r2" type="number" min="0" max="75" value="0" required></div>
+                </div>
+                <div class="form-check mt-2">
+                    <input class="form-check-input" type="checkbox" id="wes-save-trimmed">
+                    <label class="form-check-label small" for="wes-save-trimmed">保留 trimmed FASTQ（占用更多空间）</label>
+                </div>
+            </div>
+            <div class="d-flex gap-2 mt-3">
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-wes-go-step="1">上一步</button>
+                <button type="button" class="btn btn-sm btn-primary" data-wes-go-step="3">下一步：比对与 QC</button>
+            </div>
+        </div>
+
+        <div class="wes-guided-pane d-none" data-wes-stage="3">
+            <div class="border rounded p-3">
+                <h6 class="small mb-2">3. 比对与覆盖度 QC</h6>
+                <label class="form-label small">比对器</label>
+                <select class="form-select form-select-sm mb-2" id="wes-aligner">
+                    <option value="bwa-mem" selected>BWA-MEM（推荐、稳定）</option>
+                    <option value="bwa-mem2">BWA-MEM2</option>
+                </select>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" id="wes-save-mapped">
+                    <label class="form-check-label small" for="wes-save-mapped">保留最终比对文件供复核</label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="wes-save-output-bam" disabled>
+                    <label class="form-check-label small" for="wes-save-output-bam">保留为 BAM（默认 CRAM）</label>
+                </div>
+                <p class="small text-muted mt-2 mb-0">目标区域、重复率、覆盖度与 MultiQC 会自动产生；capture BED 不能在此步骤替换。</p>
+            </div>
+            <div class="d-flex gap-2 mt-3">
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-wes-go-step="2">上一步</button>
+                <button type="button" class="btn btn-sm btn-primary" data-wes-go-step="4">下一步：调用与过滤</button>
+            </div>
+        </div>
+
+        <div class="wes-guided-pane d-none" data-wes-stage="4">
+            <div class="border rounded p-3">
+                <h6 class="small mb-2">4. 调用、过滤与结果审阅</h6>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" id="wes-joint-germline">
+                    <label class="form-check-label small" for="wes-joint-germline">胚系联合调用（仅小家系/多样本）</label>
+                </div>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" id="wes-filter-vcfs" checked>
+                    <label class="form-check-label small" for="wes-filter-vcfs">生成过滤后的 VCF</label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="wes-normalize-vcfs" checked>
+                    <label class="form-check-label small" for="wes-normalize-vcfs">规范化 VCF</label>
+                </div>
+                <p class="small text-muted mt-2 mb-0">caller 由 workflow 固定：胚系 HaplotypeCaller，肿瘤 Mutect2。注释只能使用已登记的本地资源。</p>
+            </div>
+            <div class="d-flex gap-2 mt-3">
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-wes-go-step="3">上一步</button>
+                <button type="button" class="btn btn-sm btn-primary" data-wes-go-step="5">下一步：审阅与提交</button>
+            </div>
+        </div>
+
+        <div class="wes-guided-pane d-none" data-wes-stage="5">
+            <div class="border rounded p-3 bg-light">
+                <h6 class="small mb-2">5. 审阅、完整性预检与提交</h6>
+                <ul class="small mb-3" id="wes-review-summary"></ul>
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="wes-full-fastq-integrity" checked>
+                    <label class="form-check-label small" for="wes-full-fastq-integrity">
+                        预检时完整读取 FASTQ（gzip 会检测截断或损坏；首次强烈建议，耗时随文件大小增加）
+                    </label>
+                </div>
+            </div>
+            <div class="d-flex gap-2 align-items-center mt-3">
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-wes-go-step="4">上一步</button>
+                <button type="submit" class="btn btn-sm btn-primary">预检并生成 manifest</button>
+                <span class="small text-muted" id="wes-manifest-status"></span>
+            </div>
         </div>
     </form>
     <div class="mt-3 d-none" id="wes-manifest-result">
         <div class="alert alert-secondary small mb-2" id="wes-manifest-message"></div>
-        <button type="button" class="btn btn-sm btn-outline-primary" id="wes-prepare-run">准备 LaunchSpec</button>
+        <pre class="small border rounded bg-light p-2 text-wrap d-none" id="wes-launch-summary"></pre>
+        <button type="button" class="btn btn-sm btn-outline-primary" id="wes-prepare-run">准备第 1 步：预处理、比对与 QC</button>
         <button type="button" class="btn btn-sm btn-danger d-none" id="wes-launch-run">确认启动 WES</button>
     </div>
+</div>
+
+<div class="card p-3 mb-4 d-none" id="wes-next-stage-config">
+    <h6 id="wes-next-stage-title">下一阶段参数</h6>
+    <p class="small text-muted" id="wes-next-stage-note"></p>
+    <div id="wes-calling-stage-options" class="d-none">
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="wes-stage-filter-vcfs" checked>
+            <label class="form-check-label" for="wes-stage-filter-vcfs">执行 caller 后的 VCF 过滤</label>
+        </div>
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="wes-stage-normalize-vcfs" checked>
+            <label class="form-check-label" for="wes-stage-normalize-vcfs">执行 VCF 规范化</label>
+        </div>
+        <div class="form-check" id="wes-stage-joint-germline-wrap">
+            <input class="form-check-input" type="checkbox" id="wes-stage-joint-germline">
+            <label class="form-check-label" for="wes-stage-joint-germline">胚系联合调用</label>
+        </div>
+    </div>
+    <button type="button" class="btn btn-sm btn-outline-primary mt-2" id="wes-confirm-next-stage">按以上参数准备 LaunchSpec</button>
 </div>
 
 <div class="card p-3 mb-4">
@@ -254,23 +403,48 @@
     </div>
 </div>
 
-<div class="card p-3">
+<div class="card p-3" id="wes-runs">
     <h6>运行与结果</h6>
+    {% if has_active_runs %}
+    <p class="small text-muted mb-2">运行中；此区域每 10 秒自动刷新状态。</p>
+    {% endif %}
     {% if runs %}
     <div class="table-responsive">
         <table class="table table-sm align-middle small">
-            <thead><tr><th>Run</th><th>流程</th><th>状态</th><th>创建时间</th><th>结果工件</th></tr></thead>
+            <thead><tr><th>Run</th><th>分析步骤</th><th>状态</th><th>创建时间</th><th>结果工件</th><th>下一步</th></tr></thead>
             <tbody>
             {% for run in runs %}
             <tr>
-                <td><code>{{ run.id }}</code></td>
-                <td>{{ run.workflow_key }}</td>
-                <td><span class="status-badge status-{{ run.status }}">{{ run.status }}</span></td>
+                <td><a href="/projects/{{ project.id }}/wes/runs/{{ run.id }}"><code>{{ run.id }}</code></a></td>
+                <td>
+                    {% if run.stage %}
+                    <strong>{{ run.stage.title }}</strong>
+                    <div class="text-muted">{{ run.stage.description }}</div>
+                    {% else %}{{ run.workflow_key }}{% endif %}
+                </td>
+                <td>
+                    <span class="status-badge status-{{ run.status }}">{{ run.status }}</span>
+                    {% if run.error_text %}
+                    <div class="text-danger mt-1">{{ run.error_text }}</div>
+                    {% endif %}
+                </td>
                 <td>{{ run.created_at }}</td>
                 <td>
                     {% for item in run.artifacts %}
                     <a class="d-block" href="/projects/{{ project.id }}/wes/artifacts/{{ item.id }}">{{ item.artifact_kind }} · {{ item.metadata.relative_path }}</a>
                     {% else %}<span class="text-muted">尚未收集</span>{% endfor %}
+                </td>
+                <td>
+                    {% if run.status == 'completed' and run.next_stage %}
+                    <button type="button" class="btn btn-sm btn-outline-primary wes-prepare-next-stage"
+                            data-run-id="{{ run.id }}" data-stage-key="{{ run.next_stage.key }}"
+                            data-analysis-workflow="{{ run.stage.analysis_workflow_key }}"
+                            data-stage-title="{{ run.next_stage.title }}">
+                        准备：{{ run.next_stage.title }}
+                    </button>
+                    {% elif run.stage and not run.next_stage and run.status == 'completed' %}
+                    <span class="text-success">分步分析完成</span>
+                    {% else %}<span class="text-muted">等待当前步骤完成</span>{% endif %}
                 </td>
             </tr>
             {% endfor %}
@@ -283,6 +457,9 @@
 <script>
 (function () {
     const pid = {{ project.id|tojson }};
+    const savedStageOptions = {
+        {% for run in runs %}{{ run.id|tojson }}: {{ run.launch.get('pipeline_options', {})|tojson }},{% endfor %}
+    };
     const form = document.getElementById('wes-manifest-form');
     const tableBody = document.querySelector('#wes-sample-table tbody');
     const workflowSelect = document.getElementById('wes-workflow-key');
@@ -293,9 +470,141 @@
     const sraForm = document.getElementById('wes-sra-form');
     const sraStatus = document.getElementById('wes-sra-status');
     const sraUseResult = document.getElementById('wes-sra-use-result');
+    const guidedPanes = Array.from(form.querySelectorAll('.wes-guided-pane'));
+    const guideButtons = Array.from(form.querySelectorAll('[data-wes-go-step]'));
+    const launchSummary = document.getElementById('wes-launch-summary');
+    const launchButton = document.getElementById('wes-launch-run');
+    const nextStageConfig = document.getElementById('wes-next-stage-config');
+    const nextStageTitle = document.getElementById('wes-next-stage-title');
+    const nextStageNote = document.getElementById('wes-next-stage-note');
+    const callingStageOptions = document.getElementById('wes-calling-stage-options');
+    const nextStageConfirm = document.getElementById('wes-confirm-next-stage');
     let manifestId = '';
     let preparedRunId = '';
+    let pendingNextStage = null;
     let sraResult = null;
+    let activeGuideStep = 1;
+
+    function control(id) {
+        return document.getElementById(id);
+    }
+
+    function collectPipelineOptions() {
+        const isFastq = inputTypeSelect.value === 'fastq';
+        const trimEnabled = isFastq && control('wes-trim-fastq').checked;
+        const options = {
+            trim_fastq: trimEnabled,
+            trim_nextseq: trimEnabled && control('wes-trim-nextseq').checked,
+            length_required: Number(control('wes-length-required').value),
+            clip_r1: trimEnabled ? Number(control('wes-clip-r1').value) : 0,
+            clip_r2: trimEnabled ? Number(control('wes-clip-r2').value) : 0,
+            save_trimmed: trimEnabled && control('wes-save-trimmed').checked,
+            aligner: control('wes-aligner').value,
+            save_mapped: isFastq && control('wes-save-mapped').checked,
+            save_output_as_bam: isFastq && control('wes-save-output-bam').checked,
+            filter_vcfs: control('wes-filter-vcfs').checked,
+            normalize_vcfs: control('wes-normalize-vcfs').checked
+        };
+        if (workflowSelect.value === 'wes_germline') {
+            options.joint_germline = control('wes-joint-germline').checked;
+        }
+        return options;
+    }
+
+    function updateReviewSummary() {
+        const summary = control('wes-review-summary');
+        if (!summary) return;
+        const options = collectPipelineOptions();
+        const samples = tableBody.querySelectorAll('.wes-sample-row').length;
+        const caller = workflowSelect.value === 'wes_somatic' ? 'Mutect2' : 'HaplotypeCaller';
+        const entries = [
+            `流程：${workflowSelect.value}（固定 caller：${caller}）`,
+            `样本：${samples} 个；输入：${inputTypeSelect.value.toUpperCase()}`,
+            `reference：${control('wes-reference-bundle').value || '尚未选择'}；capture kit：${control('wes-capture-kit').value || '尚未选择'}`,
+            `过滤 VCF：${options.filter_vcfs ? '是' : '否'}；规范化 VCF：${options.normalize_vcfs ? '是' : '否'}`
+        ];
+        if (inputTypeSelect.value === 'fastq') {
+            entries.splice(2, 0, `fastp：${options.trim_fastq ? '开启' : '关闭'}；比对器：${options.aligner}；保留比对文件：${options.save_mapped ? '是' : '否'}`);
+        }
+        if (workflowSelect.value === 'wes_germline') {
+            entries.push(`胚系联合调用：${options.joint_germline ? '开启' : '关闭'}`);
+        }
+        summary.replaceChildren(...entries.map(text => {
+            const item = document.createElement('li');
+            item.textContent = text;
+            return item;
+        }));
+    }
+
+    function updateGuidedControls() {
+        const isFastq = inputTypeSelect.value === 'fastq';
+        const trimFastq = control('wes-trim-fastq');
+        const trimEnabled = isFastq && trimFastq.checked;
+        trimFastq.disabled = !isFastq;
+        if (!isFastq) trimFastq.checked = false;
+        ['wes-trim-nextseq', 'wes-length-required', 'wes-clip-r1', 'wes-clip-r2', 'wes-save-trimmed']
+            .forEach(id => { control(id).disabled = !trimEnabled; });
+        if (!trimEnabled) {
+            control('wes-trim-nextseq').checked = false;
+            control('wes-save-trimmed').checked = false;
+            control('wes-clip-r1').value = 0;
+            control('wes-clip-r2').value = 0;
+        }
+        control('wes-aligner').disabled = !isFastq;
+        control('wes-save-mapped').disabled = !isFastq;
+        if (!isFastq) control('wes-save-mapped').checked = false;
+        const retainMapped = isFastq && control('wes-save-mapped').checked;
+        control('wes-save-output-bam').disabled = !retainMapped;
+        if (!retainMapped) control('wes-save-output-bam').checked = false;
+        const isGermline = workflowSelect.value === 'wes_germline';
+        control('wes-joint-germline').disabled = !isGermline;
+        if (!isGermline) control('wes-joint-germline').checked = false;
+        control('wes-full-fastq-integrity').disabled = !isFastq;
+        if (!isFastq) control('wes-full-fastq-integrity').checked = false;
+        updateReviewSummary();
+    }
+
+    function validateGuideStep(step) {
+        const pane = form.querySelector(`.wes-guided-pane[data-wes-stage="${step}"]`);
+        if (!pane) return true;
+        const invalid = Array.from(pane.querySelectorAll('input, select, textarea')).find(field => {
+            return !field.disabled && !field.checkValidity();
+        });
+        if (!invalid) return true;
+        invalid.focus();
+        status.textContent = '请先完成当前步骤中的必填项或修正参数范围。';
+        return false;
+    }
+
+    function showGuideStep(nextStep) {
+        const target = Number(nextStep);
+        if (target < 1 || target > 5 || target === activeGuideStep) return;
+        if (target > activeGuideStep + 1) {
+            status.textContent = '请按顺序完成每一步设置。';
+            return;
+        }
+        if (target > activeGuideStep && !validateGuideStep(activeGuideStep)) return;
+        activeGuideStep = target;
+        guidedPanes.forEach(pane => pane.classList.toggle(
+            'd-none', Number(pane.dataset.wesStage) !== activeGuideStep
+        ));
+        guideButtons.forEach(button => {
+            const step = Number(button.dataset.wesGoStep);
+            button.classList.toggle('btn-primary', step === activeGuideStep);
+            button.classList.toggle('btn-outline-primary', step !== activeGuideStep);
+        });
+        updateReviewSummary();
+    }
+
+    function invalidatePreparedManifest() {
+        if (!manifestId && !preparedRunId) return;
+        manifestId = '';
+        preparedRunId = '';
+        resultBox.classList.add('d-none');
+        launchSummary.classList.add('d-none');
+        control('wes-launch-run').classList.add('d-none');
+        status.textContent = '设置已更改；请在第 5 步重新预检并生成 manifest。';
+    }
 
     function updateInputFields() {
         const type = inputTypeSelect.value;
@@ -308,6 +617,7 @@
             row.querySelectorAll('.wes-bam, .wes-bai').forEach(el => el.required = type === 'bam' && !hasServerPaths);
             row.querySelectorAll('.wes-cram, .wes-crai').forEach(el => el.required = type === 'cram' && !hasServerPaths);
         });
+        updateGuidedControls();
     }
 
     function addRow() {
@@ -390,6 +700,7 @@
         return {
             reference_bundle_id: document.getElementById('wes-reference-bundle').value.trim(),
             capture_bed_id: document.getElementById('wes-capture-kit').value,
+            pipeline_options: collectPipelineOptions(),
             samples: samples
         };
     }
@@ -403,8 +714,78 @@
         return data;
     }
 
+    function showPreparedStage(data) {
+        preparedRunId = (data.run || {}).id || '';
+        const launch = data.launch || {};
+        const stage = data.stage || launch.stage || {};
+        resultMessage.textContent = data.message || `已准备 run ${preparedRunId}`;
+        launchSummary.textContent = JSON.stringify({
+            stage: stage.title || launch.stage_key || '完整流程',
+            workflow: launch.workflow,
+            profile: launch.profile,
+            input_type: launch.input_type,
+            reference_bundle_id: launch.reference_bundle_id,
+            capture_bed_id: launch.capture_bed_id,
+            pipeline_options: launch.pipeline_options,
+            sarek_step: (launch.parameters || {}).step,
+            sarek_tools: (launch.parameters || {}).tools || '仅预处理/比对'
+        }, null, 2);
+        launchSummary.classList.remove('d-none');
+        launchButton.textContent = `确认启动：${stage.title || 'WES 阶段'}`;
+        launchButton.classList.remove('d-none');
+        resultBox.classList.remove('d-none');
+        nextStageConfig.classList.add('d-none');
+        pendingNextStage = null;
+        status.textContent = `已准备 ${preparedRunId}；请审阅 LaunchSpec 后确认启动。`;
+    }
+
+    function showNextStageParameters(runId, stageKey, stageTitle, analysisWorkflow) {
+        pendingNextStage = {runId, stageKey, stageTitle, analysisWorkflow};
+        nextStageTitle.textContent = `准备：${stageTitle}`;
+        const isCalling = stageKey === 'variant_calling';
+        callingStageOptions.classList.toggle('d-none', !isCalling);
+        if (isCalling) {
+            const saved = savedStageOptions[runId] || {};
+            control('wes-stage-filter-vcfs').checked = saved.filter_vcfs !== false;
+            control('wes-stage-normalize-vcfs').checked = saved.normalize_vcfs !== false;
+            const isGermline = analysisWorkflow === 'wes_germline';
+            control('wes-stage-joint-germline-wrap').classList.toggle('d-none', !isGermline);
+            control('wes-stage-joint-germline').checked = isGermline && saved.joint_germline === true;
+            nextStageNote.textContent = '在此阶段确认 caller 后的过滤与规范化设置；caller 由所选胚系/体细胞 workflow 固定。';
+            showGuideStep(4);
+        } else {
+            nextStageNote.textContent = '本阶段固定使用本地已认证的 VEP 注释资源；没有开放的工具或路径参数。';
+        }
+        nextStageConfig.classList.remove('d-none');
+        nextStageConfig.scrollIntoView({behavior: 'smooth', block: 'center'});
+    }
+
+    function nextStageOptions() {
+        if (!pendingNextStage || pendingNextStage.stageKey !== 'variant_calling') return {};
+        const options = {
+            filter_vcfs: control('wes-stage-filter-vcfs').checked,
+            normalize_vcfs: control('wes-stage-normalize-vcfs').checked
+        };
+        if (pendingNextStage.analysisWorkflow === 'wes_germline') {
+            options.joint_germline = control('wes-stage-joint-germline').checked;
+        }
+        return options;
+    }
+
+    guideButtons.forEach(button => {
+        button.addEventListener('click', () => showGuideStep(button.dataset.wesGoStep));
+    });
     inputTypeSelect.addEventListener('change', updateInputFields);
+    workflowSelect.addEventListener('change', updateGuidedControls);
+    ['wes-trim-fastq', 'wes-save-mapped'].forEach(id => {
+        control(id).addEventListener('change', updateGuidedControls);
+    });
     document.getElementById('wes-add-sample').addEventListener('click', addRow);
+    form.addEventListener('input', invalidatePreparedManifest);
+    form.addEventListener('change', event => {
+        if (!event.target.matches('[data-wes-go-step]')) invalidatePreparedManifest();
+        updateReviewSummary();
+    });
     tableBody.addEventListener('change', event => {
         if (event.target.type === 'file') {
             const row = event.target.closest('.wes-sample-row');
@@ -513,6 +894,11 @@
     });
     form.addEventListener('submit', async event => {
         event.preventDefault();
+        if (activeGuideStep !== 5) {
+            showGuideStep(activeGuideStep + 1);
+            return;
+        }
+        if (!validateGuideStep(5)) return;
         status.textContent = '正在上传样本文件…';
         resultBox.classList.add('d-none');
         try {
@@ -525,12 +911,14 @@
             status.textContent = '文件上传完成，正在预检…';
             const data = await postJson(`/api/projects/${pid}/wes/preflight`, {
                 workflow_key: workflowSelect.value, manifest: collectManifest(uploadedPaths),
-                check_files: true, check_content: false
+                check_files: true, check_content: true,
+                full_fastq_integrity: control('wes-full-fastq-integrity').checked
             });
             manifestId = data.manifest_id || '';
             status.textContent = `预检通过，manifest ${manifestId}`;
             resultMessage.textContent = (data.message || 'manifest 已登记') +
                 ((data.warnings || []).length ? ' 警告：' + data.warnings.join('；') : '');
+            launchSummary.classList.add('d-none');
             resultBox.classList.remove('d-none');
         } catch (error) {
             const details = (error.errors || []).concat(error.warnings || []).join('；');
@@ -539,31 +927,59 @@
     });
     document.getElementById('wes-prepare-run').addEventListener('click', async () => {
         if (!manifestId) return;
-        status.textContent = '正在生成 LaunchSpec…';
+        status.textContent = '正在生成第 1 步的 LaunchSpec…';
         try {
-            const data = await postJson(`/api/projects/${pid}/wes/runs/prepare`, {
+            const data = await postJson(`/api/projects/${pid}/wes/stages/prepare`, {
                 workflow_key: workflowSelect.value, manifest_id: manifestId
             });
-            preparedRunId = (data.run || {}).id || '';
-            resultMessage.textContent = data.message || `已准备 run ${preparedRunId}`;
-            document.getElementById('wes-launch-run').classList.remove('d-none');
-            status.textContent = `已准备 ${preparedRunId}`;
+            showPreparedStage(data);
         } catch (error) {
             status.textContent = error.error || 'LaunchSpec 准备失败';
         }
     });
-    document.getElementById('wes-launch-run').addEventListener('click', async () => {
+    document.querySelectorAll('.wes-prepare-next-stage').forEach(button => {
+        button.addEventListener('click', async () => {
+            showNextStageParameters(
+                button.dataset.runId, button.dataset.stageKey, button.dataset.stageTitle,
+                button.dataset.analysisWorkflow
+            );
+        });
+    });
+    nextStageConfirm.addEventListener('click', async () => {
+        if (!pendingNextStage) return;
+        status.textContent = `正在生成“${pendingNextStage.stageTitle}”的 LaunchSpec…`;
+        try {
+            const data = await postJson(
+                `/api/projects/${pid}/wes/runs/${pendingNextStage.runId}/next-stage/prepare`,
+                {pipeline_options: nextStageOptions()}
+            );
+            showPreparedStage(data);
+            resultBox.scrollIntoView({behavior: 'smooth', block: 'center'});
+        } catch (error) {
+            status.textContent = error.error || '下一阶段 LaunchSpec 准备失败';
+        }
+    });
+    launchButton.addEventListener('click', async () => {
         if (!preparedRunId || !confirm('确认提交 WES Nextflow？')) return;
         status.textContent = '正在提交…';
         try {
             const data = await postJson(`/api/projects/${pid}/wes/runs/${preparedRunId}/launch`, {confirm: true});
             resultMessage.textContent = data.message || 'WES 已启动';
-            status.textContent = 'WES 已提交';
+            status.textContent = 'WES 已提交，正在打开运行状态…';
+            window.location.hash = 'wes-runs';
+            window.location.reload();
         } catch (error) {
             status.textContent = error.error || 'WES 启动失败';
         }
     });
+    {% if has_active_runs %}
+    window.setTimeout(() => {
+        window.location.hash = 'wes-runs';
+        window.location.reload();
+    }, 10000);
+    {% endif %}
     updateInputFields();
+    updateReviewSummary();
 })();
 </script>
 {% endblock %}

@@ -1,6 +1,8 @@
 from modules.base import BaseAnalysis
 from modules.io_utils import resolve_obs_grouping
 from modules.sc_de_utils import log1p_adata_for_cell_level_de, normalization_semantics
+from modules.sc_batch import _available_path, _safe_name, comparison_id_for_groups
+from modules.sc_batch_export import batch_csv_package_dirs
 
 
 def _benjamini_yekutieli(pvalues):
@@ -582,6 +584,17 @@ class DEGAnalysis(BaseAnalysis):
         # it must not truncate the ranked universe used for audit/enrichment.
         # 全量表使用与 Top-N 表一致的规范列名（gene/logfc/pval/pval_adj/…），
         # 避免同一模块的两张 CSV schema 不一致。
+        deg_source_files = []
+        analysis_grouping = (
+            'annotated_celltype'
+            if any(token in groupby.lower() for token in ('celltype', 'cell_type', 'annotation'))
+            else 'cluster'
+        )
+        analysis_group_label = '细胞类型' if analysis_grouping == 'annotated_celltype' else '聚类'
+        marker_contract = (
+            'celltype_marker_vs_rest'
+            if pairs is None and reference_label == 'rest' else 'celltype_marker_pairwise'
+        )
         if not all_deg_df.empty:
             full_export_df = all_deg_df.rename(columns={
                 'names': 'gene', 'logfoldchanges': 'logfc', 'pvals': 'pval',
@@ -599,6 +612,47 @@ class DEGAnalysis(BaseAnalysis):
             full_csv = os.path.join(results_dir, 'sc_deg_full_results.csv')
             full_export_df.to_csv(full_csv, index=False)
             result_files.append({'file_path': full_csv, 'file_type': 'csv', 'category': 'table', 'label': '完整 DEG 结果'})
+
+            # Give post-annotation cell-type markers the same task-bound,
+            # immutable hand-off as the dedicated condition-DE modules.  The
+            # legacy public CSV may be replaced by a later marker run, so it
+            # must never be the enrichment source of record.
+            source_export = full_export_df.copy()
+            source_export['experimental_group'] = source_export['cluster'].astype(str)
+            source_export['comparison_id'] = [
+                comparison_id_for_groups(experimental, control)
+                for experimental, control in zip(
+                    source_export['experimental_group'],
+                    source_export['control_group'].astype(str),
+                )
+            ]
+            source_export['log2FC'] = pd.to_numeric(source_export['logfc'], errors='coerce')
+            source_export['padj'] = pd.to_numeric(source_export['pval_adj'], errors='coerce')
+            source_export['deg_scope'] = 'per_cluster'
+            source_export['comparison_type'] = marker_contract
+            source_export['analysis_grouping'] = analysis_grouping
+            source_export['analysis_group_key'] = groupby
+            source_export['analysis_group_label'] = analysis_group_label
+            source_export['inference_unit'] = 'cell'
+            source_export['statistical_status'] = 'exploratory_no_biological_replicates'
+            export_folder = str(self.params.get('export_folder', 'sc_batch_results') or 'sc_batch_results')
+            _package_root, package_dirs = batch_csv_package_dirs(
+                self.project_dir, export_folder, included_keys=('deg',),
+            )
+            internal_dir = os.path.join(package_dirs['deg'], '.internal')
+            os.makedirs(internal_dir, exist_ok=True)
+            analysis_id = _safe_name(
+                self.params.get('_analysis_id', 'marker_deg'), 'marker_deg',
+            )
+            for comparison_id, comparison_frame in source_export.groupby(
+                'comparison_id', sort=True, observed=True,
+            ):
+                source_path = _available_path(
+                    internal_dir,
+                    f'sc_marker_task_{analysis_id}_deg_{comparison_id}', '.csv',
+                )
+                comparison_frame.to_csv(source_path, index=False)
+                deg_source_files.append(source_path)
 
         # Cluster marker heatmap
         if self.params.get('show_marker_heatmap', True) and not deg_df.empty:
@@ -695,10 +749,17 @@ class DEGAnalysis(BaseAnalysis):
                 'custom_dotplot_genes': self.params.get('custom_dotplot_genes', '').strip() or None,
                 'requested_groupby': requested_groupby,
                 'groupby': groupby,
+                'analysis_grouping': analysis_grouping,
+                'analysis_group_key': groupby,
+                'analysis_group_label': analysis_group_label,
                 'inference_unit': 'cell',
                 'statistical_status': 'exploratory_cluster_marker',
                 'expression_scale': normalization_semantics(adata),
                 'full_table_exported': bool(export_full_tables),
+                'deg_source_file': deg_source_files[0] if deg_source_files else '',
+                'deg_source_files': deg_source_files,
+                'deg_source_level': 'cell_level',
+                'deg_source_task_contract': marker_contract,
                 'marker_selection': {
                     'used_in_dotplot': not bool(custom_dotplot_str),
                     'cluster_markers': marker_selection.get('cluster_markers', {}),

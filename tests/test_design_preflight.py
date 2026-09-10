@@ -159,6 +159,7 @@ def test_sc_pseudobulk_preflight_passes_with_real_sample_design():
         }, index=[f"cell_{i}" for i in range(20)]),
         var=pd.DataFrame(index=["g1", "g2", "g3"]),
     )
+    adata.layers["counts"] = adata.X.copy()
 
     result = build_design_preflight(
         adata, "sc_pseudobulk_deg",
@@ -169,3 +170,55 @@ def test_sc_pseudobulk_preflight_passes_with_real_sample_design():
     assert result["status"] == "ready"
     assert result["recommended_params"]["sample_key"] == "sample_id"
 
+
+def test_sc_pseudobulk_preflight_requires_annotation_for_celltype_mode():
+    from modules.design_preflight import build_design_preflight
+
+    result = build_design_preflight(
+        _sc_deg_adata(), "sc_pseudobulk_deg",
+        {
+            "sample_key": "batch", "condition_key": "batch",
+            "analysis_scope": "per_cluster",
+            "grouping_mode": "annotated_celltype", "celltype_key": "missing_celltype",
+        },
+    )
+
+    annotation_check = next(
+        check for check in result["checks"] if check["name"] == "细胞类型注释列"
+    )
+    assert annotation_check["status"] == "blocked"
+    assert "先完成细胞注释" in annotation_check["message"]
+
+
+def test_functional_state_preflight_previews_scoped_sample_celltype_units():
+    from modules.design_preflight import build_design_preflight
+
+    adata = ad.AnnData(
+        X=np.ones((24, 2)),
+        obs=pd.DataFrame({
+            "sample_id": ["H1"] * 6 + ["H2"] * 6 + ["D1"] * 6 + ["D2"] * 6,
+            "condition": ["Healthy"] * 12 + ["IBD"] * 12,
+            "celltype": ["Epithelial"] * 4 + ["Immune"] * 2 + ["Epithelial"] * 4 + ["Immune"] * 2
+                        + ["Epithelial"] * 4 + ["Immune"] * 2 + ["Epithelial"] * 4 + ["Immune"] * 2,
+        }, index=[f"cell_{i}" for i in range(24)]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+    )
+
+    result = build_design_preflight(
+        adata, "functional_state",
+        {
+            "sample_key": "sample_id", "condition_key": "condition", "celltype_key": "celltype",
+            "scope_key": "celltype", "scope_values": "Epithelial",
+            "min_cells_per_sample_celltype": 3,
+        },
+    )
+
+    check = next(item for item in result["checks"] if item["name"] == "功能状态统计预览")
+    assert check["status"] == "pass"
+    assert check["value"] == {
+        "selected_cells": 16, "total_cells": 24,
+        "samples_per_condition": {"Healthy": 2, "IBD": 2},
+        "celltype_cells": {"Epithelial": 16},
+        "valid_sample_x_celltype_units": 4, "total_sample_x_celltype_units": 4,
+        "units_below_min_cells": 0, "min_cells_per_sample_celltype": 3,
+    }

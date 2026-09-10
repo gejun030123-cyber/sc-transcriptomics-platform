@@ -1,66 +1,89 @@
 {% extends "base.html" %}
-{% block title %}控制台 - 生信分析平台{% endblock %}
+{% block title %}控制台{% endblock %}
 {% block content %}
-<div class="row mb-4">
-    <div class="col-md-3">
-        <div class="card system-card p-3 text-center">
-            <div class="text-muted">磁盘可用</div>
-            <div class="value">{{ disk_free_gb }} GB</div>
-        </div>
+<section class="dashboard-hero">
+    <div class="dashboard-kicker">Research intelligence workspace</div>
+    <h1>让每一次分析，都更接近可信的发现。</h1>
+    <p>在一个专为实验室研究设计的工作空间中，组织项目、追踪计算任务，并由 AI 协作完成从原始数据到科学结论的每一步。</p>
+    <div class="dashboard-hero-actions">
+        <a href="/projects/new" class="btn btn-primary">创建研究项目 <span aria-hidden="true">→</span></a>
+        <a href="/settings/ai" class="btn btn-outline-light">配置 AI 协作</a>
     </div>
-    <div class="col-md-3">
-        <div class="card system-card p-3 text-center">
-            <div class="text-muted">内存可用</div>
-            <div class="value">{{ ram_avail_gb }} GB</div>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="card system-card p-3 text-center">
-            <div class="text-muted">内存使用率</div>
-            <div class="value">{{ ram_percent }}%</div>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="card system-card p-3 text-center">
-            <div class="text-muted">项目数</div>
-            <div class="value">{{ projects|length }}</div>
-        </div>
-    </div>
-</div>
+</section>
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h4 class="mb-0">项目列表</h4>
+<section aria-label="系统概览">
+    <div class="row g-3">
+        <div class="col-6 col-xl-3">
+            <div class="card metric-card">
+                <div class="metric-card-label">可用存储</div>
+                <div class="metric-card-value">{{ disk_free_gb }} <small>GB</small></div>
+                <div class="metric-card-caption">研究数据工作区</div>
+            </div>
+        </div>
+        <div class="col-6 col-xl-3">
+            <div class="card metric-card">
+                <div class="metric-card-label">可用内存</div>
+                <div class="metric-card-value">{{ ram_avail_gb }} <small>GB</small></div>
+                <div class="metric-card-caption">可用于当前分析任务</div>
+            </div>
+        </div>
+        <div class="col-6 col-xl-3">
+            <div class="card metric-card">
+                <div class="metric-card-label">内存负载</div>
+                <div class="metric-card-value">{{ ram_percent }}<small>%</small></div>
+                <div class="metric-card-caption">系统实时使用率</div>
+            </div>
+        </div>
+        <div class="col-6 col-xl-3">
+            <div class="card metric-card">
+                <div class="metric-card-label">研究项目</div>
+                <div class="metric-card-value">{{ projects|length }}</div>
+                <div class="metric-card-caption">已纳入 oelab agent</div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<div class="dashboard-section-heading">
+    <div>
+        <h2>研究项目</h2>
+        <p>选择一个项目继续分析，或创建新的研究空间。</p>
+    </div>
     <a href="/projects/new" class="btn btn-primary">+ 新建项目</a>
 </div>
 
 {% if projects %}
-<div class="row">
+<div class="row g-3">
     {% for p in projects %}
-    <div class="col-md-4 mb-3">
-        <div class="card p-3">
-            <div class="d-flex justify-content-between align-items-start">
-                <h5 class="mb-1">{{ p.name }}</h5>
+    <div class="col-md-6 col-xl-4">
+        <article class="card project-card">
+            <div class="project-card-header">
+                <div class="d-flex gap-2 min-w-0">
+                    <span class="project-card-index">{{ '%02d'|format(loop.index) }}</span>
+                    <h3>{{ p.name }}</h3>
+                </div>
                 <span class="status-badge status-{{ p.status }}">{{ p.status }}</span>
             </div>
-            <p class="text-muted small mb-2">{{ p.description[:80] }}{% if p.description|length > 80 %}...{% endif %}</p>
-            <div class="small text-muted mb-2">创建于: {{ p.created_at[:10] }}</div>
-            <div>
-                <a href="/projects/{{ p.id }}" class="btn btn-outline-primary btn-sm">查看</a>
-                <a href="/projects/{{ p.id }}/workspace" class="btn btn-primary btn-sm">AI 工作台</a>
-                <form method="post" action="/projects/{{ p.id }}/delete" class="d-inline"
+            <p class="project-card-description">{{ p.description[:110] if p.description else '尚未添加项目说明。' }}{% if p.description and p.description|length > 110 %}…{% endif %}</p>
+            <div class="project-card-meta">创建于 {{ p.created_at[:10] }}</div>
+            <div class="project-card-actions">
+                <a href="/projects/{{ p.id }}" class="btn btn-outline-primary btn-sm">项目详情</a>
+                <a href="/projects/{{ p.id }}/workspace" class="btn btn-primary btn-sm">打开工作台</a>
+                <form method="post" action="/projects/{{ p.id }}/delete" class="project-delete"
                       onsubmit="return confirm('确定删除此项目及其所有数据？')">
-                    <button class="btn btn-outline-danger btn-sm">删除</button>
+                    <button class="btn btn-link text-danger btn-sm p-1">删除</button>
                 </form>
             </div>
-        </div>
+        </article>
     </div>
     {% endfor %}
 </div>
 {% else %}
-<div class="card p-5 text-center text-muted">
-    <h5>暂无项目</h5>
-    <p>创建您的第一个项目，开始分析数据。</p>
-    <a href="/projects/new" class="btn btn-primary">创建项目</a>
+<div class="card dashboard-empty text-center">
+    <div class="dashboard-empty-icon" aria-hidden="true">✦</div>
+    <h3 class="h5 mb-2">从一个研究项目开始</h3>
+    <p class="text-muted small mb-3">创建项目后，即可上传数据、运行分析流程并与 AI 协作解读结果。</p>
+    <div><a href="/projects/new" class="btn btn-primary">创建第一个项目</a></div>
 </div>
 {% endif %}
 {% endblock %}

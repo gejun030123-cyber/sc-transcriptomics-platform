@@ -665,6 +665,131 @@ def test_enrichment_integration_builds_one_overview_for_same_comparison(tmp_path
     assert all(os.path.isfile(item['file_path']) for item in overview_files)
 
 
+def test_bulk_go_priority_triptych_exports_selection_audit_and_source_table(tmp_path):
+    import json
+    import os
+    import pandas as pd
+    from modules.bulk_enrichment import (
+        _go_priority_config_from_params,
+        _write_enrichment_integration,
+    )
+
+    results_dir = tmp_path / 'results'
+    plots_dir = tmp_path / 'plots'
+    results_dir.mkdir()
+    common = {
+        'Comparison': ['Ctrl vs Treat'], 'Method': ['ORA'], 'Direction': ['Up'],
+        'Significant': [True], 'Overlap': ['4/100'], 'Genes': ['IL6;TNF'],
+    }
+    for database, term, fdr in (
+        ('GO_BP', 'inflammatory response', .001),
+        ('GO_CC', 'lipid particle', .004),
+        ('GO_MF', 'lipid binding', .009),
+    ):
+        pd.DataFrame({
+            **common, 'Database': [database], 'Term': [term],
+            'Adjusted P-value': [fdr],
+        }).to_csv(results_dir / f'enrichment_ora_{database.lower()}_results.csv', index=False)
+
+    source_paths = sorted(results_dir.glob('enrichment_ora_*_results.csv'))
+    config = _go_priority_config_from_params(
+        {
+            'go_priority_enabled': True, 'method': 'ORA',
+            'focus_terms': 'lipid binding', 'focus_label': '炎症与脂代谢',
+        },
+        databases=['GO_BP', 'GO_CC', 'GO_MF'], top_n=8,
+    )
+    files = _write_enrichment_integration(
+        results_dir, source_paths=source_paths, plots_dir=plots_dir,
+        output_prefix='theme_go', go_priority_config=config,
+    )
+
+    categories = [item['category'] for item in files]
+    assert categories.count('go_priority_dotplot') == 3
+    assert categories.count('go_priority_barplot') == 3
+    source_path = results_dir / 'theme_go_go_priority_source.csv'
+    audit_path = results_dir / 'theme_go_go_priority_selection_audit.json'
+    selected = pd.read_csv(source_path)
+    audit = json.loads(audit_path.read_text(encoding='utf-8'))
+    assert set(selected['Database']) == {'GO_BP', 'GO_CC', 'GO_MF'}
+    assert set(selected['selection_reason']) >= {
+        'inflammation_priority', 'lipid_metabolism_priority',
+    }
+    assert audit['units'][0]['status'] == 'completed'
+    assert all(os.path.isfile(item['file_path']) for item in files)
+
+
+def test_bulk_human_pathway_triptych_exports_fdr_ranked_source_and_audit(tmp_path):
+    import json
+    import os
+    import pandas as pd
+    from modules.bulk_enrichment import (
+        _pathway_triptych_config_for_batch,
+        _write_enrichment_integration,
+    )
+
+    results_dir = tmp_path / 'results'
+    plots_dir = tmp_path / 'plots'
+    results_dir.mkdir()
+    common = {
+        'Comparison': ['Ctrl vs Treat', 'Ctrl vs Treat'],
+        'Method': ['ORA', 'ORA'], 'Direction': ['Up', 'Up'],
+        'Significant': [True, True], 'Overlap': ['4/100', '3/100'],
+        'Genes': ['IL6;TNF', 'APOA1;APOC3'],
+    }
+    for database, terms, fdrs in (
+        ('KEGG', ['TNF signaling pathway', 'Fatty acid metabolism'], [.001, .008]),
+        ('Reactome', ['Immune System', 'Metabolism of lipids'], [.002, .009]),
+        ('WikiPathways', ['Inflammation', 'Lipid metabolism'], [.003, .01]),
+    ):
+        pd.DataFrame({
+            **common, 'Database': [database, database], 'Term': terms,
+            'Adjusted P-value': fdrs,
+        }).to_csv(results_dir / f'enrichment_ora_{database.lower()}_results.csv', index=False)
+
+    config = _pathway_triptych_config_for_batch(
+        {'method': 'ORA'}, databases=['KEGG', 'Reactome', 'WikiPathways'], top_n=8,
+    )
+    files = _write_enrichment_integration(
+        results_dir, source_paths=sorted(results_dir.glob('enrichment_ora_*_results.csv')),
+        plots_dir=plots_dir, output_prefix='human_pathways',
+        pathway_triptych_config=config,
+    )
+
+    categories = [item['category'] for item in files]
+    assert categories.count('pathway_triptych_dotplot') == 3
+    assert categories.count('pathway_triptych_barplot') == 3
+    selected = pd.read_csv(results_dir / 'human_pathways_pathway_triptych_source.csv')
+    audit = json.loads((results_dir / 'human_pathways_pathway_triptych_selection_audit.json').read_text())
+    assert set(selected['Database']) == {'KEGG', 'Reactome', 'WikiPathways'}
+    assert set(selected['selection_reason']) == {'fdr_top_pathway'}
+    assert audit['units'][0]['status'] == 'completed'
+    assert all(os.path.isfile(item['file_path']) for item in files)
+
+
+def test_single_cell_human_pathway_triptych_selection_keeps_database_fdr_separate():
+    import pandas as pd
+    from modules.sc_cell_go import _select_pathway_triptych_rows
+
+    rows = []
+    for library, terms in {
+        'KEGG_2021_Human': [('KEGG top', .001), ('KEGG second', .02)],
+        'Reactome_2022': [('Reactome top', .002), ('Reactome second', .03)],
+        'WikiPathway_2021_Human': [('Wiki top', .003), ('Wiki second', .04)],
+    }.items():
+        for term, fdr in terms:
+            rows.append({
+                'status': 'completed', 'Significant': True, 'gene_set': library,
+                'Term': term, 'method': 'ORA', 'direction': 'Up',
+                'Adjusted P-value': fdr, 'Overlap': '4/100',
+            })
+    selected, audit = _select_pathway_triptych_rows(pd.DataFrame(rows), top_n=1)
+
+    assert selected['Term'].tolist() == ['KEGG top', 'Reactome top', 'Wiki top']
+    assert selected['selection_reason'].eq('fdr_top_pathway').all()
+    assert set(audit['databases']) == {'KEGG', 'Reactome', 'WikiPathways'}
+
+
 def test_enrichment_text_audit_detects_overlapping_labels():
     import matplotlib.pyplot as plt
     from modules.bulk_enrichment import _audit_figure_text_overlap

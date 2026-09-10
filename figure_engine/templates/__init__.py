@@ -2,6 +2,12 @@
 
 from .enrichment import NatureEnrichmentDotplot, NatureGSEA
 from .enrichment_overview import NatureEnrichmentOverview
+from .go_priority import (
+    NatureGOPriorityBarplot,
+    NatureGOPriorityDotplot,
+    NaturePathwayTriptychBarplot,
+    NaturePathwayTriptychDotplot,
+)
 from .enrichment_extended import (
     NatureEnrichmentBarplot,
     NatureEnrichmentChord,
@@ -23,6 +29,8 @@ from .embedding import NatureEmbedding
 __all__ = [
     'NaturePCA', 'NatureVolcano', 'NatureHeatmap',
     'NatureGSEA', 'NatureEnrichmentDotplot', 'NatureEnrichmentOverview',
+    'NatureGOPriorityDotplot', 'NatureGOPriorityBarplot',
+    'NaturePathwayTriptychDotplot', 'NaturePathwayTriptychBarplot',
     'NatureEnrichmentBarplot', 'NatureEnrichmentChord',
     'NatureEnrichmentCnetplot', 'NatureEnrichmentEmapplot',
     'NatureGSEARunning',

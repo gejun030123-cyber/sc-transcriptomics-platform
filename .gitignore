@@ -42,6 +42,7 @@ review_*.md
 
 # Local scratch, env backups and runtime artifacts
 .env.save
+.runtime/
 .Rhistory
 .dshtest
 .ovqc.txt

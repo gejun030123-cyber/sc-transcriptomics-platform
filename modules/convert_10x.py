@@ -136,6 +136,11 @@ class Convert10x(BaseAnalysis):
             )
             if 'sample_id' not in adata.obs.columns:
                 adata.obs['sample_id'] = _safe_batch_name(stem, 'single_cell')
+                # ``write_single_cell_h5ad`` has already written the
+                # standardized object, so persist the generated sample ID as
+                # well.  Downstream pseudobulk/time-course modules rely on
+                # this column being present in the actual h5ad file.
+                adata.write_h5ad(output_path)
 
         self.progress(90, '正在计算统计信息...')
         summary = summarize_adata_import(adata, detected_format, output_path)

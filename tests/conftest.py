@@ -43,6 +43,11 @@ tempfile.tempdir = _test_tmp_root
 
 # 环境变量：确保裸环境测试可复现
 os.environ.setdefault('NUMBA_DISABLE_JIT', '1')
+# Test clients must not inherit a developer's deployment access gate or an
+# enabled WES executor from the shell/.env.  Individual tests explicitly
+# monkeypatch these values when they exercise either gate.
+os.environ['PLATFORM_ACCESS_PASSWORD'] = ''
+os.environ['WES_EXECUTOR_ENABLED'] = 'false'
 os.environ['NUMBA_CACHE_DIR'] = _test_numba_cache
 os.environ['MPLCONFIGDIR'] = _test_mpl_cache
 

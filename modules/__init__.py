@@ -8,10 +8,12 @@ from .subcluster import SubclusterAnalysis
 from .qc_reassess import QCReassessAnalysis
 from .annotation import AnnotationAnalysis
 from .functional_state import FunctionalStateAnalysis
+from .scenic import ScenicAnalysis
 from .deg import DEGAnalysis
 from .trajectory import TrajectoryAnalysis
 from .sc_timecourse import SCTimecourseAnalysis
 from .proportion import ProportionAnalysis
+from .neighborhood_da import NeighborhoodDAAnalysis
 from .cell_communication import CellCommunicationAnalysis
 from .virtual_ko import VirtualKOAnalysis
 from .sc_batch import SCBatchImport
@@ -41,10 +43,12 @@ MODULE_REGISTRY = {
     'qc_reassess': QCReassessAnalysis,
     'annotation': AnnotationAnalysis,
     'functional_state': FunctionalStateAnalysis,
+    'scenic': ScenicAnalysis,
     'deg': DEGAnalysis,
     'trajectory': TrajectoryAnalysis,
     'sc_timecourse': SCTimecourseAnalysis,
     'proportion': ProportionAnalysis,
+    'neighborhood_da': NeighborhoodDAAnalysis,
     'cell_communication': CellCommunicationAnalysis,
     'virtual_ko': VirtualKOAnalysis,
     'sc_batch_import': SCBatchImport,
@@ -67,7 +71,7 @@ MODULE_REGISTRY = {
 
 PIPELINE_ORDER = [
     'qc', 'normalize', 'hvg', 'dimred', 'batch_correct', 'clustering', 'subcluster',
-    'qc_reassess', 'annotation', 'functional_state', 'sc_timecourse', 'deg', 'sc_cell_deg', 'sc_pseudobulk_deg', 'sc_cell_go', 'trajectory', 'proportion', 'cell_communication', 'virtual_ko', 'sc_csv_export',
+    'qc_reassess', 'annotation', 'functional_state', 'scenic', 'sc_timecourse', 'deg', 'sc_cell_deg', 'sc_pseudobulk_deg', 'sc_cell_go', 'trajectory', 'proportion', 'neighborhood_da', 'cell_communication', 'virtual_ko', 'sc_csv_export',
     'bulk_qc', 'bulk_normalize', 'bulk_pca', 'bulk_deg', 'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
     'bulk_deg_integration',
 ]
@@ -84,10 +88,12 @@ PIPELINE_DEPS = {
     'qc_reassess': ['clustering'],
     'annotation': ['clustering'],
     'functional_state': ['annotation'],
+    'scenic': ['annotation'],
     'sc_timecourse': ['clustering'],
     'deg': ['clustering'],
     'trajectory': ['clustering'],
     'proportion': ['clustering'],
+    'neighborhood_da': ['clustering'],
     'cell_communication': ['annotation'],
     'virtual_ko': ['clustering'],
     'sc_pseudobulk_deg': ['qc'],

@@ -11,6 +11,7 @@ import csv
 import hashlib
 import json
 import os
+import shutil
 from typing import Any, Dict, Iterable, List, Mapping
 
 
@@ -105,7 +106,7 @@ def _write_json(path: str, value: Any) -> str:
 def write_launch_bundle(run_root: str, *, workflow: Mapping[str, Any], run_id: str,
                         project_id: str, manifest_record: Mapping[str, Any],
                         launch: Mapping[str, Any], parameters: Mapping[str, Any] | None = None,
-                        profile: str = "docker") -> Dict[str, Any]:
+                        profile: str = "docker", samplesheet_source: str = "") -> Dict[str, Any]:
     """Write all reviewable inputs for one prepared WES run.
 
     The returned checksums cover the generated manifest, samplesheet,
@@ -116,9 +117,23 @@ def write_launch_bundle(run_root: str, *, workflow: Mapping[str, Any], run_id: s
     os.makedirs(launch_dir, exist_ok=True)
     manifest = manifest_record.get("manifest") or {}
     manifest_path = _write_json(os.path.join(launch_dir, "manifest.json"), manifest)
-    samplesheet = render_samplesheet(
-        manifest, str(workflow.get("key") or ""), os.path.join(launch_dir, "samplesheet.csv")
-    )
+    samplesheet_path = os.path.join(launch_dir, "samplesheet.csv")
+    if samplesheet_source:
+        source = os.path.realpath(samplesheet_source)
+        if os.path.islink(samplesheet_source) or not os.path.isfile(source):
+            raise ValueError("上游 Sarek samplesheet 不存在或为符号链接")
+        shutil.copy2(source, samplesheet_path)
+        samplesheet = {
+            "path": os.path.abspath(samplesheet_path),
+            "header": [],
+            "row_count": 0,
+            "checksum": _sha256(samplesheet_path),
+            "source_run_samplesheet": source,
+        }
+    else:
+        samplesheet = render_samplesheet(
+            manifest, str(workflow.get("key") or ""), samplesheet_path
+        )
     parameters_path = _write_json(os.path.join(launch_dir, "parameters.json"), parameters or {})
     provenance = {
         "project_id": project_id,

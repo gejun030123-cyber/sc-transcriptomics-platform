@@ -7,15 +7,54 @@ from flask import Blueprint, abort, flash, jsonify, redirect, render_template, r
 
 from config import Config
 from models import Project
-from modules.workflows.artifacts import get_workflow_artifact, list_workflow_artifacts
+from modules.workflows.artifacts import (
+    get_workflow_artifact,
+    is_visual_artifact,
+    list_workflow_artifacts,
+)
 from modules.workflows.capture_uploads import store_capture_bed_upload
 from modules.workflows.references import list_capture_kit_profiles, list_reference_assets
 from modules.workflows.registry import list_workflows
-from modules.workflows.runs import list_workflow_runs
+from modules.workflows.runs import get_workflow_run, list_workflow_runs
 from modules.workflows.sra import list_sra_jobs
 
 
 wes_bp = Blueprint("wes", __name__)
+
+
+_GERMLINE_REFERENCE_REQUIREMENTS = {
+    "fasta", "fai", "dict", "dbsnp", "dbsnp_tbi",
+    "germline_resource", "germline_resource_tbi",
+}
+
+
+def _reference_bundle_choices(references):
+    """Build safe, exact-ID choices for the WES form without reading files."""
+    grouped = {}
+    for asset in references:
+        bundle_id = str(asset.get("bundle_version") or "")
+        if not bundle_id or bundle_id.startswith("capture:"):
+            continue
+        record = grouped.setdefault(bundle_id, {
+            "id": bundle_id,
+            "assemblies": set(),
+            "validated_types": set(),
+        })
+        record["assemblies"].add(str(asset.get("assembly") or ""))
+        if asset.get("status") == "validated":
+            record["validated_types"].add(str(asset.get("asset_type") or ""))
+    choices = []
+    for record in grouped.values():
+        record["assembly"] = next(iter(record["assemblies"]), "") if len(record["assemblies"]) == 1 else "mixed"
+        record["production_allowed"] = _GERMLINE_REFERENCE_REQUIREMENTS.issubset(
+            record["validated_types"]
+        )
+        choices.append({
+            "id": record["id"],
+            "assembly": record["assembly"],
+            "production_allowed": record["production_allowed"],
+        })
+    return sorted(choices, key=lambda item: (not item["production_allowed"], item["assembly"], item["id"]))
 
 
 @wes_bp.route("/<pid>/wes")
@@ -25,8 +64,27 @@ def index(pid):
         flash("项目未找到", "danger")
         return redirect(url_for("main.index"))
     runs = list_workflow_runs(pid)
+    # Poll within the serving process so its in-memory subprocess handles are
+    # available.  This lets a page refresh turn a finished Nextflow process
+    # into its persisted terminal state without introducing a second worker.
+    if any(run.get("status") in {"running", "cancel_requested"} for run in runs):
+        from modules.workflows.nextflow import NextflowExecutor
+        for run in runs:
+            if run.get("status") in {"running", "cancel_requested"}:
+                NextflowExecutor.poll(run["id"], pid)
+        runs = list_workflow_runs(pid)
+    from modules.workflows.stages import next_stage, stage_from_launch
     for run in runs:
+        stage = stage_from_launch(run.get("launch") or {})
+        run["stage"] = stage
+        run["next_stage"] = (
+            next_stage(stage["key"], stage["analysis_workflow_key"])
+            if stage else None
+        )
         run["artifacts"] = list_workflow_artifacts(run["id"], pid)
+    has_active_runs = any(
+        run.get("status") in {"running", "cancel_requested"} for run in runs
+    )
     settings = {
         "executor_enabled": Config.WES_EXECUTOR_ENABLED,
         "profile": Config.WES_NEXTFLOW_PROFILE,
@@ -36,10 +94,41 @@ def index(pid):
         "pon_configured": bool(Config.WES_NEXTFLOW_PON),
         "germline_resource_configured": bool(Config.WES_NEXTFLOW_GERMLINE_RESOURCE),
     }
+    references = list_reference_assets()
+    from modules.workflows.guided import WES_GUIDED_STAGES
     return render_template(
         "wes.html", project=project, workflows=list_workflows("wes"), runs=runs,
         capture_kits=list_capture_kit_profiles(),
-        references=list_reference_assets(), sra_jobs=list_sra_jobs(pid), settings=settings,
+        references=references, reference_bundles=_reference_bundle_choices(references),
+        guided_stages=WES_GUIDED_STAGES, sra_jobs=list_sra_jobs(pid), settings=settings,
+        has_active_runs=has_active_runs,
+    )
+
+
+@wes_bp.route("/<pid>/wes/runs/<run_id>")
+def run_detail(pid, run_id):
+    """Show one stage's own inputs, status and result artifacts."""
+    project = Project.get_by_id(pid)
+    if not project:
+        abort(404)
+    run = get_workflow_run(run_id, pid)
+    if not run:
+        abort(404)
+    if run.get("status") in {"running", "cancel_requested"}:
+        from modules.workflows.nextflow import NextflowExecutor
+        run = NextflowExecutor.poll(run_id, pid)
+    from modules.workflows.stages import next_stage, stage_from_launch
+    stage = stage_from_launch(run.get("launch") or {})
+    artifacts = list_workflow_artifacts(run_id, pid)
+    # All reports and visual outputs remain project- and run-scoped through
+    # their registered artifact IDs; filesystem paths never reach the page.
+    visual_artifacts = [item for item in artifacts if is_visual_artifact(item)]
+    return render_template(
+        "wes_run.html", project=project, run=run, stage=stage,
+        next_stage=(next_stage(stage["key"], stage["analysis_workflow_key"])
+                    if stage else None),
+        artifacts=artifacts, visual_artifacts=visual_artifacts,
+        is_active=run.get("status") in {"running", "cancel_requested"},
     )
 
 
@@ -98,5 +187,12 @@ def artifact(pid, artifact_id):
             digest.update(chunk)
     if digest.hexdigest() != item.get("checksum"):
         abort(409, description="工件 checksum 已变化，拒绝下载")
-    inline = item.get("artifact_kind") in {"multiqc_report", "pipeline_provenance"}
-    return send_file(real_path, as_attachment=not inline)
+    inline = item.get("artifact_kind") == "pipeline_provenance" or is_visual_artifact(item)
+    response = send_file(real_path, as_attachment=not inline)
+    if is_visual_artifact(item):
+        # Generated reports and vector figures are useful to render in the
+        # platform, but must not inherit the platform's origin or session when
+        # opened directly in another tab.
+        response.headers["Content-Security-Policy"] = "sandbox allow-scripts"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+    return response

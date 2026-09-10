@@ -62,6 +62,7 @@ def _run(tmp_path, path, **kwargs):
 
 def test_functional_state_keeps_gene_pathway_and_tf_layers_separate(tmp_path):
     anndata = pytest.importorskip("anndata")
+    from modules.functional_state import PPARA_TARGET_MODULE_NAME
     result = _run(tmp_path, _functional_adata(tmp_path))
 
     assert os.path.exists(result["output_adata"])
@@ -72,7 +73,7 @@ def test_functional_state_keeps_gene_pathway_and_tf_layers_separate(tmp_path):
     assert any("不可用" in warning for warning in result["summary"]["warnings"])
 
     adata = anndata.read_h5ad(result["output_adata"])
-    assert "fs_pathway_Curated_PPARA-target_module_score" in adata.obs
+    assert f"fs_pathway_{PPARA_TARGET_MODULE_NAME.replace('/', '_').replace(' ', '_')}_score" in adata.obs
     assert not any(column.startswith("fs_tf_") for column in adata.obs.columns)
 
     result_root = tmp_path / "results" / "functional_state" / "manual_run"
@@ -129,7 +130,9 @@ def test_functional_state_calculates_network_backed_tf_activity_from_project_fil
     assert bool(aggregate["repeated_donor_measures"])
     manifest = json.loads((result_root / "analysis_manifest.json").read_text(encoding="utf-8"))
     assert manifest["heatmap_display"]["mode"] == "user_ordered_selection"
-    assert manifest["heatmap_display"]["features"] == ["Inflammatory response score", "PPARA activity"]
+    assert manifest["heatmap_display"]["features"] == [
+        "Acute myeloid chemokine inflammation score", "PPARA activity",
+    ]
     assert manifest["correlation"]["x_feature_requested"] == "PPARA activity"
     assert manifest["pathway_scoring_method"]["requested"] == "scanpy_score_genes"
     assert manifest["tf_coverage_policy"]["minimum_detected_targets_for_scoring"] == 5
@@ -260,12 +263,26 @@ def test_functional_state_schema_exposes_locked_defaults_and_dynamic_choices():
     assert fields["comparison_condition"]["depends_on"] == "condition_key"
     assert fields["pathway_scoring_method"]["options"] == ["scanpy_score_genes"]
     assert "within_celltype_cell_level_descriptive" in fields["correlation_levels"]["options"]
-    assert "Curated PPARA-target module score" in fields["correlation_x"]["options"]
+    assert "PPARA-associated lipid-oxidation programme score" in fields["correlation_x"]["options"]
     assert fields["concordance_tf_features"]["default"].startswith("PPARA activity")
+    assert fields["include_builtin_pathway_panels"]["default"] is True
+    assert "HALLMARK_OXIDATIVE_PHOSPHORYLATION" in fields["managed_gene_set_terms"]["options"]
+    assert fields["managed_gene_set_terms_advanced"]["type"] == "textarea"
     assert "min_tf_targets" not in fields
     assert fields["confirm_batch_is_biological_sample"]["show_if"] == {
         "sample_key": ["batch", "technical_batch", "sequencing_batch", "library_batch"],
     }
+
+
+def test_functional_state_resolves_legacy_builtin_pathway_names_to_precise_labels():
+    from modules.functional_state import LEGACY_BUILTIN_PATHWAY_NAMES, _resolve_feature_name
+
+    feature_values = {
+        f"{current_name} score": np.zeros(2)
+        for current_name in LEGACY_BUILTIN_PATHWAY_NAMES.values()
+    }
+    for legacy_name, current_name in LEGACY_BUILTIN_PATHWAY_NAMES.items():
+        assert _resolve_feature_name(f"{legacy_name} score", feature_values) == f"{current_name} score"
 
 
 def test_functional_state_reads_only_selected_project_local_gmt_terms(tmp_path):
@@ -290,6 +307,78 @@ def test_functional_state_reads_only_selected_project_local_gmt_terms(tmp_path):
     assert manifest["pathway_gmt"]["selected_terms"] == ["HALLMARK_OXPHOS"]
 
 
+def test_functional_state_reads_checksum_verified_managed_gene_sets_with_coverage_qc(tmp_path, monkeypatch):
+    from config import Config
+    from modules.gene_set_registry import _sha256
+
+    data_dir = tmp_path / "platform_data"
+    gene_set_dir = data_dir / "functional_state_resources" / "gene_sets" / "hallmark"
+    gene_set_dir.mkdir(parents=True)
+    snapshot = gene_set_dir / "hallmark.gmt"
+    detected = ["CPT1A", "CPT2", "SLC25A20", "ACADM", "ACADVL", "ACADS", "HADHA", "HADHB", "ECHS1", "ETFDH"]
+    snapshot.write_text(
+        "HALLMARK_TEST_GOOD\tna\t" + "\t".join(detected) + "\n"
+        + "HALLMARK_TEST_LOW_COVERAGE\tna\t" + "\t".join(detected + ["ACOX1"] + [f"MISSING{i}" for i in range(20)]) + "\n",
+        encoding="utf-8",
+    )
+    registry = {
+        "schema_version": 1,
+        "libraries": [{
+            "key": "hallmark_human", "resource": "MSigDB Hallmark", "version": "test",
+            "file": "hallmark/hallmark.gmt", "sha256": _sha256(snapshot),
+            "license": "CC BY 4.0", "license_url": "https://example.test/license", "source_url": "https://example.test/source",
+        }],
+    }
+    (gene_set_dir.parent / "gene_set_registry.json").write_text(json.dumps(registry), encoding="utf-8")
+    monkeypatch.setattr(Config, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr(Config, "FUNCTIONAL_STATE_RESOURCE_DIR", "")
+
+    _run(
+        tmp_path, _functional_adata(tmp_path),
+        managed_gene_set_terms="HALLMARK_TEST_GOOD,HALLMARK_TEST_LOW_COVERAGE",
+        include_builtin_pathway_panels=False,
+    )
+
+    root = tmp_path / "results" / "functional_state" / "manual_run"
+    coverage = pd.read_csv(root / "gene_set_coverage.csv").set_index("gene_set")
+    assert coverage.loc["HALLMARK_TEST_GOOD", "source"] == "managed_hallmark_human"
+    assert coverage.loc["HALLMARK_TEST_GOOD", "coverage_level"] == "good_coverage"
+    assert coverage.loc["HALLMARK_TEST_LOW_COVERAGE", "status"] == "unreliable_coverage_not_scored"
+    manifest = json.loads((root / "analysis_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["managed_gene_sets"]["selected_terms"] == [
+        "HALLMARK_TEST_GOOD", "HALLMARK_TEST_LOW_COVERAGE",
+    ]
+    assert manifest["pathway_resource_versions"]["managed_hallmark_human"]["version"] == "test"
+    assert manifest["builtin_quick_panels"]["included"] is False
+    assert "builtin_lipid_inflammation" not in manifest["pathway_resource_versions"]
+
+
+def test_functional_state_refuses_tampered_managed_gene_set_snapshot(tmp_path, monkeypatch):
+    from config import Config
+    from modules.gene_set_registry import _sha256, load_selected_managed_gene_sets
+
+    data_dir = tmp_path / "platform_data"
+    root = data_dir / "functional_state_resources" / "gene_sets"
+    root.mkdir(parents=True)
+    snapshot = root / "library.gmt"
+    snapshot.write_text("TEST\tna\tCPT1A\tACADM\n", encoding="utf-8")
+    registry = {
+        "schema_version": 1,
+        "libraries": [{
+            "key": "test", "file": "library.gmt", "sha256": _sha256(snapshot),
+        }],
+    }
+    (root / "gene_set_registry.json").write_text(json.dumps(registry), encoding="utf-8")
+    monkeypatch.setattr(Config, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr(Config, "FUNCTIONAL_STATE_RESOURCE_DIR", "")
+
+    sets, _ = load_selected_managed_gene_sets("TEST")
+    assert sets["TEST"] == ("CPT1A", "ACADM")
+    snapshot.write_text("TEST\tna\tCPT1A\tACADM\tACOX1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="校验失败"):
+        load_selected_managed_gene_sets("TEST")
+
+
 def test_functional_state_marks_small_inline_custom_signature_as_exploratory(tmp_path):
     _run(
         tmp_path, _functional_adata(tmp_path), min_gene_set_genes=5,
@@ -307,7 +396,11 @@ def test_functional_state_marks_small_inline_custom_signature_as_exploratory(tmp
 
 
 def test_functional_state_uses_distinct_inflammation_and_tnf_nfkB_signatures_with_overlap_qc(tmp_path):
-    from modules.functional_state import INFLAMMATORY_GENES, TNF_NFKB_RESPONSE_GENES
+    from modules.functional_state import (
+        ACUTE_MYELOID_INFLAMMATION_MODULE_NAME,
+        INFLAMMATORY_GENES,
+        TNF_NFKB_RESPONSE_GENES,
+    )
 
     assert set(INFLAMMATORY_GENES) != set(TNF_NFKB_RESPONSE_GENES)
     _run(tmp_path, _functional_adata(tmp_path))
@@ -315,7 +408,7 @@ def test_functional_state_uses_distinct_inflammation_and_tnf_nfkB_signatures_wit
     root = tmp_path / "results" / "functional_state" / "manual_run"
     qc = pd.read_csv(root / "pathway_gene_set_overlap_qc.csv")
     row = qc.loc[
-        qc["gene_set_a"].eq("Inflammatory response")
+        qc["gene_set_a"].eq(ACUTE_MYELOID_INFLAMMATION_MODULE_NAME)
         & qc["gene_set_b"].eq("TNF-NFkB response")
     ].iloc[0]
     assert row["n_shared_detected"] < row["n_detected_a"]
@@ -324,6 +417,47 @@ def test_functional_state_uses_distinct_inflammation_and_tnf_nfkB_signatures_wit
     manifest = json.loads((root / "analysis_manifest.json").read_text(encoding="utf-8"))
     assert manifest["pathway_resource_versions"]["builtin_lipid_inflammation"]["version"].endswith("_v2")
     assert manifest["pathway_gene_set_overlap_qc"]["table"] == "pathway_gene_set_overlap_qc.csv"
+
+
+def test_functional_state_ibd_epithelial_focus_uses_frozen_hallmark_terms(tmp_path, monkeypatch):
+    """The IBD preset must load a finite, auditable local term set only."""
+    from config import Config
+    from modules.functional_state import IBD_EPITHELIAL_MANAGED_TERMS, _sha256
+
+    path = _functional_adata(tmp_path)
+    resource_dir = tmp_path / "platform_data" / "functional_state_resources" / "gene_sets"
+    resource_dir.mkdir(parents=True)
+    anndata = pytest.importorskip("anndata")
+    genes = list(anndata.read_h5ad(path).var_names.astype(str))
+    hallmark = resource_dir / "hallmark.gmt"
+    hallmark.write_text("\n".join(
+        "\t".join([term, "test", *[genes[(index * 3 + offset) % len(genes)] for offset in range(10)]])
+        for index, term in enumerate(IBD_EPITHELIAL_MANAGED_TERMS)
+    ) + "\n", encoding="utf-8")
+    (resource_dir / "gene_set_registry.json").write_text(json.dumps({
+        "schema_version": 1,
+        "libraries": [{
+            "key": "hallmark_human", "resource": "MSigDB Hallmark", "version": "test",
+            "file": "hallmark.gmt", "sha256": _sha256(hallmark),
+        }],
+    }), encoding="utf-8")
+    monkeypatch.setattr(Config, "DATA_DIR", str(tmp_path / "platform_data"))
+    monkeypatch.setattr(Config, "FUNCTIONAL_STATE_RESOURCE_DIR", "")
+
+    result = _run(
+        tmp_path, path, analysis_focus="ibd_organoid_epithelial",
+        include_builtin_pathway_panels=False,
+    )
+
+    root = tmp_path / "results" / "functional_state" / "manual_run"
+    manifest = json.loads((root / "analysis_manifest.json").read_text(encoding="utf-8"))
+    stats = pd.read_csv(root / "pathway_statistics.csv")
+    assert result["summary"]["n_pathway_scores"] >= len(IBD_EPITHELIAL_MANAGED_TERMS)
+    assert manifest["analysis_focus"] == "ibd_organoid_epithelial"
+    assert manifest["ibd_epithelial_focus"]["managed_hallmark_terms"] == list(IBD_EPITHELIAL_MANAGED_TERMS)
+    assert set(IBD_EPITHELIAL_MANAGED_TERMS).issubset(
+        set(stats["feature"].str.replace(" score", "", regex=False))
+    )
 
 
 def test_functional_state_blocks_duplicate_pathway_scores_after_gene_set_qc(tmp_path):
