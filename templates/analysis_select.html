@@ -1542,11 +1542,12 @@ document.getElementById('btn-confirm-pipeline-save').addEventListener('click', a
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(body),
         });
-        if (resp.ok) {
-            bootstrap.Modal.getInstance(document.getElementById('savePipelineModal')).hide();
-            document.getElementById('pipeline-name').value = '';
-            document.getElementById('pipeline-desc').value = '';
-        }
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || `服务器返回 ${resp.status}`);
+        bootstrap.Modal.getInstance(document.getElementById('savePipelineModal')).hide();
+        document.getElementById('pipeline-name').value = '';
+        document.getElementById('pipeline-desc').value = '';
+        alert('流程模板已保存，可在流程列表页的一键运行区域选择。');
     } catch (e) { alert('保存失败: ' + e.message); }
 });
 
