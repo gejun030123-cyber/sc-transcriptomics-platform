@@ -17,29 +17,80 @@
 <div class="card p-4 mb-4 border-primary">
     <h6 class="mb-3"><i class="bi bi-play-circle"></i> 流程模板一键运行</h6>
     <div class="row g-3">
-        <div class="col-md-4">
+        <div class="col-md-5">
             <label class="form-label">选择流程模板</label>
             <select id="pipeline-template" class="form-select">
                 <option value="">-- 选择已保存的模板 --</option>
             </select>
+            <div class="form-text">在下方新建模板后会自动加入此列表。</div>
         </div>
-        <div class="col-md-4">
+        <div class="col-md-5">
             <label class="form-label">输入文件</label>
             <select id="pipeline-input-file" class="form-select">
                 <option value="">-- 选择输入文件 --</option>
             </select>
+            <div class="form-text">仅显示当前项目已上传或已完成的文件，不能手填服务器路径。</div>
         </div>
-        <div class="col-md-4 d-flex align-items-end">
-            <button id="btn-run-pipeline" class="btn btn-primary" disabled>
+        <div class="col-md-2 d-flex align-items-end gap-2">
+            <button id="btn-run-pipeline" class="btn btn-primary flex-grow-1" disabled>
                 <i class="bi bi-play-fill"></i> 运行流程
             </button>
+            <button id="btn-refresh-pipeline-options" type="button" class="btn btn-outline-secondary" title="刷新模板和输入文件">
+                <i class="bi bi-arrow-clockwise"></i><span class="visually-hidden">刷新</span>
+            </button>
         </div>
+    </div>
+    <div class="mt-3">
+        <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#createPipelineTemplateModal">
+            <i class="bi bi-plus-lg"></i> 新建流程模板
+        </button>
+        <a href="/projects/{{ project.id }}/upload" class="btn btn-outline-secondary btn-sm ms-1">
+            <i class="bi bi-upload"></i> 上传输入文件
+        </a>
     </div>
     <div id="pipeline-run-status" class="mt-3" style="display: none;">
         <div class="progress mb-2" style="height: 20px;">
             <div id="pipeline-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" style="width: 0%">0%</div>
         </div>
         <div id="pipeline-status-text" class="small text-muted"></div>
+    </div>
+</div>
+
+<div class="modal fade" id="createPipelineTemplateModal" tabindex="-1" aria-labelledby="createPipelineTemplateTitle" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="createPipelineTemplateTitle">新建单细胞流程模板</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row g-3 mb-3">
+                    <div class="col-md-6">
+                        <label for="new-pipeline-template-name" class="form-label">模板名称</label>
+                        <input type="text" class="form-control" id="new-pipeline-template-name" placeholder="如：标准 QC 到聚类流程">
+                    </div>
+                    <div class="col-md-6">
+                        <label for="new-pipeline-template-desc" class="form-label">描述（可选）</label>
+                        <input type="text" class="form-control" id="new-pipeline-template-desc">
+                    </div>
+                </div>
+                <p class="small text-muted mb-2">按执行顺序勾选步骤；系统会检查所选步骤之间的顺序约束。若从中间步骤开始，请选择已包含上游结果的输入文件。参数将使用各步骤的当前默认值。</p>
+                <div class="border rounded p-3 row row-cols-1 row-cols-md-2 g-2" id="new-pipeline-module-list">
+                    {% for m in modules %}
+                    <div class="col">
+                        <label class="form-check">
+                            <input class="form-check-input" type="checkbox" value="{{ m.name }}">
+                            <span class="form-check-label">{{ loop.index }}. {{ m.display }}</span>
+                        </label>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="btn-save-new-pipeline-template">保存模板</button>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -81,7 +132,7 @@
 </div>
 {% endblock %}
 
-{% block scripts %}
+{% block extra_js %}
 <script>
 const PID = '{{ project.id }}';
 
@@ -89,6 +140,7 @@ const PID = '{{ project.id }}';
 async function loadPipelineTemplates() {
     try {
         const resp = await fetch(`/api/presets?project_id=${PID}&type=sc`);
+        if (!resp.ok) throw new Error(`服务器返回 ${resp.status}`);
         const data = await resp.json();
         const select = document.getElementById('pipeline-template');
         select.innerHTML = '<option value="">-- 选择已保存的模板 --</option>';
@@ -100,6 +152,7 @@ async function loadPipelineTemplates() {
                 select.appendChild(opt);
             }
         }
+        updatePipelineLaunchButton();
     } catch (e) {
         console.error('加载模板失败:', e);
     }
@@ -108,33 +161,18 @@ async function loadPipelineTemplates() {
 // 加载输入文件
 async function loadInputFiles() {
     try {
-        const resp = await fetch(`/api/projects/${PID}/adata-info`);
+        const resp = await fetch(`/api/projects/${PID}/pipeline-inputs?type=sc`);
         const select = document.getElementById('pipeline-input-file');
         select.innerHTML = '<option value="">-- 选择输入文件 --</option>';
-        if (resp.ok) {
-            const data = await resp.json();
-            if (data.file) {
-                const opt = document.createElement('option');
-                opt.value = data.file;
-                opt.textContent = data.file;
-                select.appendChild(opt);
-            }
+        if (!resp.ok) throw new Error(`服务器返回 ${resp.status}`);
+        const data = await resp.json();
+        for (const file of (data.files || [])) {
+            const opt = document.createElement('option');
+            opt.value = file.path;
+            opt.textContent = file.label;
+            select.appendChild(opt);
         }
-        // 也加载 uploads 目录的文件
-        const uploadsResp = await fetch(`/api/data-info?project_id=${PID}`);
-        if (uploadsResp.ok) {
-            const uploadsData = await uploadsResp.json();
-            if (uploadsData.files) {
-                for (const f of uploadsData.files) {
-                    if (!select.querySelector(`option[value="${f}"]`)) {
-                        const opt = document.createElement('option');
-                        opt.value = f;
-                        opt.textContent = f;
-                        select.appendChild(opt);
-                    }
-                }
-            }
-        }
+        updatePipelineLaunchButton();
     } catch (e) {
         console.error('加载输入文件失败:', e);
     }
@@ -206,6 +244,55 @@ function updatePipelineLaunchButton() {
 }
 document.getElementById('pipeline-template').addEventListener('change', updatePipelineLaunchButton);
 document.getElementById('pipeline-input-file').addEventListener('change', updatePipelineLaunchButton);
+document.getElementById('btn-refresh-pipeline-options').addEventListener('click', () => {
+    loadPipelineTemplates();
+    loadInputFiles();
+});
+
+document.getElementById('btn-save-new-pipeline-template').addEventListener('click', async () => {
+    const name = document.getElementById('new-pipeline-template-name').value.trim();
+    const description = document.getElementById('new-pipeline-template-desc').value.trim();
+    const modules = Array.from(
+        document.querySelectorAll('#new-pipeline-module-list input:checked')
+    ).map(input => input.value);
+    if (!name) return alert('请输入模板名称');
+    if (!modules.length) return alert('请至少选择一个流程步骤');
+
+    const button = document.getElementById('btn-save-new-pipeline-template');
+    button.disabled = true;
+    try {
+        const resp = await fetch('/api/presets', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                name,
+                description,
+                analysis_type: 'sc',
+                project_id: PID,
+                scope: 'project',
+                pipeline: {modules},
+                params: {},
+            }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || `服务器返回 ${resp.status}`);
+        await loadPipelineTemplates();
+        document.getElementById('pipeline-template').value = data.id;
+        updatePipelineLaunchButton();
+        bootstrap.Modal.getOrCreateInstance(
+            document.getElementById('createPipelineTemplateModal')
+        ).hide();
+        document.getElementById('new-pipeline-template-name').value = '';
+        document.getElementById('new-pipeline-template-desc').value = '';
+        document.querySelectorAll('#new-pipeline-module-list input:checked').forEach(
+            input => { input.checked = false; }
+        );
+    } catch (e) {
+        alert('保存模板失败: ' + e.message);
+    } finally {
+        button.disabled = false;
+    }
+});
 
 // 初始化
 loadPipelineTemplates();

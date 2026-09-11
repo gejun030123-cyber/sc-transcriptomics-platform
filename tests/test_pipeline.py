@@ -278,3 +278,68 @@ def test_saved_pipeline_template_runs_from_server_side_definition(test_project, 
     saved_params = json.loads(run.params_json)
     assert saved_params["qc"]["nUMIs"] == 777
     assert saved_params["normalize"]["target_sum"] == 20000
+
+
+def test_pipeline_input_api_lists_safe_project_files(test_project, monkeypatch):
+    """The launcher receives absolute, project-owned paths instead of names."""
+    from app import create_app
+    from config import Config
+
+    monkeypatch.setattr(Config, "PLATFORM_ACCESS_PASSWORD", "")
+    uploads = os.path.join(Config.project_dir(test_project), "uploads")
+    h5ad_path = os.path.join(uploads, "cells.h5ad")
+    csv_path = os.path.join(uploads, "counts.csv")
+    text_path = os.path.join(uploads, "notes.md")
+    for path in (h5ad_path, csv_path, text_path):
+        with open(path, "wb") as handle:
+            handle.write(b"placeholder")
+
+    client = create_app().test_client()
+    sc_response = client.get(f"/api/projects/{test_project}/pipeline-inputs?type=sc")
+    bulk_response = client.get(f"/api/projects/{test_project}/pipeline-inputs?type=bulk")
+
+    assert sc_response.status_code == 200
+    assert bulk_response.status_code == 200
+    sc_files = sc_response.get_json()["files"]
+    bulk_files = bulk_response.get_json()["files"]
+    assert [item["path"] for item in sc_files] == [h5ad_path]
+    assert {item["path"] for item in bulk_files} == {h5ad_path, csv_path}
+    assert all(item["path"].startswith(Config.project_dir(test_project)) for item in bulk_files)
+
+
+def test_pipeline_launcher_pages_offer_template_creation_and_safe_input_picker(test_project, monkeypatch):
+    """Both list pages render the controls needed to populate empty launchers."""
+    from app import create_app
+    from config import Config
+
+    monkeypatch.setattr(Config, "PLATFORM_ACCESS_PASSWORD", "")
+    client = create_app().test_client()
+    sc_page = client.get(f"/projects/{test_project}/sc-analysis")
+    bulk_page = client.get(f"/projects/{test_project}/bulk-analysis")
+
+    assert sc_page.status_code == 200
+    assert bulk_page.status_code == 200
+    sc_html = sc_page.get_data(as_text=True)
+    bulk_html = bulk_page.get_data(as_text=True)
+    assert "新建流程模板" in sc_html
+    assert "pipeline-inputs?type=sc" in sc_html
+    assert "新建流程模板" in bulk_html
+    assert "pipeline-inputs?type=bulk" in bulk_html
+
+
+def test_pipeline_template_rejects_invalid_step_order_at_save_time(test_project, monkeypatch):
+    """The new-template dialog receives a useful error before a run is started."""
+    from app import create_app
+    from config import Config
+
+    monkeypatch.setattr(Config, "PLATFORM_ACCESS_PASSWORD", "")
+    response = create_app().test_client().post("/api/presets", json={
+        "name": "错误步骤顺序",
+        "scope": "project",
+        "project_id": test_project,
+        "analysis_type": "sc",
+        "pipeline": {"modules": ["normalize", "qc"]},
+    })
+
+    assert response.status_code == 400
+    assert "前置依赖" in response.get_json()["error"]

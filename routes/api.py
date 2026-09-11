@@ -234,6 +234,74 @@ def adata_info(pid):
         return jsonify({'error': str(e)}), 500
 
 
+_PIPELINE_INPUT_EXTENSIONS = {
+    'sc': ('.h5ad',),
+    'bulk': ('.h5ad', '.csv', '.txt', '.tsv', '.xlsx', '.xls'),
+}
+
+
+def _list_pipeline_inputs(pid, analysis_type):
+    """Return safe, project-owned files that can be chosen as pipeline input.
+
+    The launcher must submit an absolute project path to the worker.  Do not
+    derive that path in the browser from a display filename: aside from being
+    unreliable, that would invite a user-controlled server path.  Files are
+    deliberately limited to direct uploads plus registered completed outputs.
+    """
+    allowed_extensions = _PIPELINE_INPUT_EXTENSIONS[analysis_type]
+    entries = []
+    seen_paths = set()
+
+    def add(path, label, source):
+        path = os.path.abspath(str(path or ''))
+        if not path or path in seen_paths:
+            return
+        if not path.lower().endswith(allowed_extensions):
+            return
+        valid, _ = Config._validate_path(path, pid)
+        if not valid or os.path.islink(path) or not os.path.isfile(path):
+            return
+        seen_paths.add(path)
+        entries.append({
+            'path': path,
+            'label': label,
+            'source': source,
+        })
+
+    uploads_dir = Config.uploads_dir(pid)
+    if os.path.isdir(uploads_dir):
+        for filename in sorted(os.listdir(uploads_dir), key=str.lower):
+            add(
+                os.path.join(uploads_dir, filename),
+                f'上传文件 · {filename}',
+                'upload',
+            )
+
+    # A completed h5ad can be used when the scientist deliberately wants to
+    # rerun a compatible template from an earlier in-project result.  It is
+    # still checked as a regular, non-symlink project file above.
+    for task in AnalysisTask.get_by_project(pid):
+        if task.status != 'completed' or not task.output_adata_path:
+            continue
+        add(
+            task.output_adata_path,
+            f'已完成输出 · {os.path.basename(task.output_adata_path)}',
+            'task_output',
+        )
+    return entries
+
+
+@api_bp.route('/projects/<pid>/pipeline-inputs')
+def list_pipeline_inputs(pid):
+    """List selectable, server-validated input files for an SC/Bulk pipeline."""
+    if not Project.get_by_id(pid):
+        return jsonify({'error': '项目不存在'}), 404
+    analysis_type = str(request.args.get('type', '') or '').strip().lower()
+    if analysis_type not in _PIPELINE_INPUT_EXTENSIONS:
+        return jsonify({'error': 'type 必须是 sc 或 bulk'}), 400
+    return jsonify({'files': _list_pipeline_inputs(pid, analysis_type)})
+
+
 @api_bp.route('/projects/<pid>/result-file/<file_id>')
 @api_bp.route('/result-file/<file_id>')
 def get_result_file(file_id, pid=None):
@@ -748,16 +816,48 @@ def get_preset(preset_id):
 
 @api_bp.route('/presets', methods=['POST'])
 def save_preset():
-    data = request.get_json()
-    if not data or not data.get('name'):
+    data = request.get_json(silent=True)
+    if not isinstance(data, Mapping) or not str(data.get('name', '') or '').strip():
         return jsonify({'error': '预设名称不能为空'}), 400
+    name = str(data.get('name') or '').strip()
+    if len(name) > 160:
+        return jsonify({'error': '预设名称不能超过 160 个字符'}), 400
+
+    analysis_type = str(data.get('analysis_type', '') or '').strip()
+    pipeline = data.get('pipeline', {})
+    if not isinstance(pipeline, Mapping):
+        return jsonify({'error': 'pipeline 必须是对象'}), 400
+    pipeline_modules = pipeline.get('modules')
+    if pipeline_modules is not None:
+        if analysis_type not in {'sc', 'bulk'}:
+            return jsonify({'error': '流程模板的 analysis_type 必须是 sc 或 bulk'}), 400
+        if not isinstance(pipeline_modules, list) or not pipeline_modules:
+            return jsonify({'error': '流程模板至少需要一个步骤'}), 400
+        if any(not isinstance(module, str) or not module.strip()
+               for module in pipeline_modules):
+            return jsonify({'error': '流程模板包含无效步骤'}), 400
+        if len(set(pipeline_modules)) != len(pipeline_modules):
+            return jsonify({'error': '流程模板不能重复包含同一步骤'}), 400
+        from modules import (
+            BULK_MODULE_NAMES, MODULE_REGISTRY, SC_MODULE_NAMES,
+            validate_pipeline_order,
+        )
+        allowed_modules = SC_MODULE_NAMES if analysis_type == 'sc' else BULK_MODULE_NAMES
+        unknown = [module for module in pipeline_modules
+                   if module not in MODULE_REGISTRY or module not in allowed_modules]
+        if unknown:
+            return jsonify({'error': f'流程模板包含不属于 {analysis_type} 的步骤: {unknown[0]}'}), 400
+        valid_order, errors = validate_pipeline_order(pipeline_modules)
+        if not valid_order:
+            return jsonify({'error': '模块顺序或前置依赖不满足: ' + '；'.join(errors)}), 400
+
     preset_id = str(uuid.uuid4())[:8]
     preset = {
-        'name': data['name'],
+        'name': name,
         'description': data.get('description', ''),
-        'analysis_type': data.get('analysis_type', ''),
+        'analysis_type': analysis_type,
         'params': data.get('params', {}),
-        'pipeline': data.get('pipeline', {}),
+        'pipeline': dict(pipeline),
         'filters': data.get('filters', {}),
         'visualization': data.get('visualization', {}),
     }
@@ -768,6 +868,8 @@ def save_preset():
     else:
         if not project_id:
             return jsonify({'error': '项目级预设需要 project_id'}), 400
+        if not Project.get_by_id(project_id):
+            return jsonify({'error': '项目不存在'}), 404
         target_dir = _get_project_presets_dir(project_id)
     _ensure_dir(target_dir)
     fpath = os.path.join(target_dir, f'{preset_id}.json')
