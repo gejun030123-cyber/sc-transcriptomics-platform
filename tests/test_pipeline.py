@@ -327,6 +327,35 @@ def test_pipeline_launcher_pages_offer_template_creation_and_safe_input_picker(t
     assert "pipeline-inputs?type=bulk" in bulk_html
 
 
+def test_bundled_ibd2_preset_is_initialized_as_a_global_sc_template(test_project, monkeypatch):
+    """A clean deployment must expose the reproducible IBD2 preset immediately."""
+    from app import create_app
+    from config import Config
+
+    monkeypatch.setattr(Config, "PLATFORM_ACCESS_PASSWORD", "")
+    client = create_app().test_client()
+    response = client.get(f"/api/presets?project_id={test_project}&type=sc")
+
+    assert response.status_code == 200
+    preset = next(
+        item for item in response.get_json()["presets"]
+        if item["name"] == "IBD2 类器官上皮下游流程"
+    )
+    assert preset["scope"] == "global"
+    assert preset["has_pipeline"] is True
+    assert preset["pipeline"]["modules"] == [
+        "functional_state", "sc_pseudobulk_deg", "proportion", "neighborhood_da",
+    ]
+
+    detail = client.get(f"/api/presets/{preset['id']}?project_id={test_project}")
+    assert detail.status_code == 200
+    params = detail.get_json()["preset"]["params"]
+    assert params["functional_state"]["analysis_focus"] == "ibd_organoid_epithelial"
+    assert params["sc_pseudobulk_deg"]["comparisons"] == "IBD-vs-Control"
+    assert params["proportion"]["analysis_unit"] == "sample"
+    assert params["neighborhood_da"]["representation"] == "auto"
+
+
 def test_pipeline_template_rejects_invalid_step_order_at_save_time(test_project, monkeypatch):
     """The new-template dialog receives a useful error before a run is started."""
     from app import create_app

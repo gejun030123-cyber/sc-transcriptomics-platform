@@ -1,0 +1,66 @@
+{
+  "builtin_key": "ibd2_organoid_epithelial",
+  "name": "IBD2 类器官上皮下游流程",
+  "description": "从已注释的 h5ad 开始：IBD-vs-Control 样本级 pseudobulk、IBD 上皮功能状态、样本级组成与高维邻域差异丰度。要求 counts、sample_id、condition 和 celltype；每组建议至少 3 个生物学样本。",
+  "analysis_type": "sc",
+  "pipeline": {
+    "modules": [
+      "functional_state",
+      "sc_pseudobulk_deg",
+      "proportion",
+      "neighborhood_da"
+    ]
+  },
+  "params": {
+    "functional_state": {
+      "sample_key": "sample_id",
+      "condition_key": "condition",
+      "celltype_key": "celltype",
+      "organism": "Human",
+      "reference_condition": "Control",
+      "comparison_condition": "IBD",
+      "analysis_focus": "ibd_organoid_epithelial",
+      "min_cells_per_sample_celltype": 20,
+      "min_samples_per_group": 3,
+      "statistic_method": "welch",
+      "tf_network_source": "managed_collectri",
+      "export_cell_scores": false
+    },
+    "sc_pseudobulk_deg": {
+      "sample_key": "sample_id",
+      "condition_key": "condition",
+      "analysis_scope": "per_cluster",
+      "grouping_mode": "annotated_celltype",
+      "celltype_key": "celltype",
+      "min_cells_per_sample_celltype": 20,
+      "min_samples_per_group": 3,
+      "comparisons": "IBD-vs-Control",
+      "method": "deseq2",
+      "padj_cutoff": 0.05,
+      "log2fc_cutoff": 1.0,
+      "export_prefix": "ibd2_pseudobulk"
+    },
+    "proportion": {
+      "groupby": "celltype",
+      "sample_key": "sample_id",
+      "condition_key": "condition",
+      "analysis_unit": "sample",
+      "min_samples_per_condition": 3,
+      "min_cells_per_sample": 20,
+      "compare_groups": "IBD-vs-Control"
+    },
+    "neighborhood_da": {
+      "sample_key": "sample_id",
+      "condition_key": "condition",
+      "celltype_key": "celltype",
+      "representation": "auto",
+      "n_neighbourhoods": 100,
+      "neighbourhood_size": 50,
+      "min_cells_per_sample": 20,
+      "min_samples_per_condition": 3,
+      "comparisons": "IBD-vs-Control",
+      "fdr_cutoff": 0.05,
+      "random_state": 0
+    }
+  }
+}

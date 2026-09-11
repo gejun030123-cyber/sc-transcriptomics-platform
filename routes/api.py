@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 api_bp = Blueprint('api', __name__)
 
 
-PRESETS_GLOBAL_DIR = os.path.join(Config.DATA_DIR, 'presets', '_global')
+BUNDLED_PRESETS_DIR = os.path.join(Config._BASE_DIR, 'resources', 'presets')
 
 
 @api_bp.route('/projects/<pid>/wes/capture-kits/upload', methods=['POST'])
@@ -73,8 +73,66 @@ def _get_project_presets_dir(project_id):
     return Config.project_dir(project_id) + '/presets'
 
 
+def _get_global_presets_dir():
+    """Resolve the global preset directory at call time.
+
+    Tests and controlled deployments may change ``Config.DATA_DIR`` after this
+    module is imported.  Resolving lazily prevents the bundled presets from
+    being copied into a stale data root.
+    """
+    return os.path.join(Config.DATA_DIR, 'presets', '_global')
+
+
 def _ensure_dir(path):
     os.makedirs(path, exist_ok=True)
+
+
+def _ensure_bundled_presets():
+    """Make version-controlled default presets available in the data store.
+
+    A scientist may customise or remove files in the global preset directory,
+    so bundled defaults never overwrite an existing file or a preset with the
+    same display name.  Copying them to the normal data-backed directory keeps
+    the existing list/load/run APIs as the single preset contract.
+    """
+    if not os.path.isdir(BUNDLED_PRESETS_DIR):
+        return
+    target_dir = _get_global_presets_dir()
+    _ensure_dir(target_dir)
+
+    existing_names = set()
+    for filename in os.listdir(target_dir):
+        if not filename.endswith('.json'):
+            continue
+        existing = _load_preset(os.path.join(target_dir, filename))
+        if existing and str(existing.get('name', '') or '').strip():
+            existing_names.add(str(existing['name']).strip().casefold())
+
+    for filename in sorted(os.listdir(BUNDLED_PRESETS_DIR)):
+        if not filename.endswith('.json'):
+            continue
+        source = os.path.join(BUNDLED_PRESETS_DIR, filename)
+        bundled = _load_preset(source)
+        if not bundled:
+            logger.warning('忽略无效的内置预设文件: %s', filename)
+            continue
+        name = str(bundled.get('name', '') or '').strip()
+        target = os.path.join(target_dir, filename)
+        if os.path.exists(target) or (name and name.casefold() in existing_names):
+            continue
+        temporary = f'{target}.{uuid.uuid4().hex}.tmp'
+        try:
+            shutil.copyfile(source, temporary)
+            os.replace(temporary, target)
+            if name:
+                existing_names.add(name.casefold())
+        except OSError as exc:
+            logger.warning('无法初始化内置预设 %s: %s', filename, exc)
+            try:
+                if os.path.exists(temporary):
+                    os.remove(temporary)
+            except OSError:
+                pass
 
 
 def _load_preset(filepath):
@@ -104,7 +162,8 @@ def _load_accessible_preset(preset_id, project_id=''):
         if preset:
             preset['_scope'] = 'project'
             return preset
-    preset = _load_preset(os.path.join(PRESETS_GLOBAL_DIR, f'{preset_id}.json'))
+    _ensure_bundled_presets()
+    preset = _load_preset(os.path.join(_get_global_presets_dir(), f'{preset_id}.json'))
     if preset:
         preset['_scope'] = 'global'
     return preset
@@ -777,8 +836,8 @@ def list_presets():
     project_id = request.args.get('project_id', '')
     filter_type = request.args.get('type', '')
     presets = []
-    _ensure_dir(PRESETS_GLOBAL_DIR)
-    presets.extend(_list_presets_in_dir(PRESETS_GLOBAL_DIR, 'global'))
+    _ensure_bundled_presets()
+    presets.extend(_list_presets_in_dir(_get_global_presets_dir(), 'global'))
     if project_id:
         proj_dir = _get_project_presets_dir(project_id)
         presets.extend(_list_presets_in_dir(proj_dir, 'project'))
@@ -864,7 +923,7 @@ def save_preset():
     scope = data.get('scope', 'project')
     project_id = data.get('project_id', '')
     if scope == 'global':
-        target_dir = PRESETS_GLOBAL_DIR
+        target_dir = _get_global_presets_dir()
     else:
         if not project_id:
             return jsonify({'error': '项目级预设需要 project_id'}), 400
@@ -888,7 +947,7 @@ def delete_preset(preset_id):
         if os.path.isfile(fpath):
             os.remove(fpath)
             return jsonify({'message': '预设已删除'})
-    fpath = os.path.join(PRESETS_GLOBAL_DIR, f'{preset_id}.json')
+    fpath = os.path.join(_get_global_presets_dir(), f'{preset_id}.json')
     if os.path.isfile(fpath):
         os.remove(fpath)
         return jsonify({'message': '预设已删除'})
