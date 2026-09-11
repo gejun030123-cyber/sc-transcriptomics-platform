@@ -271,6 +271,26 @@ python -m pip install pymde fuzzy-c-means
   对应授权的管理员放置同名 `<library>.gmt` / `<library>.txt`，自定义库也可通过该方式或
   `SC_CELL_GO_GENE_SET_DIR` 提供。
   只有兼容的细胞级 ORA 可显式选择 Enrichr，此时基因列表会发送到该在线服务。
+
+#### KEGG Human 基因集补充（仅限已获授权的管理员）
+
+KEGG 数据不随本仓库分发，也不能提交回公共 GitHub。请由持有适当 KEGG 许可的管理员自行从
+[KEGG FTP / subscription](https://www.kegg.jp/kegg/download/) 或机构批准的内部参考资源取得数据：
+学术 FTP 仅向订阅者开放，非学术使用须另行取得许可。不要把 KEGG REST API 当作公开下载渠道；
+该 API 仅供学术用户学术使用，且有速率限制。
+
+将管理员根据其许可导出的 **Human gene-symbol** GMT/TXT 保存为（UTF-8、Enrichr-style：
+`term<TAB>source<TAB>GENE...`）：
+
+```text
+data/go_gene_sets/KEGG_2021_Human.gmt
+```
+
+也可在部署环境设置 `SC_CELL_GO_GENE_SET_DIR=/srv/sc-platform/references/go_gene_sets`。随后在
+`sc_cell_go` 选择 **KEGG Human（需授权本地文件）** 即可。该目录中的 KEGG 文件会优先使用；未
+放入的 GO、Reactome 和 WikiPathways 仍自动使用随仓库快照，因此不必复制默认资源。请在运行
+manifest 中保留 KEGG release、获取日期、许可证/订阅依据和 SHA-256，且除非获得 KEGG 的明确再分发许可，
+不得把该文件推送到 GitHub。
 - **`functional_state`：** 克隆自带 Hallmark、Reactome、GO 与 CollecTRI v2.0 快照；标准默认
   路径是 `resources/functional_state_resources/`。管理员如需更新，设置
   `FUNCTIONAL_STATE_RESOURCE_DIR` 指向独立受控目录，再同步到该目录的 `gene_sets/`：

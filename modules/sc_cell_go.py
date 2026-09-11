@@ -159,7 +159,12 @@ def _requested_clusters(value):
     return requested
 
 
-def _local_gene_set_path(library, directory):
+def _bundled_gene_set_dir():
+    """Return the read-only public snapshot shipped with this checkout."""
+    return Path(Config._BASE_DIR, "resources", "functional_state_resources", "gene_sets").resolve()
+
+
+def _local_gene_set_path(library, directory, *, allow_bundled_fallback=True):
     """Return a platform-local GMT/TXT file for a configured GO library."""
     if library in {'.', '..'} or not re.fullmatch(r'[A-Za-z0-9_.-]+', str(library)):
         raise ValueError('本地 GO 基因集名称不是安全的文件标识符。')
@@ -205,6 +210,11 @@ def _local_gene_set_path(library, directory):
             if digest != expected_sha:
                 raise ValueError(f'本地 GO 基因集 {library} 校验失败；请重新获取受控资源快照。')
             return resolved
+    bundled_dir = _bundled_gene_set_dir()
+    if allow_bundled_fallback and base != bundled_dir:
+        return _local_gene_set_path(
+            library, bundled_dir, allow_bundled_fallback=False,
+        )
     raise FileNotFoundError(
         f"本地 GO 基因集缺失: {library}；请在 {base} 放置 {library}.gmt 或 .txt"
     )
@@ -213,6 +223,7 @@ def _local_gene_set_path(library, directory):
 def _resolve_local_gene_set_dir(value, project_dir):
     """Permit only the managed global cache or files inside this project."""
     managed_dir = (Path(Config.DATA_DIR) / "go_gene_sets").resolve()
+    configured_dir = Path(Config.sc_cell_go_gene_set_dir()).resolve()
     project_root = Path(project_dir).resolve()
     supplied = str(value or "").strip()
     if supplied:
@@ -223,9 +234,12 @@ def _resolve_local_gene_set_dir(value, project_dir):
             raise ValueError("本地 GO 基因集目录不能是符号链接")
         requested = unresolved.resolve()
     else:
-        requested = managed_dir
-    if not any(requested == root or root in requested.parents for root in (managed_dir, project_root)):
-        raise ValueError("本地 GO 基因集目录必须位于平台缓存或当前项目目录内")
+        requested = configured_dir
+    if not any(
+        requested == root or root in requested.parents
+        for root in (managed_dir, project_root, configured_dir)
+    ):
+        raise ValueError("本地 GO 基因集目录必须位于管理员配置、平台缓存或当前项目目录内")
     return str(requested)
 
 

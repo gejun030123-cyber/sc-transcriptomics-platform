@@ -101,7 +101,7 @@ PARAM_SCHEMAS = {
          'option_labels': {'GO_Biological_Process_2023': 'GO Biological Process (2023)', 'GO_Molecular_Function_2023': 'GO Molecular Function (2023)', 'GO_Cellular_Component_2023': 'GO Cellular Component (2023)', 'KEGG_2021_Human': 'KEGG Human（需授权本地文件）', 'Reactome_2022': 'Reactome（随库快照）', 'WikiPathway_2021_Human': 'WikiPathways Human（2024，随库快照）'},
          'default': '',
          'help': '一次运行所勾选的本地 GMT/TXT；GO、Reactome 与 WikiPathways 随克隆提供，KEGG 仅从已获授权的本地文件读取。每个库分别导出完整表和映射审计。旧项目的单库和 GO 本体参数仍可用。'},
-        {'key': 'local_gene_set_dir', 'label': '本地 GO 基因集目录（可选）', 'type': 'text', 'default': '', 'help': '留空使用平台 data/go_gene_sets；也可填写当前项目目录内的子目录。每个库应为 <库名>.gmt 或 .txt。'},
+        {'key': 'local_gene_set_dir', 'label': '本地基因集目录（可选）', 'type': 'text', 'default': '', 'help': '留空使用管理员配置或随仓库快照；也可填写当前项目目录内的子目录。每个库应为 <库名>.gmt 或 .txt；该目录中的文件优先，缺失的默认库仍回退到随库快照。'},
         {'key': 'organism', 'label': '物种', 'type': 'select', 'options': ['Human'], 'default': 'Human', 'help': '当前离线基因集和映射审计仅支持 Human；小鼠数据需先完成物种映射。'},
         {'key': 'padj_cutoff', 'label': 'DEG FDR 阈值', 'type': 'number', 'default': 0.05, 'min': 0, 'max': 1, 'step': 0.01, 'help': '筛选 DEG 中用于富集的显著基因；不会改变已导出的完整 DEG 表。'},
         {'key': 'log2fc_cutoff', 'label': '绝对 log2FC 阈值', 'type': 'number', 'default': 0.25, 'step': 0.05, 'help': 'ORA 按方向筛选时使用绝对效应量阈值；Up 为 log2FC≥阈值，Down 为 log2FC≤-阈值。'},
