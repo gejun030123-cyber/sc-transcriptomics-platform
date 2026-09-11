@@ -68,24 +68,24 @@ def test_functional_state_keeps_gene_pathway_and_tf_layers_separate(tmp_path):
     assert os.path.exists(result["output_adata"])
     assert result["summary"]["n_pathway_scores"] > 0
     assert result["summary"]["n_expression_features"] > 0
-    assert result["summary"]["n_tf_activities"] == 0
-    assert result["summary"]["tf_network_configured"] is False
-    assert any("不可用" in warning for warning in result["summary"]["warnings"])
+    assert result["summary"]["n_tf_activities"] > 0
+    assert result["summary"]["tf_network_configured"] is True
 
     adata = anndata.read_h5ad(result["output_adata"])
     assert f"fs_pathway_{PPARA_TARGET_MODULE_NAME.replace('/', '_').replace(' ', '_')}_score" in adata.obs
-    assert not any(column.startswith("fs_tf_") for column in adata.obs.columns)
+    assert any(column.startswith("fs_tf_") for column in adata.obs.columns)
 
     result_root = tmp_path / "results" / "functional_state" / "manual_run"
     stats = pd.read_csv(result_root / "functional_state_statistics.csv")
-    assert {"gene_expression", "pathway_score"}.issubset(set(stats["feature_type"]))
+    assert {"gene_expression", "pathway_score", "tf_activity"}.issubset(set(stats["feature_type"]))
     assert set(stats["status"]) == {"sample_level_exploratory"}
     assert set(stats["evidence_tier"]) == {"exploratory_n2"}
     assert stats["fdr_bh"].notna().all()
     coverage = pd.read_csv(result_root / "tf_activity_coverage.csv")
-    assert set(coverage["status"]) == {"network_not_configured"}
+    assert (coverage["status"] != "network_not_configured").all()
     manifest = json.loads((result_root / "analysis_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["tf_network"]["status"] == "not_configured"
+    assert manifest["tf_network"]["source"] == "managed_collectri"
+    assert manifest["tf_network"]["resource_metadata"]["version"] == "2.0"
     assert manifest["pseudobulk_validation"]["existing_modules"] == ["sc_pseudobulk_deg", "sc_cell_go"]
 
 

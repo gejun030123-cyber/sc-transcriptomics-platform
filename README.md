@@ -200,8 +200,8 @@ scRNA-seq / Bulk RNA-seq 流程；`data/`、SQLite 数据库、缓存和项目�
 | --- | --- | --- |
 | Web、项目管理、常规单细胞/Bulk 分析、PNG/SVG、Excel 输入/输出 | 可以 | 用户自行上传的表达数据；不附带示例人类数据 |
 | Bulk `bulk_enrichment` | 首次运行可联网下载 Enrichr 基因集 | 无外网时，管理员须预置 `genesets/<library>.txt` 或 `data/go_gene_sets/<library>.gmt` |
-| `sc_cell_go` 的离线 ORA/GSEA | 不会自动下载 | `data/go_gene_sets/<library>.gmt`（或项目内目录的同名 `.gmt`/`.txt`）；见下方“本地资源” |
-| `functional_state` 标准 Hallmark/Reactome/GO | 内置小型 signature 可运行 | 管理员同步版本冻结的基因集；CollecTRI TF activity 另需本地网络快照 |
+| `sc_cell_go` 的离线 ORA/GSEA | 可以（内置 GO BP/CC/MF、Reactome 与 WikiPathways Human 快照） | KEGG 未随库分发；需由具备相应授权的管理员提供本地 GMT/TXT。自定义库可在项目内上传或设置 `SC_CELL_GO_GENE_SET_DIR` |
+| `functional_state` 标准 Hallmark/Reactome/GO 与 CollecTRI TF activity | 可以（内置受版本与 SHA-256 约束的公开快照） | 可设置 `FUNCTIONAL_STATE_RESOURCE_DIR` 以使用管理员审核的替代/更新资源 |
 | CellTypist 参考注释 | 包已安装，但模型未随仓库提供 | 可信 `.pkl` 模型放入 `SC_CELLTYPIST_MODEL_DIR` |
 | `scenic` | 可运行 | 输入 H5AD 必须已有 AUCell `obsm` 矩阵和 regulon 定义；网页不重建 SCENIC 网络 |
 | `virtual_ko` | 不可仅靠主 Python 环境运行 | 独立 Python 3.9/3.10 的 CellOracle 环境，以及 base GRN（首次使用内置 GRN 需要联网下载） |
@@ -255,8 +255,8 @@ python app.py
 下列路径有兼容回退，因而不放入基础依赖；需要相应增强结果时再安装：
 
 ```bash
-# MDE 降维、模糊 c-means 时间轨迹、2–3 个比较的 Venn 图
-python -m pip install pymde fuzzy-c-means matplotlib-venn
+# MDE 降维、模糊 c-means 时间轨迹
+python -m pip install pymde fuzzy-c-means
 ```
 
 ### 本地资源与管理员准备
@@ -266,21 +266,45 @@ python -m pip install pymde fuzzy-c-means matplotlib-venn
 
 - **CellTypist：** 将已审核的模型（例如 `Immune_All_Low.pkl`）放入
   `data/references/celltypist/`，或在 `.env` 设置 `SC_CELLTYPIST_MODEL_DIR`。
-- **`sc_cell_go` 离线富集：** 在 `data/go_gene_sets/` 放置页面所选库的同名
-  `<library>.gmt` 或 `<library>.txt`。pseudobulk ORA/GSEA 强制使用本地库；只有兼容的
-  细胞级 ORA 可显式选择 Enrichr，此时基因列表会发送到该在线服务。
-- **`functional_state`：** 标准库同步到
-  `${FUNCTIONAL_STATE_RESOURCE_DIR:-data/functional_state_resources}/gene_sets/`：
+- **`sc_cell_go` 离线富集：** 克隆自带 GO BP/CC/MF、Reactome 与 WikiPathways Human 的只读快照，
+  足以完成默认 ORA/GSEA。pseudobulk ORA/GSEA 强制使用本地库；KEGG 不在仓库内，必须由已获得
+  对应授权的管理员放置同名 `<library>.gmt` / `<library>.txt`，自定义库也可通过该方式或
+  `SC_CELL_GO_GENE_SET_DIR` 提供。
+  只有兼容的细胞级 ORA 可显式选择 Enrichr，此时基因列表会发送到该在线服务。
+
+#### KEGG Human 基因集补充（仅限已获授权的管理员）
+
+KEGG 数据不随本仓库分发，也不能提交回公共 GitHub。请由持有适当 KEGG 许可的管理员自行从
+[KEGG FTP / subscription](https://www.kegg.jp/kegg/download/) 或机构批准的内部参考资源取得数据：
+学术 FTP 仅向订阅者开放，非学术使用须另行取得许可。不要把 KEGG REST API 当作公开下载渠道；
+该 API 仅供学术用户学术使用，且有速率限制。
+
+将管理员根据其许可导出的 **Human gene-symbol** GMT/TXT 保存为（UTF-8、Enrichr-style：
+`term<TAB>source<TAB>GENE...`）：
+
+```text
+data/go_gene_sets/KEGG_2021_Human.gmt
+```
+
+也可在部署环境设置 `SC_CELL_GO_GENE_SET_DIR=/srv/sc-platform/references/go_gene_sets`。随后在
+`sc_cell_go` 选择 **KEGG Human（需授权本地文件）** 即可。该目录中的 KEGG 文件会优先使用；未
+放入的 GO、Reactome 和 WikiPathways 仍自动使用随仓库快照，因此不必复制默认资源。请在运行
+manifest 中保留 KEGG release、获取日期、许可证/订阅依据和 SHA-256，且除非获得 KEGG 的明确再分发许可，
+不得把该文件推送到 GitHub。
+- **`functional_state`：** 克隆自带 Hallmark、Reactome、GO 与 CollecTRI v2.0 快照；标准默认
+  路径是 `resources/functional_state_resources/`。管理员如需更新，设置
+  `FUNCTIONAL_STATE_RESOURCE_DIR` 指向独立受控目录，再同步到该目录的 `gene_sets/`：
 
   ```bash
   python scripts/sync_managed_gene_sets.py \
-    --resource-dir "${FUNCTIONAL_STATE_RESOURCE_DIR:-data/functional_state_resources}"
+    --resource-dir "$FUNCTIONAL_STATE_RESOURCE_DIR"
   ```
 
   该管理员命令从固定的官方来源下载 Hallmark、Reactome 和 GO，并记录版本、许可与
-  SHA-256；细节见[托管基因集注册表](docs/MANAGED_GENE_SET_REGISTRY.md)。若要计算 TF
-  activity，还需在同一资源根放置 `collectri_human.tsv`，并为其保存来源/版本/SHA-256
-  元数据；缺失时仍输出基因表达和通路评分，但不会声称计算了 TF activity。
+  SHA-256；细节见[托管基因集注册表](docs/MANAGED_GENE_SET_REGISTRY.md)。随库 CollecTRI
+  快照同样记录来源、版本与 SHA-256。所有第三方资源、署名与许可见
+  [`resources/THIRD_PARTY_DATA_NOTICES.md`](resources/THIRD_PARTY_DATA_NOTICES.md)；更新后应先
+  在隔离环境验证再替换，不允许网页运行时下载。
 - **`virtual_ko`：** 设置 `CELLORACLE_PYTHON` 指向独立 Python 3.9/3.10 环境；该环境
   必须安装 CellOracle 及其依赖。内置人类 promoter base GRN 首次使用会下载并缓存；无外网
   部署应预先缓存，或上传经审核的 base GRN。
@@ -565,7 +589,8 @@ Git 仓库只保存源代码、模板、测试和维护文档。以下内容只�
 
 - `data/`、`instance/`、`cache/`：用户数据、SQLite 数据库、中间矩阵和运行缓存。
 - `data/references/`、`data/go_gene_sets/`、`data/functional_state_resources/`、`genesets/`：
-  参考模型、受控基因集与首次富集下载缓存；它们需按上述资源流程另行准备。
+  管理员覆盖资源、参考模型与运行缓存；不随仓库提供。克隆可直接使用 `resources/` 下带许可、只读的
+  基线 GO/Reactome/Hallmark/CollecTRI 快照。
 - `bulk_reference_output*/`、`artifacts/`：参考流程、图形验证和导出产物，可由脚本重新生成。
 - `.env`：本地密钥和部署参数，禁止提交。
 - `.runtime/`、Python/pytest 缓存、覆盖率输出、安装包以及根目录下自动生成的运行报告。
@@ -601,7 +626,8 @@ git ls-files --others --exclude-standard
 | `BULK_REFERENCE_OUTPUT_DIR` | `<DATA_DIR>/bulk_reference_output` | Bulk 参考流程默认输出目录 |
 | `CELLMARKER_PATH` | repo 上级目录下 `CellMarker_Augmented_2021.txt` | 兼容保留项；当前默认流程不要求克隆者提供该文件 |
 | `SC_CELLTYPIST_MODEL_DIR` | `<repo>/data/references/celltypist` | 可选 CellTypist `.pkl` 模型的受控目录 |
-| `FUNCTIONAL_STATE_RESOURCE_DIR` | `<DATA_DIR>/functional_state_resources` | 管理员冻结的 Hallmark/Reactome/GO 与 CollecTRI 资源根目录 |
+| `FUNCTIONAL_STATE_RESOURCE_DIR` | 空（使用仓库 `resources/functional_state_resources`） | 管理员冻结的 Hallmark/Reactome/GO 与 CollecTRI 替代资源根目录 |
+| `SC_CELL_GO_GENE_SET_DIR` | 空（使用同一仓库快照） | `sc_cell_go` 的管理员覆盖 GMT/TXT 目录 |
 | `MAX_WORKERS` | `2` | 后台分析任务并发数 |
 | `MIN_FREE_RAM_GB` | `4` | 资源保护阈值 |
 | `CUDA_DEVICES` | `0,1` | GPU 设备配置 |

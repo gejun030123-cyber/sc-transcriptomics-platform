@@ -57,6 +57,9 @@ scvi-tools
 torch
 kneed
 kaleido
+# Used by the 2–3 comparison DEG-overlap panel.  Keep it in the baseline so a
+# fresh clone does not silently skip the Venn artifact.
+matplotlib-venn
 
 # Optional AI providers
 openai

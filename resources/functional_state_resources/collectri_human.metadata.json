@@ -1,0 +1,15 @@
+{
+  "resource": "CollecTRI human signed TF-target regulons",
+  "version": "2.0",
+  "organism": "human",
+  "file": "collectri_human.tsv",
+  "sha256": "2020ac5f230a2fce9cbfefafa666e27578dedb5e33ec41ab48305bb6a1e8f512",
+  "source_md5": "cee4a3943c059e6dd8796ced6dec44f6",
+  "source_url": "https://zenodo.org/records/8192729/files/CollecTRI_regulons.csv?download=1",
+  "doi": "https://doi.org/10.5281/zenodo.8192729",
+  "license": "CC BY 4.0",
+  "license_url": "https://creativecommons.org/licenses/by/4.0/",
+  "retrieved_at": "2026-09-11",
+  "n_interactions": 43175,
+  "citation": "Müller-Dott S, Tsirvouli E, Vázquez M, et al. Dataset supporting Expanding the coverage of regulons from high-confidence prior knowledge for accurate estimation of transcription factor activities. Zenodo. 2023. doi:10.5281/zenodo.8192729"
+}
