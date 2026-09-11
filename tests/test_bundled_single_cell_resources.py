@@ -28,6 +28,13 @@ def test_bundled_resources_resolve_without_data_directory(tmp_path, monkeypatch)
     )
     assert len(_read_local_gene_sets(local_path)) >= 1000
 
+    wikipathways_path = _local_gene_set_path(
+        "WikiPathway_2021_Human", Config.sc_cell_go_gene_set_dir()
+    )
+    wikipathways = _read_local_gene_sets(wikipathways_path)
+    assert len(wikipathways) >= 800
+    assert "TP53" in {gene for genes in wikipathways.values() for gene in genes}
+
     network = _read_tf_network(resource_root / "collectri_human.tsv")
     assert (network["tf"] == "PPARA").sum() >= 5
     assert (resource_root / "collectri_human.metadata.json").is_file()

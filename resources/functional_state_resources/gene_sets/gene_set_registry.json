@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-09-11T03:38:24.954612+00:00",
+  "generated_at": "2026-09-11T04:40:50+00:00",
   "organism": "Human",
   "libraries": [
     {
@@ -24,6 +24,18 @@
       "source_url": "https://reactome.org/download/current/ReactomePathways.gmt.zip",
       "license": "CC0 1.0",
       "license_url": "https://reactome.org/license"
+    },
+    {
+      "key": "wikipathways_human",
+      "resource": "WikiPathways Human gene-symbol library",
+      "version": "WikiPathways_2024_Human (Enrichr snapshot)",
+      "file": "wikipathways/wikipathways_human_2024_enrichr.gmt",
+      "sha256": "f19d9f9ff601da24362a5990dfb95b8df1e1995dd003e3b68c5937f340d92e7e",
+      "n_gene_sets": 828,
+      "source_url": "https://maayanlab.cloud/Enrichr/geneSetLibrary?mode=text&libraryName=WikiPathways_2024_Human",
+      "upstream_source_url": "https://www.wikipathways.org/",
+      "license": "CC0 1.0 (WikiPathways); cite WikiPathways and Enrichr",
+      "license_url": "https://www.wikipathways.org/terms.html"
     },
     {
       "key": "go_bp_human",

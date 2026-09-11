@@ -7,14 +7,19 @@ resources/functional_state_resources/gene_sets/
 ├── gene_set_registry.json
 ├── hallmark/
 ├── reactome/
+├── wikipathways/
 └── go/
 ```
 
-`gene_set_registry.json` 保存每个 GMT 的来源 URL、版本、许可证、SHA-256 和 term 数；`sources/` 保留 Reactome ZIP、GO OBO 与 Human GAF 的原始校验对象。分析开始时会重新计算所选 GMT 的 SHA-256，校验失败即停止，不会悄悄使用被替换的基因集。
+`gene_set_registry.json` 保存每个 GMT 的来源 URL、版本、许可证、SHA-256 和 term 数。随仓库分发的是
+运行所需 GMT 与注册表；管理员同步过程产生的原始 Reactome ZIP、GO OBO 和 Human GAF 校验对象只可保留在受控
+管理员目录，不能提交到仓库。分析开始时会重新计算所选 GMT 的 SHA-256，校验失败即停止，不会悄悄使用被替换的基因集。
 
 ## 管理员同步
 
-随库基线已覆盖 Hallmark、Reactome、GO 与 CollecTRI v2.0，不必联网同步即可运行默认功能。若管理员需要替换或更新通路快照，先将资源根设置为独立的受控目录，再执行：
+随库基线已覆盖 Hallmark、Reactome、WikiPathways Human、GO 与 CollecTRI v2.0，不必联网同步即可运行默认功能。
+其中 WikiPathways 使用 Enrichr 发布的 `WikiPathways_2024_Human` gene-symbol 快照，保证可与常见 Human
+symbol DEG 直接匹配；其上游 WikiPathways 内容为 CC0，仍应在结果或方法中引用 WikiPathways 和 Enrichr。若管理员需要替换或更新 Hallmark、Reactome 或 GO 通路快照，先将资源根设置为独立的受控目录，再执行：
 
 ```bash
 export FUNCTIONAL_STATE_RESOURCE_DIR=/srv/sc-platform/references/functional_state

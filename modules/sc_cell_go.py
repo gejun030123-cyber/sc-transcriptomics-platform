@@ -72,6 +72,7 @@ BUNDLED_GENE_SET_ALIASES = {
     "GO_Cellular_Component_2023": "go_cc_human",
     "GO_Molecular_Function_2023": "go_mf_human",
     "Reactome_2022": "reactome_human",
+    "WikiPathway_2021_Human": "wikipathways_human",
 }
 
 

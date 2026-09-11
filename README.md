@@ -200,7 +200,7 @@ scRNA-seq / Bulk RNA-seq 流程；`data/`、SQLite 数据库、缓存和项目�
 | --- | --- | --- |
 | Web、项目管理、常规单细胞/Bulk 分析、PNG/SVG、Excel 输入/输出 | 可以 | 用户自行上传的表达数据；不附带示例人类数据 |
 | Bulk `bulk_enrichment` | 首次运行可联网下载 Enrichr 基因集 | 无外网时，管理员须预置 `genesets/<library>.txt` 或 `data/go_gene_sets/<library>.gmt` |
-| `sc_cell_go` 的离线 ORA/GSEA | 可以（内置 GO BP/CC/MF 与 Reactome 快照） | 如需未随库分发的 KEGG/WikiPathways 或自定义库，可在项目内上传 GMT/TXT 或设置 `SC_CELL_GO_GENE_SET_DIR` |
+| `sc_cell_go` 的离线 ORA/GSEA | 可以（内置 GO BP/CC/MF、Reactome 与 WikiPathways Human 快照） | KEGG 未随库分发；需由具备相应授权的管理员提供本地 GMT/TXT。自定义库可在项目内上传或设置 `SC_CELL_GO_GENE_SET_DIR` |
 | `functional_state` 标准 Hallmark/Reactome/GO 与 CollecTRI TF activity | 可以（内置受版本与 SHA-256 约束的公开快照） | 可设置 `FUNCTIONAL_STATE_RESOURCE_DIR` 以使用管理员审核的替代/更新资源 |
 | CellTypist 参考注释 | 包已安装，但模型未随仓库提供 | 可信 `.pkl` 模型放入 `SC_CELLTYPIST_MODEL_DIR` |
 | `scenic` | 可运行 | 输入 H5AD 必须已有 AUCell `obsm` 矩阵和 regulon 定义；网页不重建 SCENIC 网络 |
@@ -266,9 +266,10 @@ python -m pip install pymde fuzzy-c-means
 
 - **CellTypist：** 将已审核的模型（例如 `Immune_All_Low.pkl`）放入
   `data/references/celltypist/`，或在 `.env` 设置 `SC_CELLTYPIST_MODEL_DIR`。
-- **`sc_cell_go` 离线富集：** 克隆自带 GO BP/CC/MF 与 Reactome 的只读快照，足以完成默认
-  ORA/GSEA。pseudobulk ORA/GSEA 强制使用本地库；如需自定义、KEGG 或 WikiPathways，可在项目内
-  放置同名 `<library>.gmt` / `<library>.txt`，或设置 `SC_CELL_GO_GENE_SET_DIR` 指向管理员目录。
+- **`sc_cell_go` 离线富集：** 克隆自带 GO BP/CC/MF、Reactome 与 WikiPathways Human 的只读快照，
+  足以完成默认 ORA/GSEA。pseudobulk ORA/GSEA 强制使用本地库；KEGG 不在仓库内，必须由已获得
+  对应授权的管理员放置同名 `<library>.gmt` / `<library>.txt`，自定义库也可通过该方式或
+  `SC_CELL_GO_GENE_SET_DIR` 提供。
   只有兼容的细胞级 ORA 可显式选择 Enrichr，此时基因列表会发送到该在线服务。
 - **`functional_state`：** 克隆自带 Hallmark、Reactome、GO 与 CollecTRI v2.0 快照；标准默认
   路径是 `resources/functional_state_resources/`。管理员如需更新，设置
