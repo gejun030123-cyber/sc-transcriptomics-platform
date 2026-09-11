@@ -454,7 +454,7 @@ class TestAllModulesOutputAdata:
         sc_module_names = {
             'qc', 'normalize', 'hvg', 'dimred', 'batch_correct',
             'clustering', 'subcluster', 'qc_reassess', 'annotation', 'deg',
-            'trajectory', 'sc_timecourse', 'proportion', 'cell_communication',
+            'trajectory', 'sc_timecourse', 'proportion', 'neighborhood_da', 'cell_communication',
         }
         issues = []
         for filepath in _get_module_files():
@@ -869,7 +869,7 @@ class TestModuleReturnStructure:
             # 1. summary = { ... } 然后 'summary': summary
             # 2. 'summary': { ... } 内联
             has_summary_var = bool(re.search(r'summary\s*=\s*\{', source))
-            has_summary_inline = bool(re.search(r"'summary'\s*:\s*\{", source))
+            has_summary_inline = bool(re.search(r"[\"']summary[\"']\s*:\s*\{", source))
 
             if not has_summary_var and not has_summary_inline:
                 # 检查是否有变量赋值
@@ -932,7 +932,7 @@ class TestModuleReturnStructure:
 
             # 查找 run 方法体
             m = re.search(
-                r'def run\(self[^)]*\):(.*?)(?=\n    def |\nclass |\Z)',
+                r'def run\(self[^)]*\):(.*?)(?=\n(?:    )?def |\nclass |\Z)',
                 source, re.DOTALL
             )
             if not m:
@@ -1027,7 +1027,10 @@ class TestAllModulesNamingConventions:
 
             # 检查是否有 MODULE_NAME 声明
             lines, source = _read_source(filepath)
-            module_name_match = re.search(r"MODULE_NAME\s*=\s*['\"]([^'\"]+)['\"]", source)
+            module_name_match = re.search(
+                r"^\s*MODULE_NAME\s*=\s*['\"]([^'\"]+)['\"]",
+                source, re.MULTILINE,
+            )
             if module_name_match:
                 declared_name = module_name_match.group(1)
                 if declared_name not in registered:

@@ -15,6 +15,8 @@ from modules.io_utils import (
     infer_sample_group_candidates,
     obs_grouping_info,
 )
+from modules.sc_de_utils import resolve_cell_grouping
+from modules.sc_de_utils import _matrix_is_raw_counts
 
 
 _STATUS_RANK = {"pass": 0, "review": 1, "warning": 2, "blocked": 3}
@@ -30,6 +32,21 @@ _SAMPLE_TOKENS = ("sample", "library", "orig.ident", "specimen", "patient_sample
 _BATCH_TOKENS = ("batch", "lane", "sequencing", "library", "run")
 _CELLTYPE_TOKENS = ("celltype", "cell_type", "annotation", "cluster", "leiden", "louvain")
 _TIME_TOKENS = ("time", "day", "hour", "week", "stage", "minute")
+
+# 需要硬预检（blockers 会阻止提交）的模块。网页表单与 AI 工具必须使用
+# 同一集合：此前表单只检查 4 个模块、AI 检查 8 个，导致同一个人工提交
+# 反而绕过了正式样本级统计（sc_pseudobulk_deg 等）的设计门槛。
+PREFLIGHT_MODULES = frozenset({
+    "bulk_normalize",
+    "bulk_deg",
+    "batch_correct",
+    "sc_timecourse",
+    "sc_cell_deg",
+    "sc_pseudobulk_deg",
+    "functional_state",
+    "proportion",
+    "neighborhood_da",
+})
 
 
 def _check(name, status, message, value=None):
@@ -326,6 +343,13 @@ def build_design_preflight(adata, module_name, params=None, input_path=""):
             recommended["condition_key"] = candidates["condition_candidates"][0]
         if candidates["sample_candidates"]:
             recommended["sample_key"] = candidates["sample_candidates"][0]
+    elif module_name == "neighborhood_da":
+        if candidates["condition_candidates"]:
+            recommended["condition_key"] = candidates["condition_candidates"][0]
+        if candidates["sample_candidates"]:
+            recommended["sample_key"] = candidates["sample_candidates"][0]
+        if candidates["celltype_candidates"]:
+            recommended["celltype_key"] = candidates["celltype_candidates"][0]
     elif module_name == "batch_correct" and candidates["batch_candidates"]:
         recommended["batch_key"] = candidates["batch_candidates"][0]
     elif module_name == "sc_timecourse":
@@ -406,6 +430,57 @@ def build_design_preflight(adata, module_name, params=None, input_path=""):
                 else:
                     checks.append(_check("比较分组", "pass", "已识别可用分组及可比较的组别。", counts))
 
+    if module_name == "functional_state":
+        sample_key = _selected_value(params, "sample_key") or (candidates["sample_candidates"] or [""])[0]
+        condition_key = _selected_value(params, "condition_key") or (candidates["condition_candidates"] or [""])[0]
+        celltype_key = _selected_value(params, "celltype_key") or (candidates["celltype_candidates"] or [""])[0]
+        missing = [
+            label for label, key in (("sample", sample_key), ("condition", condition_key), ("celltype", celltype_key))
+            if not key or key not in adata.obs.columns
+        ]
+        if missing:
+            checks.append(_check(
+                "功能状态统计预览", "blocked",
+                "缺少功能状态分析所需 metadata 列：" + "、".join(missing),
+            ))
+        else:
+            scoped = adata
+            scope_key = _selected_value(params, "scope_key")
+            scope_values = [value.strip() for value in _selected_value(params, "scope_values").replace("\n", ",").split(",") if value.strip()]
+            if scope_key in adata.obs.columns and scope_values:
+                scoped = adata[adata.obs[scope_key].astype(str).isin(scope_values)]
+            min_cells = max(1, _as_int(params.get("min_cells_per_sample_celltype", 20), 20))
+            units = (
+                scoped.obs.groupby([sample_key, condition_key, celltype_key], observed=True)
+                .size().rename("n_cells").reset_index()
+            )
+            valid_units = int(units["n_cells"].ge(min_cells).sum()) if not units.empty else 0
+            condition_samples = (
+                scoped.obs[[sample_key, condition_key]].drop_duplicates()[condition_key]
+                .astype(str).value_counts().to_dict()
+            )
+            celltype_counts = scoped.obs[celltype_key].astype(str).value_counts().to_dict()
+            preview = {
+                "selected_cells": int(scoped.n_obs),
+                "total_cells": int(adata.n_obs),
+                "samples_per_condition": {str(key): int(value) for key, value in condition_samples.items()},
+                "celltype_cells": {str(key): int(value) for key, value in celltype_counts.items()},
+                "valid_sample_x_celltype_units": valid_units,
+                "total_sample_x_celltype_units": int(len(units)),
+                "units_below_min_cells": int(len(units) - valid_units),
+                "min_cells_per_sample_celltype": min_cells,
+            }
+            preview_status = "pass" if valid_units else "warning"
+            checks.append(_check(
+                "功能状态统计预览", preview_status,
+                f"已选择 {int(scoped.n_obs)} / {int(adata.n_obs)} 个细胞；"
+                f"有效 sample×celltype 单元 {valid_units} / {int(len(units))}（每单元 ≥{min_cells} 细胞）。",
+                preview,
+            ))
+            for key, value in (("sample_key", sample_key), ("condition_key", condition_key), ("celltype_key", celltype_key)):
+                if value:
+                    recommended.setdefault(key, value)
+
     if module_name == "proportion":
         sample_key = _selected_value(params, "sample_key") or (candidates["sample_candidates"] or [""])[0]
         condition_key = _selected_value(params, "condition_key") or (candidates["condition_candidates"] or [""])[0]
@@ -415,6 +490,57 @@ def build_design_preflight(adata, module_name, params=None, input_path=""):
             recommended.setdefault("sample_key", sample_key)
         if condition_key:
             recommended.setdefault("condition_key", condition_key)
+
+    if module_name == "neighborhood_da":
+        sample_key = _selected_value(params, "sample_key") or (candidates["sample_candidates"] or [""])[0]
+        condition_key = _selected_value(params, "condition_key") or (candidates["condition_candidates"] or [""])[0]
+        scoped = adata
+        scope_key = _selected_value(params, "scope_key")
+        scope_values = [
+            value.strip() for value in _selected_value(params, "scope_values").replace("\n", ",").split(",")
+            if value.strip()
+        ]
+        if scope_key in adata.obs.columns and scope_values:
+            scoped = adata[adata.obs[scope_key].astype(str).isin(scope_values)]
+        min_samples = max(2, _as_int(params.get("min_samples_per_condition", 2), 2))
+        design_status, design_message, design_values = _sample_design_check(
+            scoped, sample_key, condition_key, min_samples=min_samples,
+        )
+        # Unlike the proportion module, this analysis has no descriptive-only
+        # mode: constructing a local DA map without biological samples would
+        # invite interpreting cell counts as replicates.
+        if design_status != "pass":
+            design_status = "blocked"
+        checks.append(_check("邻域丰度样本设计", design_status, design_message, design_values))
+        for key, value in (("sample_key", sample_key), ("condition_key", condition_key)):
+            if value:
+                recommended.setdefault(key, value)
+
+        if "X_umap" not in adata.obsm:
+            checks.append(_check("UMAP 嵌入", "blocked", "缺少 X_umap；请先完成降维分析。"))
+        else:
+            checks.append(_check("UMAP 嵌入", "pass", "已找到 X_umap，用于显示局部差异丰度。"))
+        representation = _selected_value(params, "representation", "auto") or "auto"
+        available_representations = [
+            key for key in ("X_pca_harmony", "X_scanorama", "X_scvi", "X_scVI", "X_sysvi", "X_pca_combat", "X_mnn", "X_pca")
+            if key in adata.obsm
+        ]
+        if representation == "auto":
+            if not available_representations:
+                checks.append(_check(
+                    "邻域高维表示", "blocked",
+                    "未找到 X_pca_harmony/X_scVI/X_pca 等高维表示；不能用二维 UMAP 构建统计邻域。",
+                ))
+            else:
+                checks.append(_check(
+                    "邻域高维表示", "pass",
+                    f"可自动使用 '{available_representations[0]}' 构建 KNN 邻域。",
+                    available_representations,
+                ))
+        elif representation not in adata.obsm:
+            checks.append(_check("邻域高维表示", "blocked", f"指定表示 '{representation}' 不在 adata.obsm 中。"))
+        else:
+            checks.append(_check("邻域高维表示", "pass", f"已指定 '{representation}' 构建 KNN 邻域。"))
 
     if module_name == "sc_timecourse":
         time_key = _selected_value(params, "timepoint_key") or (candidates["time_candidates"] or [""])[0]
@@ -501,19 +627,32 @@ def build_design_preflight(adata, module_name, params=None, input_path=""):
                         ))
             if sample_key:
                 recommended.setdefault("sample_key", sample_key)
-            if comparison_type in {"within_sample_clusters", "between_samples_within_cluster"}:
-                if not cluster_key:
-                    checks.append(_check("聚类列", "blocked", "未指定聚类列。"))
-                elif cluster_key not in adata.obs.columns:
-                    checks.append(_missing_column_check(
-                        adata, "聚类", cluster_key,
-                        role_candidates=candidates["celltype_candidates"],
-                        grouping_candidates=candidates["grouping_candidates"],
-                    ))
-                else:
-                    checks.append(_check("聚类列", "pass", f"已使用聚类列 '{cluster_key}'。", cluster_key))
-                if cluster_key:
-                    recommended.setdefault("cluster_key", cluster_key)
+        scope = _selected_value(params, "analysis_scope") or "both"
+        needs_grouping = (
+            comparison_type in {"within_sample_clusters", "between_samples_within_cluster"}
+            or (comparison_type == "condition" and scope in {"both", "per_cluster"})
+        )
+        if needs_grouping:
+            requested_mode = _selected_value(params, "grouping_mode") or "auto"
+            group_check_name = (
+                "细胞类型注释列"
+                if requested_mode in {"annotated_celltype", "celltype", "annotation"}
+                else "聚类列"
+            )
+            try:
+                grouping = resolve_cell_grouping(params, adata.obs.columns)
+            except ValueError as exc:
+                checks.append(_check(group_check_name, "blocked", str(exc)))
+            else:
+                checks.append(_check(
+                    group_check_name, "pass",
+                    f"已使用{grouping['label']}列 '{grouping['key']}'。",
+                    grouping["key"],
+                ))
+                recommended.setdefault(
+                    "celltype_key" if grouping["mode"] == "annotated_celltype" else "cluster_key",
+                    grouping["key"],
+                )
 
     if module_name == "sc_pseudobulk_deg":
         sample_key = _selected_value(params, "sample_key")
@@ -569,19 +708,46 @@ def build_design_preflight(adata, module_name, params=None, input_path=""):
         if condition_key:
             recommended.setdefault("condition_key", condition_key)
 
+        # The pseudobulk runner intentionally aggregates only a protected raw
+        # count layer.  Surface this hard requirement before submission so the
+        # web form and AI caller do not create a task that can only fail later.
+        if "counts" not in adata.layers:
+            checks.append(_check(
+                "原始 counts 层", "blocked",
+                "缺少 layers['counts']；样本级 pseudobulk DEG 需要可追溯的原始整数计数。",
+            ))
+        elif not _matrix_is_raw_counts(adata.layers["counts"]):
+            checks.append(_check(
+                "原始 counts 层", "blocked",
+                "layers['counts'] 不是非负整数原始计数，不能用于 pseudobulk DEG。",
+            ))
+        else:
+            checks.append(_check(
+                "原始 counts 层", "pass",
+                "已找到可用于样本级 pseudobulk 聚合的原始整数 counts 层。",
+            ))
+
         if scope == "per_cluster":
-            if not cluster_key:
-                checks.append(_check("聚类列", "blocked", "未指定聚类列。"))
-            elif cluster_key not in adata.obs.columns:
-                checks.append(_missing_column_check(
-                    adata, "聚类", cluster_key,
-                    role_candidates=candidates["celltype_candidates"],
-                    grouping_candidates=candidates["grouping_candidates"],
-                ))
+            requested_mode = _selected_value(params, "grouping_mode") or "auto"
+            group_check_name = (
+                "细胞类型注释列"
+                if requested_mode in {"annotated_celltype", "celltype", "annotation"}
+                else "聚类列"
+            )
+            try:
+                grouping = resolve_cell_grouping(params, adata.obs.columns)
+            except ValueError as exc:
+                checks.append(_check(group_check_name, "blocked", str(exc)))
             else:
-                checks.append(_check("聚类列", "pass", f"已使用聚类列 '{cluster_key}'。", cluster_key))
-            if cluster_key:
-                recommended.setdefault("cluster_key", cluster_key)
+                checks.append(_check(
+                    group_check_name, "pass",
+                    f"已使用{grouping['label']}列 '{grouping['key']}'。",
+                    grouping["key"],
+                ))
+                recommended.setdefault(
+                    "celltype_key" if grouping["mode"] == "annotated_celltype" else "cluster_key",
+                    grouping["key"],
+                )
         batch_key = _selected_value(params, "batch_key")
         if batch_key and batch_key not in adata.obs.columns:
             checks.append(_check("批次列", "blocked", f"批次列 '{batch_key}' 不在 adata.obs 中。"))

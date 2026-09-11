@@ -11,7 +11,8 @@ def test_workspace_page_is_project_scoped_and_reserves_wes_atac(test_project):
 
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert "AI 分析执行台" in html
+    assert "从你的研究问题开始" in html
+    assert "oelab agent" in html
     assert "WES 外显子组" in html
     assert "Bulk ATAC" in html
     assert "规划中" in html
@@ -30,6 +31,6 @@ def test_workspace_assets_are_served(test_project):
         js = client.get("/static/js/workspace.js")
 
     assert css.status_code == 200
-    assert ".workspace-grid" in css.get_data(as_text=True)
+    assert ".agent-shell" in css.get_data(as_text=True)
     assert js.status_code == 200
     assert "workspaceSend" in js.get_data(as_text=True)

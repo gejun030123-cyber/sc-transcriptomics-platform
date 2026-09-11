@@ -13,6 +13,7 @@
   → subcluster（可选）
   → qc_reassess
   → annotation
+  → scenic（已有预计算 AUCell 时）
   → sc_timecourse（时序项目可选）
   → deg / sc_cell_deg
   → sc_pseudobulk_deg
@@ -38,6 +39,7 @@
 3. Marker Volcano/Heatmap：cluster 是否有一致且可解释的 marker 证据。
 4. Pseudobulk Volcano/MA：条件差异是否在独立样本层面成立。
 5. GO dotplot：差异基因是否支持可审查的生物过程解释。
+6. SCENIC AUCell/RSS（可选）：在已完成本地 SCENIC 推断时，哪些 regulon 对细胞群最特异；此项用于机制假设生成，不替代样本级条件统计。
 
 **图形类型**：以 `quantitative grid` 为主，嵌入图是主要结构面板，QC、marker、
 pseudobulk 和 GO 为从属证据。
@@ -91,6 +93,9 @@ marker 热图标签过密、per-cluster 图数量失控、低 overlap GO term �
   样本级 DEG；pseudobulk ORA 使用每个分析单元的完整 tested-gene background，
   并支持上下调分开和预排序 GSEA。每个簇均独立计算；默认对每个有显著通路的簇出图，
   也可用 `plot_max_clusters` 限制图量。细胞级图仍明确要求用 pseudobulk 结果验证条件结论。
+- `scenic` 读取本地预计算 AUCell（不向外发送表达矩阵），输出核心 AUCell 热图、RSS
+  气泡/条形图，并在导入 regulon 靶基因定义时追加网络图和 regulon 共活性相关热图；所有
+  figure selection、完整 RSS 和边表可审查，且 TF activity 不与 TF 基因表达混称。
 
 ## 5. 建议的下一阶段
 

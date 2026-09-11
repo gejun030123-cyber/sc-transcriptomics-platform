@@ -429,3 +429,40 @@ def test_enrichment_schema_is_human_only_and_gsea_controls_are_conditional():
     assert schema['ranking_metric']['show_if'] == {'method': 'GSEA'}
     assert schema['custom_genes']['show_if'] == {'method': 'ORA'}
     assert schema['split_direction']['show_if'] == {'method': 'ORA'}
+    assert schema['go_priority_enabled']['show_if'] == {
+        'batch_databases': True, 'method': 'ORA',
+    }
+    assert schema['focus_terms']['show_if'] == {'go_priority_enabled': True}
+    assert schema['go_priority_top_n']['max'] == 12
+    assert schema['go_priority_allocation_mode']['show_if'] == {
+        'go_priority_enabled': True,
+    }
+
+
+def test_bulk_go_priority_config_requires_all_three_go_ontologies():
+    import pytest
+    from modules.bulk_enrichment import BulkEnrichmentAnalysis, _go_priority_config_from_params
+
+    config = _go_priority_config_from_params(
+        {
+            'go_priority_enabled': True,
+            'method': 'ORA',
+            'focus_terms': 'lipid catabolic process',
+            'go_priority_top_n': 6,
+        },
+        databases=['GO_BP', 'GO_CC', 'GO_MF'], top_n=8,
+    )
+
+    assert config['focus_terms'] == ['lipid catabolic process']
+    assert config['allocation_mode'] == 'balanced'
+    assert config['top_n'] == 6
+    with pytest.raises(ValueError, match='GO_BP、GO_CC、GO_MF'):
+        _go_priority_config_from_params(
+            {'go_priority_enabled': True, 'method': 'ORA'},
+            databases=['GO_BP', 'GO_CC'], top_n=8,
+        )
+    with pytest.raises(ValueError, match='批量执行多个数据库'):
+        BulkEnrichmentAnalysis(
+            project_dir='.', params={'go_priority_enabled': True, 'batch_databases': False},
+            progress_callback=lambda *_args: None,
+        ).run('')

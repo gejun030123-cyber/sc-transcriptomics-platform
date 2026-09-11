@@ -836,7 +836,7 @@ def build_result_interpretation(module_name, summary, result_files=None):
         'qc': '质控', 'normalize': '标准化', 'hvg': '高变基因', 'dimred': '降维',
         'batch_correct': '批次校正', 'clustering': '聚类', 'subcluster': '子簇精细分析',
         'annotation': '细胞注释', 'deg': '差异表达', 'trajectory': '轨迹分析',
-        'sc_timecourse': '单细胞时序动态', 'proportion': '细胞比例', 'cell_communication': '细胞通讯',
+        'sc_timecourse': '单细胞时序动态', 'proportion': '细胞比例', 'neighborhood_da': '邻域差异丰度', 'cell_communication': '细胞通讯',
         'sc_cell_deg': '细胞级探索性比较', 'sc_pseudobulk_deg': '样本级 pseudobulk 差异表达',
         'sc_cell_go': '单细胞通路富集',
     }.get(module_name, module_name)

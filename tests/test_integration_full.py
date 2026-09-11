@@ -1065,6 +1065,14 @@ class TestSCModuleDimredDeepAssertions:
         assert hvg['pca_n_genes'] == 80
         assert full['pca_result_shape'] == hvg['pca_result_shape'] == [50, 10]
         assert full['pca_fingerprint'] != hvg['pca_fingerprint']
+        # 全基因分支必须删掉稠密的 scaled layer：它没有任何下游消费者，
+        # 却会让每个中间 h5ad 多出 n_cells × n_genes 的体积。
+        assert full['scaled_layer_dropped_from_output'] is True
+        assert hvg['scaled_layer_dropped_from_output'] is False
+        import anndata
+        output = anndata.read_h5ad(results[False]['output_adata'])
+        assert 'scaled' not in output.layers
+        assert 'counts' in output.layers or 'normalized' in output.layers
 
     @_timeout(60)
     def test_dimred_umap_coords_2d(self, tmp_path):
@@ -1718,10 +1726,10 @@ class TestWorkerIntegration:
 
         expected_sc = {'qc', 'normalize', 'hvg', 'dimred', 'batch_correct',
                        'clustering', 'qc_reassess', 'annotation', 'deg',
-                       'trajectory', 'sc_timecourse', 'proportion',
+                       'trajectory', 'sc_timecourse', 'proportion', 'neighborhood_da',
                        'cell_communication', 'subcluster', 'sc_batch_import',
                        'sc_cell_deg', 'sc_cell_go', 'sc_pseudobulk_deg',
-                       'sc_csv_export', 'virtual_ko'}
+                       'sc_csv_export', 'virtual_ko', 'functional_state', 'scenic'}
         expected_bulk = {'bulk_qc', 'bulk_normalize', 'bulk_deg', 'bulk_pca',
                         'bulk_heatmap', 'bulk_enrichment', 'bulk_timecourse',
                         'bulk_deg_integration'}

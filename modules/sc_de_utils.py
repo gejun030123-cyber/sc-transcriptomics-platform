@@ -10,6 +10,80 @@ temporary log1p matrix from the protected raw-count layer for cell-level DE.
 from __future__ import annotations
 
 
+def resolve_cell_grouping(params, obs_columns):
+    """Resolve the biological grouping used for single-cell DE.
+
+    ``cluster`` remains available for workflows that deliberately operate on
+    unsupervised clusters.  The analysis form, however, now selects
+    ``annotated_celltype`` by default so post-annotation condition contrasts
+    are grouped by the reviewed cell-type labels rather than by Leiden IDs.
+
+    The ``auto`` mode is intentionally retained for older API/pipeline calls:
+    it prefers an explicitly supplied key and otherwise uses ``celltype``
+    when available before falling back to ``leiden``.  All modes return the
+    legacy-compatible ``cluster`` output field via the caller, while recording
+    the actual grouping semantics separately in the audit/result metadata.
+    """
+    params = dict(params or {})
+    columns = {str(column) for column in obs_columns}
+    raw_mode = str(
+        params.get("grouping_mode", params.get("analysis_unit", "auto")) or "auto"
+    ).strip().lower()
+    aliases = {
+        "celltype": "annotated_celltype",
+        "cell_type": "annotated_celltype",
+        "annotation": "annotated_celltype",
+        "annotated": "annotated_celltype",
+        "annotated_celltype": "annotated_celltype",
+        "cluster": "cluster",
+        "clusters": "cluster",
+        "leiden": "cluster",
+        "auto": "auto",
+    }
+    if raw_mode not in aliases:
+        raise ValueError("grouping_mode 必须为 annotated_celltype、cluster 或 auto")
+    mode = aliases[raw_mode]
+    celltype_key = str(params.get("celltype_key", "celltype") or "").strip()
+    cluster_key = str(params.get("cluster_key", "leiden") or "").strip()
+
+    if mode == "annotated_celltype":
+        key = celltype_key
+        label = "细胞类型"
+    elif mode == "cluster":
+        key = cluster_key
+        label = "聚类"
+    else:
+        # Preserve scripts that explicitly requested a legacy cluster key,
+        # while making a bare call annotation-aware when a celltype column is
+        # already present.
+        explicitly_requested_celltype = "celltype_key" in params and bool(celltype_key)
+        explicitly_requested_cluster = "cluster_key" in params and bool(cluster_key)
+        if explicitly_requested_celltype and celltype_key in columns:
+            key, mode, label = celltype_key, "annotated_celltype", "细胞类型"
+        elif explicitly_requested_cluster and cluster_key in columns:
+            key, mode, label = cluster_key, "cluster", "聚类"
+        elif celltype_key in columns:
+            key, mode, label = celltype_key, "annotated_celltype", "细胞类型"
+        else:
+            key, mode, label = cluster_key, "cluster", "聚类"
+
+    if not key:
+        raise ValueError(f"未指定{label}分组列")
+    if key not in columns:
+        if mode == "annotated_celltype":
+            raise ValueError(
+                f"缺少注释细胞类型列 '{key}'；请先完成细胞注释，"
+                "或将“分析分组”改为聚类。"
+            )
+        raise ValueError(f"缺少聚类列 '{key}'")
+    return {
+        "mode": mode,
+        "key": key,
+        "label": label,
+        "value_label": "细胞类型" if mode == "annotated_celltype" else "cluster",
+    }
+
+
 def _matrix_is_raw_counts(matrix):
     """Return whether *matrix* is finite, non-negative and integer-valued."""
     import numpy as np

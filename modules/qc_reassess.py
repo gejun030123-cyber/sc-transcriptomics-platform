@@ -35,10 +35,15 @@ class QCReassessAnalysis(BaseAnalysis):
 
         cluster_key = self.params.get('cluster_key', 'leiden')
         doublet_threshold = float(self.params.get('doublet_threshold', 0.3))
+        doublet_score_cutoff = float(self.params.get('doublet_score_cutoff', 0.5))
         mt_threshold = float(self.params.get('mt_threshold', 15.0))
         ribo_threshold = float(self.params.get('ribosomal_threshold', 0))
         min_cells = int(self.params.get('min_cells_per_cluster', 10))
         auto_remove = self._as_bool(self.params.get('auto_remove', False), False)
+        if not 0 <= doublet_threshold <= 1:
+            raise ValueError('doublet_threshold 必须位于 [0, 1]。')
+        if not 0 <= doublet_score_cutoff <= 1:
+            raise ValueError('doublet_score_cutoff 必须位于 [0, 1]。')
 
         # A QC metric (for example ``log1p_n_genes_by_counts``) is numeric and
         # can have nearly one value per cell.  Treating it as a cluster column
@@ -75,26 +80,37 @@ class QCReassessAnalysis(BaseAnalysis):
 
         # 计算每个簇的统计
         clusters = adata.obs[cluster_key].unique()
+        if 'predicted_doublet' in adata.obs.columns:
+            doublet_fraction_source = 'predicted_doublet'
+        elif 'doublet_score' in adata.obs.columns:
+            doublet_fraction_source = f'doublet_score >= {doublet_score_cutoff:g}'
+        else:
+            doublet_fraction_source = 'unavailable'
         cluster_stats = []
         for c in sorted(clusters):
             mask = adata.obs[cluster_key] == c
             n_cells = mask.sum()
-            doublet_frac = 0.0
+            doublet_frac = np.nan
+            mean_doublet_score = np.nan
             if 'predicted_doublet' in adata.obs.columns:
-                doublet_frac = adata.obs.loc[mask, 'predicted_doublet'].mean()
-                # QC 默认已剔除全部预测 doublet：predicted_doublet 全为
-                # False 时该指标恒为 0，改用连续 doublet_score 的簇均值，
-                # 否则“高双细胞簇”检查在标准流水线下永远不触发。
-                if doublet_frac == 0.0 and 'doublet_score' in adata.obs.columns:
-                    doublet_frac = adata.obs.loc[mask, 'doublet_score'].mean()
+                doublet_frac = float(
+                    adata.obs.loc[mask, 'predicted_doublet'].astype(bool).mean()
+                )
             elif 'doublet_score' in adata.obs.columns:
-                doublet_frac = (adata.obs.loc[mask, 'doublet_score'] > 0.5).mean()
+                doublet_frac = float(
+                    (pd.to_numeric(adata.obs.loc[mask, 'doublet_score'], errors='coerce')
+                     >= doublet_score_cutoff).mean()
+                )
+            if 'doublet_score' in adata.obs.columns:
+                mean_doublet_score = float(pd.to_numeric(
+                    adata.obs.loc[mask, 'doublet_score'], errors='coerce'
+                ).mean())
             mt_mean = adata.obs.loc[mask, 'pct_counts_mt'].mean() if 'pct_counts_mt' in adata.obs.columns else 0
             counts_mean = adata.obs.loc[mask, 'total_counts'].mean() if 'total_counts' in adata.obs.columns else 0
             genes_mean = adata.obs.loc[mask, 'n_genes_by_counts'].mean() if 'n_genes_by_counts' in adata.obs.columns else 0
             is_low = False
             reasons = []
-            if doublet_frac > doublet_threshold:
+            if pd.notna(doublet_frac) and doublet_frac > doublet_threshold:
                 is_low = True
                 reasons.append('high_doublet')
             if mt_mean > mt_threshold:
@@ -111,6 +127,8 @@ class QCReassessAnalysis(BaseAnalysis):
             cluster_stats.append({
                 'cluster': str(c), 'n_cells': n_cells,
                 'doublet_fraction': round(doublet_frac, 4),
+                'mean_doublet_score': round(mean_doublet_score, 4),
+                'doublet_fraction_source': doublet_fraction_source,
                 'mean_pct_mt': round(mt_mean, 2),
                 'mean_total_counts': round(counts_mean, 0),
                 'mean_n_genes': round(genes_mean, 0),
@@ -232,6 +250,8 @@ class QCReassessAnalysis(BaseAnalysis):
                 'n_low_quality': int(n_low),
                 'low_quality_clusters': stats_df[stats_df['low_quality']]['cluster'].tolist(),
                 'doublet_threshold': doublet_threshold,
+                'doublet_score_cutoff': doublet_score_cutoff,
+                'doublet_fraction_source': doublet_fraction_source,
                 'mt_threshold': mt_threshold,
             }
         }

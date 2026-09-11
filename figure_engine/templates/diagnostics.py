@@ -144,9 +144,12 @@ class NatureDiagnostic:
         fig, axes, style, profile = self._canvas(spec, container, 1, 2, height=76)
         shown = _short_labels(labels, 10)
         ticks = label_tick_indices(len(labels), 8)
+        panel_titles = data.get('panel_titles') or ('Before transformation', 'After transformation')
+        if len(panel_titles) != 2:
+            panel_titles = ('Before transformation', 'After transformation')
         for ax, matrix, subtitle, color in zip(
             axes.ravel(), (raw, normalized),
-            ('Before transformation', 'After transformation'),
+            panel_titles,
             (style.signal_orange, style.signal_blue),
         ):
             box = ax.boxplot(matrix.T, patch_artist=True, showfliers=False,
@@ -243,8 +246,9 @@ class NatureDiagnostic:
             ax = flat[len(metrics)]
             ax.scatter(lib, genes, c=colors, s=profile.marker_size_pt2,
                        alpha=0.88, edgecolor='white', linewidth=0.35)
-            ax.set_title('Library size vs detected genes', loc='left', pad=3)
-            ax.set_xlabel('Library size')
+            quantity_label = str(data.get('quantity_label') or 'Library size')
+            ax.set_title(f'{quantity_label} vs detected genes', loc='left', pad=3)
+            ax.set_xlabel(quantity_label)
             ax.set_ylabel('Detected genes')
         for ax in flat[n_panels:]:
             ax.set_visible(False)
@@ -350,6 +354,7 @@ class NatureDiagnostic:
         groups = _labels(data.get('groups'), len(values[0]))
         colors = dict(data.get('group_colors') or style.group_colors(groups))
         markers = dict(data.get('group_markers') or style.batch_markers(groups))
+        ordered_groups = list(dict.fromkeys(str(group) for group in groups))
         for row in range(n):
             for col in range(n):
                 ax = axes[row, col]
@@ -357,7 +362,7 @@ class NatureDiagnostic:
                     ax.hist(values[row], bins=18, color=style.signal_blue, alpha=0.72,
                             edgecolor='white', linewidth=0.2)
                 elif row > col:
-                    for group in dict.fromkeys(groups):
+                    for group in ordered_groups:
                         mask = groups == group
                         ax.scatter(values[col][mask], values[row][mask], s=profile.marker_size_pt2 * 0.35,
                                    color=colors[str(group)], marker=markers[str(group)],
@@ -368,9 +373,24 @@ class NatureDiagnostic:
                     ax.set_xlabel(labels[col])
                 if col == 0 and row > col:
                     ax.set_ylabel(labels[row])
+        if len(ordered_groups) <= 8:
+            from matplotlib.lines import Line2D
+            handles = [
+                Line2D([], [], linestyle='None', marker=markers[group], markersize=4.0,
+                       markerfacecolor=colors[group], markeredgecolor='white',
+                       markeredgewidth=0.35, label=group)
+                for group in ordered_groups
+            ]
+            columns = min(4, max(1, len(handles)))
+            fig.legend(handles=handles, title='Marker · replicate group', loc='lower center',
+                       bbox_to_anchor=(0.55, 0.006), ncol=columns, frameon=False,
+                       handletextpad=0.3, columnspacing=0.7)
+            bottom = 0.25
+        else:
+            bottom = 0.14
         return self._finish(fig, axes, style, profile, spec, spec.title or 'QC metric pairs',
                             encodings={'color': 'group', 'marker': 'group'},
-                            left=0.16, right=0.98, bottom=0.14, top=0.90)
+                            left=0.16, right=0.98, bottom=bottom, top=0.90)
 
     def _violin(self, data, spec, container):
         groups = [str(value) for value in data.get('groups', [])]
@@ -384,19 +404,30 @@ class NatureDiagnostic:
         shown_groups = _short_labels(groups, 8)
         group_ticks = label_tick_indices(len(groups), 8) + 1
         for ax, (label, vals) in zip(axes.ravel(), metrics):
-            parts = ax.violinplot(vals, positions=np.arange(1, len(vals) + 1),
-                                  showmeans=False, showextrema=False)
-            for index, body in enumerate(parts['bodies']):
+            for index, values in enumerate(vals, start=1):
+                finite = values[np.isfinite(values)]
+                if not finite.size:
+                    continue
                 color = (style.signal_blue if len(groups) > 3
-                         else style.categorical_palette[index % len(style.categorical_palette)])
-                body.set_facecolor(color); body.set_edgecolor(color); body.set_alpha(0.56)
+                         else style.categorical_palette[(index - 1) % len(style.categorical_palette)])
+                jitter = np.linspace(-0.075, 0.075, finite.size) if finite.size > 1 else np.asarray([0.0])
+                ax.scatter(np.full(finite.size, index) + jitter, finite,
+                           s=profile.marker_size_pt2 * 0.42, color=color,
+                           edgecolor='white', linewidth=0.35, alpha=0.88, zorder=3)
+                q25, median, q75 = np.percentile(finite, [25, 50, 75])
+                ax.vlines(index, q25, q75, color=style.neutral_dark, linewidth=0.75, zorder=2)
+                ax.hlines(median, index - 0.14, index + 0.14,
+                          color=style.neutral_dark, linewidth=1.05, zorder=4)
             ax.set_title(label, loc='left', pad=3)
             ax.set_xticks(group_ticks, [shown_groups[i - 1] for i in group_ticks],
                           rotation=35, ha='right')
         for ax in axes.ravel()[len(metrics):]:
             ax.set_visible(False)
+        fig.text(0.14, 0.035, 'Points = samples; horizontal bar = median; vertical line = IQR.',
+                 ha='left', va='bottom', fontsize=max(5.4, profile.tick_font_pt - 0.6),
+                 color=style.muted_text)
         return self._finish(fig, axes, style, profile, spec, spec.title or 'QC metrics by group',
-                            left=0.14, right=0.98, bottom=0.26, top=0.84, hspace=0.58)
+                            left=0.14, right=0.98, bottom=0.29, top=0.84, hspace=0.58)
 
     def _qq(self, data, spec, container):
         x = _finite(data.get('theoretical'))

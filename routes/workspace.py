@@ -107,6 +107,7 @@ def index(pid):
     return render_template(
         "workspace.html",
         project=project,
+        all_projects=Project.get_all(),
         uploads=_workspace_uploads(pid),
         recent_tasks=recent_tasks,
         assays=assays,

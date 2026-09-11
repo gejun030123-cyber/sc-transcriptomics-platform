@@ -24,7 +24,11 @@ from modules.sc_batch import (
     comparison_id_for_groups,
 )
 from modules.sc_batch_export import batch_csv_package_dirs
-from modules.sc_de_utils import log1p_adata_for_cell_level_de, normalization_semantics
+from modules.sc_de_utils import (
+    log1p_adata_for_cell_level_de,
+    normalization_semantics,
+    resolve_cell_grouping,
+)
 from modules.native_figures import diverging_bar_figure
 
 
@@ -85,6 +89,46 @@ class SCCellLevelDEG(BaseAnalysis):
     MODULE_NAME = "sc_cell_deg"
     DISPLAY_NAME = "探索性细胞级比较"
     DESCRIPTION = "细胞级探索性比较；不将细胞当作生物学重复"
+    # 比较单元必须来自真实分组列；不含聚类/注释的上游输出（例如仅 qc）
+    # 不应出现在输入下拉里，否则只会在运行期才失败。
+    INPUT_REQUIRES = ['leiden']
+
+    def validate_input(self, adata):
+        """提前检查分组列与 counts 层，避免在运行中途才失败。
+
+        与 ``INPUT_REQUIRES`` 声明保持一致：平台标准聚类列是 ``leiden``；
+        已注释数据也可以按 ``celltype`` 分组，但两者都不存在时无法定义
+        比较单元，必须在这里给出可操作错误。
+        """
+        from modules.sc_de_utils import _matrix_is_raw_counts
+
+        annotation_key = str(
+            self.params.get("celltype_key", "celltype") or "celltype"
+        )
+        requested_cluster_key = str(
+            self.params.get("cluster_key", "leiden") or "leiden"
+        )
+        if "leiden" not in adata.obs.columns and not any(
+            key in adata.obs.columns
+            for key in {requested_cluster_key, annotation_key}
+        ):
+            return (
+                "缺少可用于分组比较的聚类/注释列：需要 'leiden' 或 "
+                f"'{requested_cluster_key}' / '{annotation_key}'。"
+                "请先运行 clustering/annotation 模块生成分组列。"
+            )
+
+        if "counts" not in adata.layers:
+            normalization = adata.uns.get("normalization", {}) or {}
+            if normalization.get("x_contains") == "pearson_residuals":
+                return (
+                    "当前 X 是 Pearson residuals 且缺少 layers['counts']，"
+                    "无法计算有可解释 log2FC 的细胞级 DEG。"
+                )
+            return "细胞级 DEG 需要 layers['counts'] 中的原始 UMI counts。"
+        if not _matrix_is_raw_counts(adata.layers["counts"]):
+            return "layers['counts'] 不是非负整数原始计数。"
+        return None
 
     def _comparison_contract(self, adata):
         """Build comparison units without conflating their statistical meaning."""
@@ -104,7 +148,7 @@ class SCCellLevelDEG(BaseAnalysis):
             raise ValueError("comparison_type 必须为 condition、within_sample_clusters、between_samples_within_cluster 或 between_samples_all_cells")
         comparison_type = aliases[comparison_type]
         condition_key = str(self.params.get("condition_key", "condition") or "").strip()
-        cluster_key = str(self.params.get("cluster_key", "leiden") or "").strip()
+        legacy_cluster_key = str(self.params.get("cluster_key", "leiden") or "").strip()
         sample_key = str(self.params.get("sample_key", "sample_id") or "").strip()
         selected_sample = str(self.params.get("selected_sample", "") or "").strip()
         selected_cluster = str(self.params.get("selected_cluster", "") or "").strip()
@@ -128,20 +172,35 @@ class SCCellLevelDEG(BaseAnalysis):
             if requested_scope not in {"all_cells", "per_cluster", "both"}:
                 raise ValueError("analysis_scope 必须为 all_cells、per_cluster 或 both")
             scopes = ["all_cells", "per_cluster"] if requested_scope == "both" else [requested_scope]
+            needs_grouping = any(scope == "per_cluster" for scope in scopes)
+            grouping = (
+                resolve_cell_grouping(self.params, adata.obs.columns)
+                if needs_grouping else None
+            )
+            grouping_key = grouping["key"] if grouping else legacy_cluster_key
             units = []
             for scope in scopes:
                 if scope == "all_cells":
                     units.append((scope, "All", pd.Series(True, index=adata.obs_names), condition_key, groups))
                     continue
-                if cluster_key not in adata.obs.columns:
-                    raise ValueError(f"按簇 DEG 需要聚类列 '{cluster_key}'")
-                for cluster in sorted(adata.obs[cluster_key].astype(str).unique().tolist()):
-                    units.append((scope, cluster, adata.obs[cluster_key].astype(str).eq(cluster), condition_key, groups))
+                for group_value in sorted(adata.obs[grouping_key].astype(str).unique().tolist()):
+                    units.append((
+                        scope, group_value,
+                        adata.obs[grouping_key].astype(str).eq(group_value),
+                        condition_key, groups,
+                    ))
             return {
                 "comparison_type": comparison_type, "condition_key": condition_key,
-                "cluster_key": cluster_key, "sample_key": sample_key,
+                "cluster_key": grouping_key, "sample_key": sample_key,
+                "grouping_mode": grouping["mode"] if grouping else "all_cells",
+                "grouping_label": grouping["label"] if grouping else "全部细胞",
                 "selected_sample": "", "selected_cluster": "", "units": units,
-                "comparison_unit": "cell", "description": "条件间细胞级探索性比较；不能替代样本级推断。",
+                "comparison_unit": "cell",
+                "description": (
+                    "按注释细胞类型的条件间细胞级探索性比较；不能替代样本级推断。"
+                    if grouping and grouping["mode"] == "annotated_celltype"
+                    else "条件间细胞级探索性比较；不能替代样本级推断。"
+                ),
             }
 
         if sample_key not in adata.obs.columns:
@@ -157,42 +216,44 @@ class SCCellLevelDEG(BaseAnalysis):
             raise ValueError(f"样本列 '{sample_key}' 存在空值")
 
         if comparison_type == "within_sample_clusters":
-            if cluster_key not in adata.obs.columns:
-                raise ValueError(f"同一样本不同簇比较需要聚类列 '{cluster_key}'")
+            grouping = resolve_cell_grouping(self.params, adata.obs.columns)
+            grouping_key = grouping["key"]
             if not selected_sample:
                 raise ValueError("同一样本不同簇比较必须填写 selected_sample")
             sample_mask = samples.eq(selected_sample)
             if not bool(sample_mask.any()):
                 raise ValueError(f"selected_sample '{selected_sample}' 不在 '{sample_key}' 中")
-            clusters = adata.obs.loc[sample_mask, cluster_key].astype(str).str.strip()
+            clusters = adata.obs.loc[sample_mask, grouping_key].astype(str).str.strip()
             if len(clusters.unique()) < 2:
-                raise ValueError("所选样本至少需要两个非空 cluster")
+                raise ValueError(f"所选样本至少需要两个非空{grouping['label']}")
             return {
                 "comparison_type": comparison_type, "condition_key": condition_key,
-                "cluster_key": cluster_key, "sample_key": sample_key,
+                "cluster_key": grouping_key, "sample_key": sample_key,
+                "grouping_mode": grouping["mode"], "grouping_label": grouping["label"],
                 "selected_sample": selected_sample, "selected_cluster": "", "units": [
-                    ("within_sample_clusters", "SelectedSample", sample_mask, cluster_key,
+                    ("within_sample_clusters", "SelectedSample", sample_mask, grouping_key,
                      sorted(clusters.unique().tolist()))
                 ], "comparison_unit": "cell",
-                "description": "同一生物样本内的 cluster marker 对比；仅作细胞级描述。",
+                "description": f"同一生物样本内的{grouping['label']} marker 对比；仅作细胞级描述。",
             }
 
         if comparison_type == "between_samples_within_cluster":
-            if cluster_key not in adata.obs.columns:
-                raise ValueError(f"不同样本同一簇比较需要聚类列 '{cluster_key}'")
+            grouping = resolve_cell_grouping(self.params, adata.obs.columns)
+            grouping_key = grouping["key"]
             if not selected_cluster:
-                raise ValueError("不同样本同一簇比较必须填写 selected_cluster")
-            cluster_mask = adata.obs[cluster_key].astype(str).eq(selected_cluster)
+                raise ValueError(f"不同样本同一{grouping['label']}比较必须填写 selected_cluster")
+            cluster_mask = adata.obs[grouping_key].astype(str).eq(selected_cluster)
             available = sorted(samples.loc[cluster_mask].unique().tolist())
             if len(available) < 2:
-                raise ValueError("所选 cluster 至少需要来自两个样本的细胞")
+                raise ValueError(f"所选{grouping['label']}至少需要来自两个样本的细胞")
             return {
                 "comparison_type": comparison_type, "condition_key": condition_key,
-                "cluster_key": cluster_key, "sample_key": sample_key,
+                "cluster_key": grouping_key, "sample_key": sample_key,
+                "grouping_mode": grouping["mode"], "grouping_label": grouping["label"],
                 "selected_sample": "", "selected_cluster": selected_cluster, "units": [
                     ("within_cluster", selected_cluster, cluster_mask, sample_key, available)
                 ], "comparison_unit": "cell",
-                "description": "不同样本在同一 cluster 内的细胞级探索性比较；样本对只有描述性意义。",
+                "description": f"不同样本在同一{grouping['label']}内的细胞级探索性比较；样本对只有描述性意义。",
             }
 
         available = sorted(samples.unique().tolist())
@@ -200,7 +261,8 @@ class SCCellLevelDEG(BaseAnalysis):
             raise ValueError("不同样本比较至少需要两个样本")
         return {
             "comparison_type": comparison_type, "condition_key": condition_key,
-            "cluster_key": cluster_key, "sample_key": sample_key,
+            "cluster_key": legacy_cluster_key, "sample_key": sample_key,
+            "grouping_mode": "all_cells", "grouping_label": "全部细胞",
             "selected_sample": "", "selected_cluster": "", "units": [
                 ("all_cells", "All", pd.Series(True, index=adata.obs_names), sample_key, available)
             ], "comparison_unit": "cell",
@@ -279,6 +341,9 @@ class SCCellLevelDEG(BaseAnalysis):
                     "deg_scope": scope_name, "cluster": cluster,
                     "comparison_type": contract["comparison_type"],
                     "grouping_key": grouping_key,
+                    "analysis_grouping": contract["grouping_mode"],
+                    "analysis_group_key": contract["cluster_key"],
+                    "analysis_group_label": contract["grouping_label"],
                     "selected_sample": contract["selected_sample"],
                     "selected_cluster": contract["selected_cluster"],
                     "n_cells_experimental": n_experimental,
@@ -409,7 +474,10 @@ class SCCellLevelDEG(BaseAnalysis):
                 significant = view["padj"].lt(padj_cutoff)
                 up_counts.append(int((significant & view["log2FC"].ge(log2fc_cutoff)).sum()))
                 down_counts.append(int((significant & view["log2FC"].le(-log2fc_cutoff)).sum()))
-                suffix = "all cells" if str(scope_name) == "all_cells" else f"cluster {cluster}"
+                suffix = (
+                    "all cells" if str(scope_name) == "all_cells"
+                    else f"{contract['grouping_label']} {cluster}"
+                )
                 bar_labels.append(f"{comparison} · {suffix}")
 
                 safe_stem = _safe_name(
@@ -512,6 +580,9 @@ class SCCellLevelDEG(BaseAnalysis):
                 "condition_key": contract["condition_key"],
                 "sample_key": contract["sample_key"],
                 "cluster_key": contract["cluster_key"],
+                "analysis_grouping": contract["grouping_mode"],
+                "analysis_group_key": contract["cluster_key"],
+                "analysis_group_label": contract["grouping_label"],
                 "selected_sample": contract["selected_sample"],
                 "selected_cluster": contract["selected_cluster"],
                 "n_runnable_units": audit["n_runnable_units"],

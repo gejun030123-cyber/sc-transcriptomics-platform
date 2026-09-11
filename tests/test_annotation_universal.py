@@ -370,6 +370,37 @@ def test_cluster_review_marks_unknown_and_inconsistent_cluster_for_review():
     assert review.loc['1', 'top_markers'] == 'NKG7'
 
 
+def test_cluster_review_flags_zero_evidence_cell_vote_recovery():
+    """仅靠逐细胞投票恢复、无正向 marker 证据的簇必须进入人工复核。"""
+    ad = pytest.importorskip('anndata')
+    from modules.annotation import build_annotation_cluster_review
+
+    adata = ad.AnnData(
+        np.ones((6, 2)),
+        obs=pd.DataFrame({
+            'leiden': ['0', '0', '0', '1', '1', '1'],
+            # cluster 0：投票一致且 margin 充足，但完全没有 marker 证据
+            'celltype': ['T cells'] * 3 + ['B cells'] * 3,
+            'final_annotation': ['T cells'] * 3 + ['B cells'] * 3,
+            'annotation_status': ['research'] * 6,
+            'annotation_evidence_tier': ['provisional'] * 6,
+            'annotation_score_margin': [0.4] * 6,
+            'annotation_decision_reason': (
+                ['unknown_recovered_by_cell_vote'] * 3
+                + ['cluster_mean_marker_decision'] * 3
+            ),
+        }),
+        var=pd.DataFrame(index=['g1', 'g2']),
+    )
+    review = build_annotation_cluster_review(
+        adata, 'leiden', {'cluster_markers': {'0': ['TRAC'], '1': ['MS4A1']}},
+    ).set_index('cluster')
+
+    assert review.loc['0', 'final_decision_reason'] == 'unknown_recovered_by_cell_vote'
+    assert review.loc['0', 'needs_review']
+    assert not review.loc['1', 'needs_review']
+
+
 def test_marker_validation_prefers_counts_over_scaled_x():
     ad = pytest.importorskip('anndata')
     from modules.annotation import build_marker_validation_matrix

@@ -71,6 +71,9 @@ class TestOutputRegistration:
                 registration_tokens = (
                     'result_files.append', 'result_files.extend',
                     'output_files.append', 'output_files.extend',
+                    # Helper functions may return an ``outputs`` list that
+                    # their caller merges into the task result_files list.
+                    'outputs.append', 'outputs.extend',
                 )
                 # 这是对已有 ResultFile 记录补写元数据，不是创建未注册的文件。
                 existing_registered_table = (

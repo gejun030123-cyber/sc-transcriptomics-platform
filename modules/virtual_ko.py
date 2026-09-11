@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import signal
 import subprocess
 import uuid
 
@@ -18,6 +19,12 @@ CLUSTER_KEY_CANDIDATES = (
     'celltype', 'final_annotation', 'cell_type_l2', 'cell_type_l1',
     'leiden', 'louvain_annot',
 )
+
+# ``pickle`` is code, not data.  A project upload is user-controlled and must
+# never be passed to CellOracle's pickle loader.  Tabular TF-info matrices are
+# sufficient for user-provided base GRNs; the maintained CellOracle resources
+# remain available through the builtin options above.
+SAFE_BASE_GRN_EXTENSIONS = ('.parquet', '.pq', '.csv', '.tsv', '.txt', '.gz')
 
 
 class VirtualKOAnalysis(BaseAnalysis):
@@ -46,47 +53,47 @@ class VirtualKOAnalysis(BaseAnalysis):
         from config import Config
         return os.path.abspath(getattr(Config, 'CELLORACLE_WORKER_SCRIPT', ''))
 
+    def _resolve_uploaded_base_grn(self, raw):
+        """Resolve one non-symlink tabular GRN from this project's uploads."""
+        upload_root = os.path.realpath(os.path.join(self.project_dir, 'uploads'))
+        requested = str(raw or '').strip()
+        if not requested:
+            raise ValueError('请选择上传的 base GRN 文件。')
+        candidate = requested if os.path.isabs(requested) else os.path.join(upload_root, requested)
+        if os.path.islink(candidate):
+            raise ValueError('base GRN 文件不能是符号链接。')
+        path = os.path.realpath(candidate)
+        try:
+            contained = os.path.commonpath([upload_root, path]) == upload_root
+        except ValueError:
+            contained = False
+        if not contained:
+            raise ValueError('base GRN 文件必须位于当前项目的 uploads 目录。')
+        if not os.path.isfile(path):
+            raise ValueError('base GRN 文件不存在: ' + path)
+        if not path.lower().endswith(SAFE_BASE_GRN_EXTENSIONS):
+            raise ValueError(
+                'base GRN 只支持非可执行的表格格式：.parquet、.csv、.tsv 或 .txt；'
+                '不接受 pickle/Oracle/Links 文件。'
+            )
+        return path
+
     def _resolve_base_grn(self):
-        """返回 (source, path)。对用户上传的文件做项目目录内路径校验。"""
-        from config import Config
+        """Return a builtin source or a safe tabular file from project uploads."""
         source = str(self.params.get('base_grn_source', 'upload') or 'upload')
         if source.startswith('builtin_'):
             return source, ''
         raw = str(self.params.get('base_grn_file', '') or '').strip()
-        if not raw:
-            raise ValueError('请选择 base GRN 来源（内置人类 promoter base GRN 或上传的文件）。')
-        path = raw if os.path.isabs(raw) else os.path.join(
-            self.project_dir, 'uploads', raw)
-        path = os.path.realpath(path)
-        allowed_roots = [
-            os.path.realpath(self.project_dir),
-            os.path.realpath(Config.DATA_DIR),
-        ]
-        if not any(path == root or path.startswith(root + os.sep)
-                   for root in allowed_roots):
-            raise ValueError('base GRN 文件不在项目或平台数据目录内: ' + path)
-        if not os.path.isfile(path):
-            raise ValueError('base GRN 文件不存在: ' + path)
-        return 'upload', path
+        return 'upload', self._resolve_uploaded_base_grn(raw)
 
     def _resolve_links_file(self):
         raw = str(self.params.get('links_file', '') or '').strip()
         if not raw:
             return ''
-        from config import Config
-        path = raw if os.path.isabs(raw) else os.path.join(
-            self.project_dir, 'uploads', raw)
-        path = os.path.realpath(path)
-        allowed_roots = [
-            os.path.realpath(self.project_dir),
-            os.path.realpath(Config.DATA_DIR),
-        ]
-        if not any(path == root or path.startswith(root + os.sep)
-                   for root in allowed_roots):
-            raise ValueError('links 文件不在项目或平台数据目录内: ' + path)
-        if not os.path.isfile(path):
-            raise ValueError('links 文件不存在: ' + path)
-        return path
+        raise ValueError(
+            '当前版本不接受用户提供的 CellOracle Links/pickle 文件，'
+            '因为反序列化不可信 pickle 会执行任意代码。请使用内置或表格 base GRN。'
+        )
 
     def _parse_genes(self):
         import re
@@ -108,6 +115,11 @@ class VirtualKOAnalysis(BaseAnalysis):
         source, base_grn_path = self._resolve_base_grn()
         links_path = self._resolve_links_file()
         cluster_key = str(self.params.get('cluster_key', '') or '').strip()
+        n_propagation = int(self.params.get('n_propagation', 3) or 3)
+        # CellOracle 只接受 1–5；在启动子进程（GRN 推断可能数十分钟）之前
+        # 就拒绝非法值，而不是等模拟阶段才抛底层错误。
+        if not 1 <= n_propagation <= 5:
+            raise ValueError('n_propagation 必须在 1–5 之间（CellOracle 限制）。')
         config = {
             'input_h5ad': os.path.abspath(input_path),
             'output_dir': results_dir,
@@ -131,7 +143,7 @@ class VirtualKOAnalysis(BaseAnalysis):
             'alpha': float(self.params.get('alpha', 10) or 10),
             'edge_coef_cutoff': float(self.params.get('edge_coef_cutoff', 0) or 0),
             'top_edges_per_cluster': int(self.params.get('top_edges_per_cluster', 500) or 100),
-            'n_propagation': int(self.params.get('n_propagation', 3) or 1),
+            'n_propagation': n_propagation,
             'n_neighbors': int(self.params.get('n_neighbors', 200) or 50),
             'min_mass': float(self.params.get('min_mass', 0.01) or 0.01),
             'n_grid': int(self.params.get('n_grid', 40) or 20),
@@ -181,7 +193,15 @@ class VirtualKOAnalysis(BaseAnalysis):
             Config, 'CELLORACLE_HOME_DIR',
             os.path.join(Config.RUNTIME_TMP_DIR, 'celloracle_home')))
         os.makedirs(home_dir, exist_ok=True)
-        env = dict(os.environ)
+        # Do not inherit the Flask worker's full environment.  In particular,
+        # .env secrets such as platform passwords and AI credentials must not
+        # become readable by a process that handles user-controlled inputs.
+        env_keys = (
+            'PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ',
+            'OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+            'NUMEXPR_MAX_THREADS', 'CUDA_VISIBLE_DEVICES',
+        )
+        env = {key: os.environ[key] for key in env_keys if os.environ.get(key)}
         env.update({
             'HOME': home_dir,
             'XDG_CONFIG_HOME': os.path.join(home_dir, 'config'),
@@ -197,8 +217,20 @@ class VirtualKOAnalysis(BaseAnalysis):
         logger.info('[virtual_ko] %s', ' '.join(cmd))
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=env, text=True, bufsize=1,
+            env=env, text=True, bufsize=1, start_new_session=True,
         )
+
+        def terminate_process_group():
+            """Terminate CellOracle and any children it spawned."""
+            if proc.poll() is not None:
+                return
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
 
         files = []
         summary = {'status': 'completed'}
@@ -231,10 +263,7 @@ class VirtualKOAnalysis(BaseAnalysis):
 
         def _timeout_killer():
             timed_out.append(True)
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            terminate_process_group()
 
         watchdog = threading.Timer(timeout_seconds, _timeout_killer)
         watchdog.daemon = True
@@ -263,8 +292,7 @@ class VirtualKOAnalysis(BaseAnalysis):
             drain_thread.join(timeout=10)
         finally:
             watchdog.cancel()
-            if proc.poll() is None:
-                proc.kill()
+            terminate_process_group()
             err_fh.close()
             try:
                 os.remove(job_path)
@@ -305,8 +333,13 @@ class VirtualKOAnalysis(BaseAnalysis):
         # counts 可用性检查（worker 内部还会再校验一次并给出 CellOracle 侧信息）
         has_counts = any(l in adata.layers for l in ('counts', 'raw_count'))
         if not has_counts:
-            logger.warning('[virtual_ko] 输入 h5ad 没有 counts layer，'
-                           'worker 将回退使用 X 矩阵')
+            # worker 默认拒绝在非 counts 的 X 上推断 GRN，且该回退开关
+            # 未在界面暴露；这里必须如实告知会失败，而不是承诺回退。
+            logger.warning(
+                '[virtual_ko] 输入 h5ad 没有 counts layer；'
+                'worker 将拒绝运行（allow_non_count_fallback 未启用）。'
+                '请先运行保留 counts 层的 QC/标准化流程。'
+            )
 
         genes = self._parse_genes()
         if not genes:

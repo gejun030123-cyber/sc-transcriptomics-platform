@@ -140,30 +140,64 @@ class NaturePCA:
             ax.margins(0.10)
             style.apply_axis(ax, profile)
 
-            handles = [
+            group_label = str(data.get('group_label') or 'Color group')
+            batch_label = str(data.get('batch_label') or 'Marker group')
+            group_handles = [
                 Line2D([], [], linestyle='None', marker='o', markersize=4.2,
                        markerfacecolor=color_map[group], markeredgecolor='white',
                        markeredgewidth=0.4,
-                       label=f'Group · {group}' if len(batch_labels) > 1 else group)
+                       label=str(group))
                 for group in group_labels
             ]
+            batch_handles = []
             if len(batch_labels) > 1:
-                handles.extend([
+                batch_handles = [
                     Line2D([], [], linestyle='None', marker=marker_map[batch], markersize=4.2,
                            markerfacecolor=style.neutral_dark, markeredgecolor='white',
-                           markeredgewidth=0.4, label=f'Batch · {batch}')
+                           markeredgewidth=0.4, label=str(batch))
                     for batch in batch_labels
-                ])
-            if handles and spec.show_legend:
-                columns = min(4 if spec.width == 'double' else 3, max(1, len(handles)))
-                rows = int(np.ceil(len(handles) / columns))
-                bottom = min(0.42, 0.16 + rows * 0.055)
-                fig.subplots_adjust(left=0.18, right=0.96, top=0.90, bottom=bottom)
-                fig.legend(
-                    handles=handles, loc='lower center', ncol=columns,
-                    bbox_to_anchor=(0.5, 0.015), frameon=False,
-                    handletextpad=0.35, columnspacing=0.8,
-                )
+                ]
+            if group_handles and spec.show_legend:
+                if batch_handles:
+                    group_columns = min(4 if spec.width == 'double' else 3, max(1, len(group_handles)))
+                    batch_columns = min(4 if spec.width == 'double' else 3, max(1, len(batch_handles)))
+                    rows = int(np.ceil(len(group_handles) / group_columns)) + int(
+                        np.ceil(len(batch_handles) / batch_columns)
+                    )
+                    bottom = min(0.45, 0.18 + rows * 0.07)
+                    fig.subplots_adjust(left=0.18, right=0.96, top=0.90, bottom=bottom)
+                    fig.legend(
+                        handles=group_handles,
+                        labels=[handle.get_label() for handle in group_handles],
+                        title=f'Color · {group_label}', loc='lower left', ncol=group_columns,
+                        bbox_to_anchor=(0.18, 0.015), frameon=False,
+                        handletextpad=0.35, columnspacing=0.8,
+                    )
+                    fig.legend(
+                        handles=batch_handles,
+                        labels=[handle.get_label() for handle in batch_handles],
+                        title=f'Marker · {batch_label}', loc='lower right', ncol=batch_columns,
+                        bbox_to_anchor=(0.96, 0.015), frameon=False,
+                        handletextpad=0.35, columnspacing=0.8,
+                    )
+                else:
+                    columns = min(4 if spec.width == 'double' else 3, max(1, len(group_handles)))
+                    rows = int(np.ceil(len(group_handles) / columns))
+                    # A bottom figure legend competes with the PC1 label in a
+                    # single-column (89 mm) figure.  Keep it figure-level so
+                    # composite panels can still collect a shared legend, but
+                    # reserve an explicit band above the plot rather than
+                    # placing it beside the x-axis label.
+                    top = max(0.52, 0.78 - max(0, rows - 1) * 0.10)
+                    fig.subplots_adjust(left=0.18, right=0.96, top=top, bottom=0.17)
+                    fig.legend(
+                        handles=group_handles,
+                        labels=[handle.get_label() for handle in group_handles],
+                        title=f'Color · {group_label}', loc='upper center', ncol=columns,
+                        bbox_to_anchor=(0.5, 0.99),
+                        frameon=False,
+                        handletextpad=0.35, columnspacing=0.8,
+                    )
             else:
                 fig.subplots_adjust(left=0.18, right=0.96, top=0.90, bottom=0.17)
 

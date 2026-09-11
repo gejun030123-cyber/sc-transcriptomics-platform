@@ -64,17 +64,20 @@
 </div>
 {% endif %}
 
-{% if result_data %}
+{% if result_summary_items %}
 <div class="row mb-4">
-    {% for key, val in result_data.items() %}
+    {% for item in result_summary_items %}
     <div class="col-md-3 mb-2">
         <div class="card system-card p-3 text-center">
-            <div class="text-muted small">{{ key | replace('_', ' ') | title }}</div>
-            <div class="value">{{ val }}</div>
+            <div class="text-muted small">{{ item.key | replace('_', ' ') | title }}</div>
+            <div class="value result-summary-value">{{ item.value }}</div>
         </div>
     </div>
     {% endfor %}
 </div>
+{% endif %}
+{% if omitted_result_fields %}
+<p class="small text-muted mb-4">结果摘要只显示简短关键指标；较长、嵌套或技术性字段未在页面展开，完整记录保留在结构化结果文件中。</p>
 {% endif %}
 
 {% if review_evidence %}
@@ -96,8 +99,8 @@
                     <div class="small text-muted">{{ check.message }}</div>
                 </div>
                 <div class="text-end">
-                    {% if check.value is defined %}
-                    <div class="small text-muted">{{ check.value }}</div>
+                    {% if check.display_value is defined %}
+                    <div class="small text-muted result-evidence-value">{{ check.display_value }}</div>
                     {% endif %}
                     <span class="badge {% if ck == 'pass' %}bg-success{% elif ck == 'warning' %}bg-danger{% else %}bg-warning text-dark{% endif %}">
                         {% if ck == 'pass' %}通过{% elif ck == 'warning' %}警告{% else %}复核{% endif %}
@@ -131,7 +134,7 @@
 </div>
 <div class="row">
     {% for f in image_files %}
-    {% set figure_column = 'col-12' if f.category in ['bar', 'heatmap', 'dotplot'] else 'col-12 col-xxl-6' %}
+    {% set figure_column = 'col-12' if f.category in ['bar', 'heatmap', 'dotplot', 'enrichment_overview', 'go_priority_dotplot', 'go_priority_barplot'] else 'col-12 col-xxl-6' %}
     <div class="{{ figure_column }} mb-4 result-figure-col">
         <div class="card p-3 result-figure-card">
             <div class="result-figure-header mb-2">
@@ -417,6 +420,10 @@ loadOutputAdataInfo();
         max-width: 100%;
         height: auto;
         object-fit: contain;
+    }
+    .result-summary-value,
+    .result-evidence-value {
+        overflow-wrap: anywhere;
     }
     @media (max-width: 1399.98px) {
         /* A single column gives dense heatmaps/dotplots enough label width. */

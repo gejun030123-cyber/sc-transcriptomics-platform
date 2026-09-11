@@ -97,6 +97,7 @@ class NatureEnrichmentOverview:
     def render(self, data, spec: FigureSpec, container=None):
         if container is not None:
             raise ValueError('enrichment_overview 需要独立 Figure，不支持嵌入单一 panel')
+        include_empty_databases = bool(spec.extra.get('include_empty_databases', False))
         frame = pd.DataFrame(data).copy()
         database_column = _first_column(frame, ('Database', 'database', 'Gene_set', 'gene_set'))
         term_column = _first_column(frame, ('Term', 'Description', 'pathway', 'term'))
@@ -127,24 +128,41 @@ class NatureEnrichmentOverview:
                        else frame[ratio_column].map(_ratio_value))
         frame['_count'] = frame[count_column].map(_count_value) if count_column else 1.0
         frame = frame.replace([np.inf, -np.inf], np.nan).dropna(subset=['_fdr', '_x']).copy()
-        if frame.empty:
+        if frame.empty and not include_empty_databases:
             raise ValueError('没有可绘制的多数据库富集结果')
 
         preferred = ['GO-BP', 'GO-CC', 'GO-MF', 'KEGG', 'Reactome', 'WikiPathways', 'Other']
         available = [item for item in preferred if item in set(frame['_database'])]
         available.extend(item for item in frame['_database'].drop_duplicates() if item not in available)
         if spec.database_scope:
-            requested = {_database_label(value) for value in spec.database_scope}
-            available = [item for item in available if item in requested]
+            requested = list(dict.fromkeys(
+                _database_label(value) for value in spec.database_scope
+            ))
+            # A focused GO triptych needs to show BP/CC/MF consistently even
+            # when one ontology has no FDR-significant selected term.  The
+            # empty panel is an explicit negative result, never fabricated
+            # pathway data.  Ordinary overview figures retain the historical
+            # behaviour of omitting databases without rows.
+            available = requested if include_empty_databases else [
+                item for item in available if item in set(requested)
+            ]
         if not available:
             raise ValueError('没有匹配到可展示的数据库')
 
+        selected_panels = []
         selected_frames = []
         warnings = []
         compressed_databases = []
+        disable_redundancy_compression = bool(
+            spec.extra.get('disable_redundancy_compression', False)
+        )
         target_mode = bool(spec.pathway_terms) and spec.pathway_selection in {'selected', 'selected_plus_top'}
         for database in available:
             subset = frame[frame['_database'] == database].sort_values(['_fdr', '_x'], ascending=[True, False]).copy()
+            if subset.empty:
+                if include_empty_databases:
+                    selected_panels.append((database, subset))
+                continue
             target_rows = subset.iloc[0:0].copy()
             if target_mode:
                 target_rows, unmatched, _ = requested_term_rows(subset, spec.pathway_terms)
@@ -156,7 +174,7 @@ class NatureEnrichmentOverview:
                     remainder = subset.loc[~subset.index.isin(target_rows.index)]
                     subset = pd.concat([target_rows, remainder], axis=0)
             gene_column = _first_column(subset, ('Genes', 'genes', 'geneID', 'matched_genes', 'lead_genes'))
-            if gene_column:
+            if gene_column and not disable_redundancy_compression:
                 subset, removed = compress_redundant_terms(
                     subset, gene_column, threshold=spec.redundancy_threshold, maximum=spec.top_n,
                 )
@@ -167,18 +185,24 @@ class NatureEnrichmentOverview:
             if len(subset) > spec.top_n:
                 subset = subset.head(spec.top_n)
             if subset.empty:
+                if include_empty_databases:
+                    selected_panels.append((database, subset))
                 continue
+            selected_panels.append((database, subset))
             selected_frames.append(subset)
 
-        if not selected_frames:
+        if not selected_frames and not selected_panels:
             raise ValueError('目标通路选择后没有可绘制结果')
+        if not selected_frames:
+            warnings.append('所选本体中没有 FDR 显著的目标通路；空白面板如实保留。')
         if compressed_databases:
             warnings.append('按数据库内命中基因 Jaccard 压缩冗余通路：' + '、'.join(compressed_databases))
-        display = pd.concat(selected_frames, ignore_index=True)
+        display = pd.concat(selected_frames, ignore_index=True) if selected_frames else None
         profile_style = get_style(spec.style)
         profile = profile_style.profile(spec)
-        panel_count = len(selected_frames)
-        ncols = 2 if panel_count > 1 else 1
+        panel_count = len(selected_panels)
+        one_column = str(spec.extra.get('facet_layout', '')).strip().lower() == 'one_column'
+        ncols = 1 if one_column or panel_count == 1 else 2
         nrows = int(np.ceil(panel_count / ncols))
         with profile_style.context(spec):
             import matplotlib.pyplot as plt
@@ -189,13 +213,25 @@ class NatureEnrichmentOverview:
                 squeeze=False, sharex=True if not is_gsea else False,
             )
             axes_flat = axes.ravel()
-            norm = _fdr_norm(display['_fdr'].to_numpy(float))
+            norm = _fdr_norm(display['_fdr'].to_numpy(float)) if display is not None else None
             colors = profile_style.fdr_cmap()
             x_label = 'Normalized enrichment score (NES)' if is_gsea else 'Gene ratio'
             letters = 'abcdefghijklmnopqrstuvwxyz'
-            max_x = float(np.nanmax(display['_x']))
-            min_x = float(np.nanmin(display['_x']))
-            for index, (axis, subset) in enumerate(zip(axes_flat, selected_frames)):
+            for index, (axis, (database, subset)) in enumerate(zip(axes_flat, selected_panels)):
+                if subset.empty:
+                    axis.set_title(_database_label(database), loc='left', pad=6)
+                    axis.text(
+                        .5, .5, 'No FDR-significant\nselected pathways',
+                        transform=axis.transAxes, ha='center', va='center',
+                        fontsize=profile.axis_font_pt, color=profile_style.muted_text,
+                    )
+                    axis.text(-0.12 if ncols == 1 else -0.16, 1.04, letters[index],
+                              transform=axis.transAxes, ha='left', va='bottom',
+                              fontweight='bold', color=profile_style.text)
+                    axis.set_xticks([])
+                    axis.set_yticks([])
+                    profile_style.apply_axis(axis, profile)
+                    continue
                 local = subset.copy().reset_index(drop=True)
                 labels = [wrap_term(value, width=25 if ncols == 2 else 34, max_chars=72) for value in local['_term']]
                 positions = np.arange(len(local))
@@ -207,7 +243,7 @@ class NatureEnrichmentOverview:
                 axis.set_yticks(positions, labels)
                 axis.invert_yaxis()
                 axis.set_title(_database_label(local['_database'].iloc[0]), loc='left', pad=6)
-                axis.text(-0.16, 1.04, letters[index], transform=axis.transAxes,
+                axis.text(-0.12 if ncols == 1 else -0.16, 1.04, letters[index], transform=axis.transAxes,
                           ha='left', va='bottom', fontweight='bold', color=profile_style.text)
                 axis.tick_params(axis='y', length=0, pad=3, labelsize=max(5.2, profile.tick_font_pt - .2))
                 profile_style.apply_axis(axis, profile)
@@ -218,22 +254,24 @@ class NatureEnrichmentOverview:
                     axis.axvline(0, color=profile_style.neutral_dark, linestyle=(0, (3, 2)), linewidth=.55, zorder=0)
             for axis in axes_flat[panel_count:]:
                 axis.set_visible(False)
-            for axis in axes_flat[:panel_count]:
-                axis.set_xlabel(x_label)
+            for axis, (_, subset) in zip(axes_flat[:panel_count], selected_panels):
+                if not subset.empty:
+                    axis.set_xlabel(x_label)
             fig.subplots_adjust(left=.28 if ncols == 2 else .42, right=.97, top=.88, bottom=.19,
                                 wspace=.52, hspace=.62)
-            cbar_ax = fig.add_axes([.38, .075, .28, .018])
-            cbar_ax._nature_auxiliary = True
-            colorbar = fig.colorbar(artist, cax=cbar_ax, orientation='horizontal')
-            colorbar.outline.set_visible(False)
-            colorbar.ax.tick_params(labelsize=max(5.2, profile.tick_font_pt - .7), length=1.8,
-                                    width=profile.tick_width_pt, colors=profile_style.axis)
-            tick_values = np.geomspace(norm.vmin, norm.vmax, 3)
-            colorbar.set_ticks(tick_values)
-            colorbar.minorticks_off()
-            colorbar.ax.set_xticklabels([f'{value:.1g}' for value in tick_values])
-            colorbar.set_label('FDR', fontsize=profile.legend_font_pt, labelpad=2, color=profile_style.text)
-            if np.unique(display['_count']).size > 1:
+            if display is not None:
+                cbar_ax = fig.add_axes([.38, .075, .28, .018])
+                cbar_ax._nature_auxiliary = True
+                colorbar = fig.colorbar(artist, cax=cbar_ax, orientation='horizontal')
+                colorbar.outline.set_visible(False)
+                colorbar.ax.tick_params(labelsize=max(5.2, profile.tick_font_pt - .7), length=1.8,
+                                        width=profile.tick_width_pt, colors=profile_style.axis)
+                tick_values = np.geomspace(norm.vmin, norm.vmax, 3)
+                colorbar.set_ticks(tick_values)
+                colorbar.minorticks_off()
+                colorbar.ax.set_xticklabels([f'{value:.1g}' for value in tick_values])
+                colorbar.set_label('FDR', fontsize=profile.legend_font_pt, labelpad=2, color=profile_style.text)
+            if display is not None and np.unique(display['_count']).size > 1:
                 legend_values = np.unique(np.quantile(display['_count'], [0, .5, 1]).round())
                 legend_values = legend_values[legend_values > 0]
                 legend_sizes = _bubble_sizes(legend_values, low=28, high=100)

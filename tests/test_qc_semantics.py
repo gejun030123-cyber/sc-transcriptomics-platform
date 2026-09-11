@@ -564,3 +564,37 @@ def test_qc_reassess_uses_percentage_scale_for_legacy_qc_output(tmp_path):
     assert result['summary']['low_quality_clusters'] == ['0']
     assert cluster_zero['mean_pct_mt'] == 20.0
     assert bool(cluster_zero['low_quality']) is True
+
+
+def test_qc_reassess_does_not_treat_mean_score_as_doublet_fraction(tmp_path):
+    from modules.qc_reassess import QCReassessAnalysis
+
+    adata = ad.AnnData(
+        X=np.ones((4, 2)),
+        obs=pd.DataFrame({
+            'leiden': pd.Categorical(['0', '0', '1', '1']),
+            'predicted_doublet': [False, False, False, False],
+            'doublet_score': [0.9, 0.8, 0.1, 0.2],
+            'total_counts': [1000.0] * 4,
+            'n_genes_by_counts': [500] * 4,
+        }, index=[f'cell_{i}' for i in range(4)]),
+        var=pd.DataFrame(index=['GENE1', 'GENE2']),
+    )
+    input_path = tmp_path / 'scores.h5ad'
+    adata.write_h5ad(input_path)
+    module = QCReassessAnalysis(
+        project_dir=str(tmp_path),
+        params={'doublet_threshold': 0.3, 'min_cells_per_cluster': 1},
+        progress_callback=lambda *_: None,
+    )
+    module.save_matplotlib_figure = lambda *_args, **_kwargs: []
+
+    result = module.run(str(input_path))
+    table = pd.read_csv(tmp_path / 'results' / 'low_quality_clusters.csv')
+    table['cluster'] = table['cluster'].astype(str)
+    table = table.set_index('cluster')
+
+    assert result['summary']['doublet_fraction_source'] == 'predicted_doublet'
+    assert table.loc['0', 'doublet_fraction'] == 0.0
+    assert table.loc['0', 'mean_doublet_score'] == 0.85
+    assert 'high_doublet' not in str(table.loc['0', 'low_reasons'])

@@ -16,9 +16,17 @@ adjustText
 Pillow
 plotly
 anndata
+# Excel input/output is advertised by the upload and result interfaces; pandas
+# intentionally treats this engine as optional, so declare it explicitly.
+openpyxl
+# Used directly to compare installed pyscdblfinder versions in the QC gate.
+packaging
 
 # Single-cell analysis
 scanpy
+# Functional-state TF activity (CollecTRI + ULM). Pin the API used by the
+# managed resource workflow; each analysis also records the installed version.
+decoupler==2.2.0
 omicverse
 # Leiden/Louvain 聚类的必需后端（scanpy 仅将其列为可选 extra，
 # 未安装时默认聚类路径会 ImportError）

@@ -335,22 +335,117 @@ def resolve_obs_grouping(adata, requested, fallbacks=(), *, max_categories=50,
     return None, requested_info
 
 
-def infer_expression_measurement(adata, input_path=''):
-    """Classify a bulk expression matrix without silently changing its scale."""
+EXPRESSION_MEASUREMENT_TYPES = frozenset({
+    'raw_counts', 'continuous_expression', 'log_transformed',
+})
+
+
+def resolve_expression_measurement(adata, input_path='', declared='auto'):
+    """Resolve a Bulk expression scale and retain how that conclusion was made.
+
+    A matrix of non-integer values cannot distinguish linear TPM/FPKM from an
+    already log-transformed table.  Auto mode therefore reports that case as
+    ambiguous instead of presenting the heuristic as provenance.  Callers that
+    would apply another log transform can require an explicit user declaration.
+    """
+    declared = str(declared or 'auto').strip().lower()
+    if declared not in {'auto', *EXPRESSION_MEASUREMENT_TYPES}:
+        raise ValueError(
+            'input_measurement 必须是 auto、raw_counts、continuous_expression '
+            '或 log_transformed。'
+        )
+
+    if declared != 'auto':
+        return declared, {
+            'measurement': declared,
+            'source': 'user_declaration',
+            'confidence': 'explicit',
+            'requires_confirmation_for_log_transform': False,
+        }
+
     normalization = dict(getattr(adata, 'uns', {}).get('normalization', {}) or {})
     if normalization.get('is_log_transformed'):
-        return 'log_transformed'
+        return 'log_transformed', {
+            'measurement': 'log_transformed',
+            'source': 'normalization_metadata',
+            'confidence': 'embedded',
+            'requires_confirmation_for_log_transform': False,
+        }
+
+    embedded = getattr(adata, 'uns', {}).get('input_measurement', '')
+    if isinstance(embedded, dict):
+        embedded = embedded.get('measurement', embedded.get('value', ''))
+    embedded = str(embedded or '').strip().lower()
+    if embedded in EXPRESSION_MEASUREMENT_TYPES:
+        return embedded, {
+            'measurement': embedded,
+            'source': 'input_metadata',
+            'confidence': 'embedded',
+            'requires_confirmation_for_log_transform': False,
+        }
+
+    hint = str(input_path).lower()
+    if any(token in hint for token in ('fpkm', 'tpm', 'rpkm')):
+        return 'continuous_expression', {
+            'measurement': 'continuous_expression',
+            'source': 'filename_hint',
+            'confidence': 'probable',
+            'requires_confirmation_for_log_transform': False,
+        }
+
     matrix = adata.X
     values = matrix.data if hasattr(matrix, 'data') else np.asarray(matrix).ravel()
     values = np.asarray(values, dtype=float)
     values = values[np.isfinite(values)]
-    hint = str(input_path).lower()
-    if any(token in hint for token in ('fpkm', 'tpm', 'rpkm')):
-        return 'continuous_expression'
     if values.size == 0:
-        return 'raw_counts'
+        return 'raw_counts', {
+            'measurement': 'raw_counts',
+            'source': 'empty_matrix_default',
+            'confidence': 'low',
+            'requires_confirmation_for_log_transform': False,
+        }
+
     integer_fraction = float(np.mean(np.isclose(values, np.round(values))))
-    return 'raw_counts' if np.min(values) >= 0 and integer_fraction >= 0.995 else 'continuous_expression'
+    if np.min(values) >= 0 and integer_fraction >= 0.995:
+        return 'raw_counts', {
+            'measurement': 'raw_counts',
+            'source': 'integer_value_heuristic',
+            'confidence': 'probable',
+            'requires_confirmation_for_log_transform': False,
+        }
+    return 'continuous_expression', {
+        'measurement': 'continuous_expression',
+        'source': 'noninteger_value_heuristic',
+        'confidence': 'ambiguous',
+        'requires_confirmation_for_log_transform': True,
+    }
+
+
+def infer_expression_measurement(adata, input_path=''):
+    """Backward-compatible scale classifier for callers that need only a label."""
+    measurement, _ = resolve_expression_measurement(adata, input_path)
+    return measurement
+
+
+def run_bulk_sample_pca(adata, n_comps):
+    """Run the platform's auditable sample-PCA convention in place.
+
+    Bulk expression matrices are transformed before this helper is called.
+    PCA itself applies the usual gene-wise mean centering, but deliberately
+    does not Z-score or clip each gene: doing so changes the variance spectrum
+    and previously made QC and normalization panels disagree for the same
+    log-expression matrix.
+    """
+    import scanpy as sc
+
+    sc.pp.pca(adata, n_comps=int(n_comps), zero_center=True)
+    preprocessing = {
+        'feature_centering': 'gene-wise mean centering within PCA',
+        'feature_scaling': 'none',
+        'feature_clipping': 'none',
+    }
+    adata.uns['bulk_pca_preprocessing'] = preprocessing
+    return preprocessing
 
 
 def infer_sample_group_candidates(sample_names):
@@ -423,6 +518,70 @@ def infer_sample_group_candidates(sample_names):
         candidates.append(candidate)
 
     return candidates
+
+
+def materialize_auto_sample_metadata(adata, auto_group_mapping=None):
+    """Create reusable sample-name metadata columns on ``adata.obs``.
+
+    Bulk tables often encode a factorial design in their sample IDs, e.g.
+    ``Ctr_B_1``.  Keeping that parse only in a UI hint made downstream modules
+    depend on presentation text such as ``第2因素：B, En``.  This helper makes
+    the inferred values first-class, auditable obs columns instead:
+
+    * ``_auto_group``: the selected combined mapping (or a trusted supplied
+      mapping from the UI);
+    * ``_auto_factor1``, ``_auto_factor2``, ...: each independently inferred
+      factor that has at least two replicated categories.
+
+    The caller owns persistence: calling this before writing an h5ad makes the
+    metadata available to PCA, heatmaps and later analyses without reparsing
+    sample names in every module.
+    """
+    import json
+
+    sample_names = [str(name) for name in adata.obs.index]
+    candidates = infer_sample_group_candidates(sample_names)
+    candidate_by_key = {str(candidate['key']): candidate for candidate in candidates}
+
+    supplied_mapping = auto_group_mapping or {}
+    if isinstance(supplied_mapping, str):
+        try:
+            supplied_mapping = json.loads(supplied_mapping)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            supplied_mapping = {}
+
+    group_source = 'none'
+    if isinstance(supplied_mapping, dict):
+        supplied_values = [str(supplied_mapping.get(name, '') or '') for name in sample_names]
+        if all(supplied_values) and len(set(supplied_values)) >= 2:
+            adata.obs['_auto_group'] = supplied_values
+            group_source = 'sample_name_mapping'
+
+    if group_source == 'none' and 'combined' in candidate_by_key:
+        combined = candidate_by_key['combined']
+        adata.obs['_auto_group'] = [str(combined['mapping'][name]) for name in sample_names]
+        group_source = 'sample_name_inference'
+
+    factor_columns = []
+    for key, candidate in candidate_by_key.items():
+        if not key.startswith('factor_'):
+            continue
+        suffix = key.removeprefix('factor_')
+        if not suffix.isdigit():
+            continue
+        column = f'_auto_factor{suffix}'
+        adata.obs[column] = [str(candidate['mapping'][name]) for name in sample_names]
+        factor_columns.append(column)
+
+    metadata = {
+        'group_column': '_auto_group' if '_auto_group' in adata.obs.columns else '',
+        'group_source': group_source,
+        'factor_columns': factor_columns,
+        'candidate_keys': [str(candidate['key']) for candidate in candidates],
+    }
+    # Store only JSON-native values so the h5ad remains portable.
+    adata.uns['auto_sample_metadata'] = metadata
+    return metadata
 
 
 def read_expression_matrix(file_path):

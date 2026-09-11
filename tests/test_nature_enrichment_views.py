@@ -78,6 +78,189 @@ def test_multidatabase_overview_uses_facets_and_shared_encodings(tmp_path):
     plt.close(figure)
 
 
+def test_go_focus_triptych_keeps_an_explicit_empty_ontology_panel():
+    from figure_engine import NatureFigureDirector
+
+    frame = pd.DataFrame({
+        'Database': ['GO_BP', 'GO_MF'], 'Method': ['ORA', 'ORA'],
+        'Direction': ['Up', 'Up'], 'Comparison': ['demo', 'demo'],
+        'Term': ['lipid transport', 'cholesterol binding'],
+        'Adjusted P-value': [.003, .02], 'Overlap': ['5/100', '3/100'],
+        'Genes': ['APOE;APOB', 'APOA1;APOC3'],
+    })
+    spec = NatureFigureDirector().create_spec(
+        'enrichment_overview', width='double', height_mm=180, top_n=6,
+        formats=('png',), database_scope=('GO_BP', 'GO_CC', 'GO_MF'),
+        extra={'facet_layout': 'one_column', 'include_empty_databases': True},
+    )
+    figure = NatureFigureDirector().render(spec, frame)
+    assert getattr(figure, '_nature_panel_grid') == {'nrows': 3, 'ncols': 1, 'panels': 3}
+    assert any('No FDR-significant' in text.get_text() for axis in figure.axes for text in axis.texts)
+    import matplotlib.pyplot as plt
+    plt.close(figure)
+
+
+def test_go_focus_triptych_keeps_overlapping_selected_terms():
+    from figure_engine import NatureFigureDirector
+
+    frame = pd.DataFrame({
+        'Database': ['GO_BP', 'GO_BP'], 'Method': ['ORA', 'ORA'],
+        'Direction': ['Up', 'Up'], 'Comparison': ['demo', 'demo'],
+        'Term': ['inflammatory response', 'cytokine-mediated signalling'],
+        'Adjusted P-value': [.003, .02], 'Overlap': ['5/100', '4/100'],
+        # A high Jaccard similarity would normally reduce this to one term.
+        'Genes': ['A;B;C;D;E', 'A;B;C;D;F'],
+    })
+    spec = NatureFigureDirector().create_spec(
+        'enrichment_overview', width='double', height_mm=140, top_n=6,
+        formats=('png',), database_scope=('GO_BP', 'GO_CC', 'GO_MF'),
+        extra={
+            'facet_layout': 'one_column', 'include_empty_databases': True,
+            'disable_redundancy_compression': True,
+        },
+    )
+    figure = NatureFigureDirector().render(spec, frame)
+    labels = [label.get_text() for label in figure.axes[0].get_yticklabels()]
+    assert labels == ['inflammatory response', 'cytokine-mediated signalling']
+    import matplotlib.pyplot as plt
+    plt.close(figure)
+
+
+def test_go_focus_triptych_renders_truthful_empty_panels_when_no_term_is_significant():
+    from figure_engine import NatureFigureDirector
+
+    frame = pd.DataFrame(columns=[
+        'Database', 'Method', 'Direction', 'Comparison', 'Term',
+        'Adjusted P-value', 'Overlap', 'Genes',
+    ])
+    spec = NatureFigureDirector().create_spec(
+        'enrichment_overview', width='double', height_mm=180, top_n=6,
+        formats=('png',), database_scope=('GO_BP', 'GO_CC', 'GO_MF'),
+        extra={'facet_layout': 'one_column', 'include_empty_databases': True},
+    )
+    figure = NatureFigureDirector().render(spec, frame)
+    assert getattr(figure, '_nature_panel_grid') == {'nrows': 3, 'ncols': 1, 'panels': 3}
+    assert sum(
+        'No FDR-significant' in text.get_text()
+        for axis in figure.axes for text in axis.texts
+    ) == 3
+    import matplotlib.pyplot as plt
+    plt.close(figure)
+
+
+def test_go_priority_triptych_dotplot_and_barplot_share_one_axis_three_sections(tmp_path):
+    """The reference-style GO views keep BP/CC/MF on one divided axis."""
+    from figure_engine import NatureFigureDirector, export_figure
+    import matplotlib.pyplot as plt
+
+    rows = []
+    for database, terms in {
+        'GO_BP': ['inflammatory response', 'lipid transport', 'cell migration'],
+        'GO_CC': ['cytokine receptor complex', 'lipid droplet', 'plasma membrane'],
+        'GO_MF': ['cytokine binding', 'lipid binding', 'ATP binding'],
+    }.items():
+        for index, term in enumerate(terms):
+            rows.append({
+                'Database': database, 'Term': term,
+                'Adjusted P-value': .002 + index * .006,
+                'Overlap': f'{5 + index}/100',
+                'selection_rank': index + 1,
+                'selection_reason': (
+                    'inflammation_priority' if index == 0 else
+                    'lipid_metabolism_priority' if index == 1 else 'top_pathway_fill'
+                ),
+            })
+    frame = pd.DataFrame(rows)
+    director = NatureFigureDirector()
+    for plot_type in ('go_priority_dotplot', 'go_priority_barplot'):
+        spec = director.create_spec(
+            plot_type, width='double', height_mm=150, top_n=8,
+            formats=('svg', 'pdf', 'png'), title='GO Enrichment Plot',
+        )
+        figure = director.render(spec, frame)
+        assert getattr(figure, '_nature_panel_grid') == {'nrows': 1, 'ncols': 1, 'panels': 3}
+        labels = [text.get_text() for axis in figure.axes for text in axis.texts]
+        assert {'Biological Process', 'Cellular Component', 'Molecular Function'} <= set(labels)
+        paths, report = export_figure(figure, tmp_path / plot_type, spec)
+        assert report.ready, report.to_dict()
+        assert set(paths) == {'svg', 'pdf', 'png'}
+        plt.close(figure)
+
+
+def test_go_priority_triptych_keeps_empty_ontology_section_truthful():
+    from figure_engine import NatureFigureDirector
+    import matplotlib.pyplot as plt
+
+    frame = pd.DataFrame({
+        'Database': ['GO_BP'], 'Term': ['inflammatory response'],
+        'Adjusted P-value': [.002], 'Overlap': ['5/100'], 'selection_rank': [1],
+    })
+    spec = NatureFigureDirector().create_spec(
+        'go_priority_dotplot', width='double', height_mm=132, top_n=8, formats=('png',),
+    )
+    figure = NatureFigureDirector().render(spec, frame)
+    assert sum(
+        'No FDR-significant pathways' in text.get_text()
+        for axis in figure.axes for text in axis.texts
+    ) == 2
+    plt.close(figure)
+
+
+def test_go_priority_triptych_handles_decimal_section_offsets_without_extra_row():
+    """A 3/5/3 split exercises decimal section starts (3.8 and 9.6)."""
+    from figure_engine import NatureFigureDirector
+    import matplotlib.pyplot as plt
+
+    rows = []
+    for database, count in (('GO_BP', 3), ('GO_CC', 5), ('GO_MF', 3)):
+        for index in range(count):
+            rows.append({
+                'Database': database, 'Term': f'{database} term {index}',
+                'Adjusted P-value': .01 + index * .001, 'Overlap': f'{index + 3}/100',
+                'selection_rank': index + 1,
+            })
+    figure = NatureFigureDirector().render(
+        NatureFigureDirector().create_spec('go_priority_dotplot', width='double', height_mm=150),
+        pd.DataFrame(rows),
+    )
+    main_axis = figure.axes[0]
+    assert len(main_axis.get_yticklabels()) == 11
+    plt.close(figure)
+
+
+def test_human_pathway_triptych_renders_three_database_sections(tmp_path):
+    """KEGG, Reactome and WikiPathways share the GO-style divided layout."""
+    from figure_engine import NatureFigureDirector, export_figure
+    import matplotlib.pyplot as plt
+
+    rows = []
+    for database, terms in {
+        'KEGG': ['Fatty acid metabolism', 'TNF signaling pathway'],
+        'Reactome': ['Immune System', 'Metabolism of lipids'],
+        'WikiPathways': ['Lipid metabolism', 'Inflammatory response pathway'],
+    }.items():
+        for index, term in enumerate(terms):
+            rows.append({
+                'Database': database, 'Term': term,
+                'Adjusted P-value': .002 + index * .006,
+                'Overlap': f'{5 + index}/100', 'selection_rank': index + 1,
+            })
+    director = NatureFigureDirector()
+    for plot_type in ('pathway_triptych_dotplot', 'pathway_triptych_barplot'):
+        spec = director.create_spec(
+            plot_type, width='double', height_mm=150, top_n=8,
+            formats=('svg', 'pdf', 'png'), title='Human Pathway Enrichment Plot',
+        )
+        figure = director.render(spec, pd.DataFrame(rows))
+        assert getattr(figure, '_nature_panel_grid') == {'nrows': 1, 'ncols': 1, 'panels': 3}
+        labels = [text.get_text() for axis in figure.axes for text in axis.texts]
+        assert {'KEGG Human', 'Reactome', 'WikiPathways Human'} <= set(labels)
+        paths, report = export_figure(figure, tmp_path / plot_type, spec)
+        assert report.ready, report.to_dict()
+        assert set(paths) == {'svg', 'pdf', 'png'}
+        plt.close(figure)
+
+
 def test_gsea_running_uses_real_rank_and_hit_contract(tmp_path):
     from figure_engine import NatureFigureDirector, export_figure
 

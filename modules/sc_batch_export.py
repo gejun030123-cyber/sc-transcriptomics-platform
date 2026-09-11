@@ -14,6 +14,7 @@ from modules.sc_batch import (
     build_comparison_plan,
     sample_design_from_obs,
 )
+from modules.sc_de_utils import resolve_cell_grouping
 
 
 CSV_PACKAGE_FOLDERS = {
@@ -638,20 +639,26 @@ class SCPseudobulkDEG(BaseAnalysis):
     MODULE_NAME = "sc_pseudobulk_deg"
     DISPLAY_NAME = "样本级 pseudobulk 差异表达"
     DESCRIPTION = "以生物学样本为统计单位的条件 DEG；可导出每个比较的完整基因 CSV"
+    # pseudobulk 以 celltype/cluster × sample 为单元，输入必须已经带分组列。
+    INPUT_REQUIRES = ['leiden']
 
     def run(self, input_path):
         adata = self.load_adata(input_path)
         adata = self.apply_scope(adata)
         sample_key = str(self.params.get("sample_key", "sample_id") or "").strip()
         condition_key = str(self.params.get("condition_key", "condition") or "").strip()
-        cluster_key = str(
-            self.params.get("cluster_key", self.params.get("celltype_key", "leiden")) or ""
-        ).strip()
         batch_key = str(self.params.get("batch_key", "") or "").strip()
         scope = str(self.params.get("analysis_scope", "per_cluster") or "per_cluster")
         if scope not in {"all_cells", "per_cluster"}:
             raise ValueError("analysis_scope 必须为 all_cells 或 per_cluster")
-        if scope == "all_cells":
+        if scope == "per_cluster":
+            grouping = resolve_cell_grouping(self.params, adata.obs.columns)
+            cluster_key = grouping["key"]
+        else:
+            grouping = {
+                "mode": "all_cells", "key": "", "label": "全部细胞",
+                "value_label": "全部细胞",
+            }
             cluster_key = ""
         min_cells = max(1, int(self.params.get("min_cells_per_sample_celltype", 20)))
         min_samples = max(2, int(self.params.get("min_samples_per_group", 2)))
@@ -746,7 +753,7 @@ class SCPseudobulkDEG(BaseAnalysis):
                     unit_statuses.append({
                         "comparison_id": item["comparison_id"], "comparison": comparison,
                         "cluster": str(cluster), "status": "not_runnable",
-                        "reason": f"每组至少需要 {min_samples} 个样本×cluster 单元",
+                        "reason": f"每组至少需要 {min_samples} 个样本×{grouping['label']} 单元",
                     })
                     continue
                 qc_key = str(cluster)
@@ -756,7 +763,10 @@ class SCPseudobulkDEG(BaseAnalysis):
                         qc = _pseudobulk_qc_data(counts, meta)
                         pseudobulk_qc_by_cluster[qc_key] = qc
                         safe_cluster = _safe_folder_name(cluster, fallback="All")
-                        plot_context = "all cells" if not cluster_key else f"cluster {cluster}"
+                        plot_context = (
+                            "all cells" if not cluster_key
+                            else f"{grouping['label']} {cluster}"
+                        )
                         qc_table_path = _available_path(
                             package_dirs["deg"],
                             f"{prefix}_task_{analysis_id}_sample_qc_{safe_cluster}", ".csv",
@@ -881,6 +891,9 @@ class SCPseudobulkDEG(BaseAnalysis):
                     table["control_group"] = group_2
                     table["comparison_type"] = "condition"
                     table["deg_scope"] = "per_cluster" if cluster_key else "all_cells"
+                    table["analysis_grouping"] = grouping["mode"]
+                    table["analysis_group_key"] = cluster_key
+                    table["analysis_group_label"] = grouping["label"]
                     table["inference_unit"] = "biological_sample"
                     table["statistical_status"] = (
                         "biological_replicate_model"
@@ -913,7 +926,10 @@ class SCPseudobulkDEG(BaseAnalysis):
                                         )
                                     ]
                                 safe_cluster = _safe_folder_name(cluster, fallback="All")
-                                plot_context = "all cells" if not cluster_key else f"cluster {cluster}"
+                                plot_context = (
+                                    "all cells" if not cluster_key
+                                    else f"{grouping['label']} {cluster}"
+                                )
                                 heatmap_spec = director.spec_from_params(
                                     "heatmap", self.params, width="single",
                                     title=(f"Top DEG expression · {comparison}"
@@ -990,8 +1006,14 @@ class SCPseudobulkDEG(BaseAnalysis):
                         figure_stem = (
                             f"{prefix}_{item['comparison_id']}_{safe_cluster}"
                         )
-                        title_suffix = comparison if not cluster_key else f"{comparison} · cluster {cluster}"
-                        plot_context = "all cells" if not cluster_key else f"cluster {cluster}"
+                        title_suffix = (
+                            comparison if not cluster_key
+                            else f"{comparison} · {grouping['label']} {cluster}"
+                        )
+                        plot_context = (
+                            "all cells" if not cluster_key
+                            else f"{grouping['label']} {cluster}"
+                        )
                         try:
                             volcano_spec = director.spec_from_params(
                                 "volcano", self.params, width="single",
@@ -1023,12 +1045,15 @@ class SCPseudobulkDEG(BaseAnalysis):
                             ))
                         except Exception as exc:
                             warnings.append(
-                                f"{comparison} / cluster {cluster}: pseudobulk DEG 绘图失败（{exc}）"
+                                f"{comparison} / {grouping['label']} {cluster}: pseudobulk DEG 绘图失败（{exc}）"
                             )
                 all_results.append(frame)
             else:
                 plan.loc[plan_index, "status"] = "not_runnable"
-                plan.loc[plan_index, "reason"] = "过滤后没有满足每组最少样本数的 sample × cluster 单元"
+                plan.loc[plan_index, "reason"] = (
+                    "过滤后没有满足每组最少样本数的 sample × "
+                    f"{grouping['label']} 单元"
+                )
 
         self.progress(90, "正在保存比较审计与结果摘要...")
         internal_table = internal_sources[0] if internal_sources else ""
@@ -1063,7 +1088,9 @@ class SCPseudobulkDEG(BaseAnalysis):
             "method_requested": requested_method,
             "statistical_status": statistical_status,
             "design": {"sample_key": sample_key, "condition_key": condition_key,
-                       "cluster_key": cluster_key, "batch_key": batch_key},
+                       "cluster_key": cluster_key, "batch_key": batch_key,
+                       "analysis_grouping": grouping["mode"],
+                       "analysis_group_label": grouping["label"]},
             "comparison_plan": plan.to_dict(orient="records"),
             "unit_statuses": unit_statuses,
             "sample_qc": {
@@ -1095,6 +1122,9 @@ class SCPseudobulkDEG(BaseAnalysis):
             "scope_key": str(self.params.get("scope_key", "") or "").strip() or None,
             "scope_values": ([v.strip() for v in str(self.params.get("scope_values", "") or "").split(",") if v.strip()] or None),
             "cluster_key": cluster_key,
+            "analysis_grouping": grouping["mode"],
+            "analysis_group_key": cluster_key,
+            "analysis_group_label": grouping["label"],
             "batch_key": batch_key,
             "csv_package_dir": package_root,
             "method_requested": requested_method,

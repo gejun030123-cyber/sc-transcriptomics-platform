@@ -862,6 +862,60 @@ def test_cell_level_go_runs_bp_cc_mf_from_local_gene_sets(tmp_path, monkeypatch)
     assert exported_sets == set(LOCAL_GO_ASPECTS.values())
 
 
+def test_cell_level_pathway_triptych_runs_for_kegg_reactome_wikipathways(tmp_path, monkeypatch):
+    from modules.sc_batch import _available_path
+    from modules.sc_batch_export import batch_csv_package_dirs
+    from modules.sc_cell_go import PATHWAY_TRIPTYCH_DATABASES, SCCellGOEnrichment
+
+    input_path = _tiny_batch_adata(tmp_path)
+    _, package_dirs = batch_csv_package_dirs(str(tmp_path), 'pathway_triptych_package')
+    deg = pd.DataFrame({
+        'comparison_id': ['Treatment_vs_Control'] * 6,
+        'comparison': ['Treatment vs Control'] * 6,
+        'experimental_group': ['Treatment'] * 6,
+        'control_group': ['Control'] * 6,
+        'deg_scope': ['all_cells'] * 6, 'cluster': ['All'] * 6,
+        'gene': [f'GENE{index}' for index in range(6)],
+        'log2FC': [1.0] * 6, 'p.adjust': [0.01] * 6,
+    })
+    deg.to_csv(_available_path(
+        package_dirs['deg'], 'sc_cell_level_deg_all_cells_Treatment_vs_Control', '.csv',
+    ), index=False)
+    local_dir = tmp_path / 'local_pathway_gene_sets'
+    local_dir.mkdir()
+    for library in PATHWAY_TRIPTYCH_DATABASES:
+        (local_dir / f'{library}.gmt').write_text(
+            'Example pathway\tPATHWAY:0001\tGENE0\tGENE1\tGENE2\n', encoding='utf-8',
+        )
+    fake_results = pd.DataFrame({
+        'Term': ['Example pathway'], 'Overlap': ['3/100'],
+        'P-value': [.001], 'Adjusted P-value': [.01],
+        'Odds Ratio': [2.0], 'Combined Score': [6.0], 'Genes': ['GENE0;GENE1;GENE2'],
+    })
+    monkeypatch.setitem(sys.modules, 'gseapy', types.SimpleNamespace(
+        enrich=lambda **_kwargs: types.SimpleNamespace(results=fake_results),
+    ))
+
+    result = SCCellGOEnrichment(
+        project_dir=str(tmp_path),
+        params={
+            'export_folder': 'pathway_triptych_package', 'execution_mode': 'local',
+            'gene_sets': ','.join(PATHWAY_TRIPTYCH_DATABASES),
+            'local_gene_set_dir': str(local_dir), 'min_genes': 5,
+            'export_full_tables': True, 'focus_plot_mode': 'overview_only',
+        },
+        progress_callback=lambda *_: None,
+    ).run(str(input_path))
+
+    categories = [item['category'] for item in result['result_files']]
+    assert categories.count('pathway_triptych_dotplot') == 3
+    assert categories.count('pathway_triptych_barplot') == 3
+    assert result['summary']['pathway_triptych_display']['overview_requested'] is True
+    assert os.path.isfile(os.path.join(
+        package_dirs['go'], 'sc_cell_go_pathway_triptych_source.csv',
+    ))
+
+
 def test_server_manifest_endpoints_scan_then_submit(test_project, tmp_path, monkeypatch):
     import io
     import worker

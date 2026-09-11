@@ -60,6 +60,17 @@ def _safe_batch_name(value, fallback):
     return name or fallback
 
 
+def _available_path(directory, stem, suffix):
+    """Return a non-existing output path without replacing an earlier import."""
+    os.makedirs(directory, exist_ok=True)
+    candidate = os.path.join(directory, f'{stem}{suffix}')
+    index = 2
+    while os.path.exists(candidate):
+        candidate = os.path.join(directory, f'{stem}_{index}{suffix}')
+        index += 1
+    return candidate
+
+
 class Convert10x(BaseAnalysis):
     MODULE_NAME = "convert_10x"
     DISPLAY_NAME = "单细胞数据导入"
@@ -102,7 +113,7 @@ class Convert10x(BaseAnalysis):
             if not os.path.isdir(real_mtx_dir):
                 raise FileNotFoundError('10x 矩阵目录不存在: ' + mtx_dir)
             detected_format = '10x_mtx'
-            output_path = os.path.join(self.project_dir, 'uploads', 'converted_10x.h5ad')
+            output_path = _available_path(uploads_dir, 'converted_10x', '.h5ad')
 
             self.progress(30, '正在解析矩阵文件...')
             adata = convert_10x_to_h5ad(real_mtx_dir, output_path, species=species, genome=genome)
@@ -124,7 +135,7 @@ class Convert10x(BaseAnalysis):
             stem = os.path.basename(source_path.rstrip(os.sep))
             stem = re.sub(r'\.(h5ad|h5|hdf5|loom|zarr|csv|tsv|txt|xlsx|xls|mtx)(\.gz)?$', '', stem, flags=re.I)
             stem = re.sub(r'[^A-Za-z0-9_.-]+', '_', stem).strip('._-') or 'single_cell'
-            output_path = os.path.join(uploads_dir, f'{stem}_imported.h5ad')
+            output_path = _available_path(uploads_dir, f'{stem}_imported', '.h5ad')
 
             self.progress(35, '正在标准化 AnnData 结构...')
             adata = write_single_cell_h5ad(
@@ -136,6 +147,11 @@ class Convert10x(BaseAnalysis):
             )
             if 'sample_id' not in adata.obs.columns:
                 adata.obs['sample_id'] = _safe_batch_name(stem, 'single_cell')
+                # ``write_single_cell_h5ad`` has already written the
+                # standardized object, so persist the generated sample ID as
+                # well.  Downstream pseudobulk/time-course modules rely on
+                # this column being present in the actual h5ad file.
+                adata.write_h5ad(output_path)
 
         self.progress(90, '正在计算统计信息...')
         summary = summarize_adata_import(adata, detected_format, output_path)
@@ -161,8 +177,12 @@ class Convert10x(BaseAnalysis):
 
         if len(batch_sources) < 2:
             raise ValueError('批次导入至少需要两个 ZIP 文件')
-        if len({str(item.get('batch_name', '')).strip() for item in batch_sources}) != len(batch_sources):
-            raise ValueError('批次名称必须唯一且不能为空')
+        raw_batch_names = [
+            _safe_batch_name(item.get('batch_name'), f'batch_{index}')
+            for index, item in enumerate(batch_sources, start=1)
+        ]
+        if len(set(raw_batch_names)) != len(batch_sources):
+            raise ValueError('批次名称清洗后必须唯一且不能为空')
 
         uploads_dir = os.path.join(self.project_dir, 'uploads')
         extraction_root = os.path.join(uploads_dir, 'batch_imports')
@@ -242,13 +262,13 @@ class Convert10x(BaseAnalysis):
             'source': 'upload_marked',
             'input_format': '10x_mtx_zip_batches',
         }
-        output_path = os.path.join(uploads_dir, 'combined_batches_imported.h5ad')
+        output_path = _available_path(uploads_dir, 'combined_batches_imported', '.h5ad')
         combined.write_h5ad(output_path)
         import pandas as pd
         batch_summary = pd.DataFrame(batch_records)
         results_dir = os.path.join(self.project_dir, 'results')
         os.makedirs(results_dir, exist_ok=True)
-        summary_csv = os.path.join(results_dir, 'batch_import_summary.csv')
+        summary_csv = _available_path(results_dir, 'batch_import_summary', '.csv')
         batch_summary.to_csv(summary_csv, index=False)
         result_files = [{
             'file_path': output_path,

@@ -35,12 +35,24 @@ def _file_entry(path):
     return entry
 
 
+def _result_status(result):
+    """Return the declared terminal status without relying on worker ordering."""
+    if not isinstance(result, dict):
+        return "failed", "Module did not return a result mapping."
+    error = result.get("error")
+    summary = result.get("summary")
+    if not error and isinstance(summary, dict):
+        error = summary.get("error")
+    return ("failed", str(error)) if error else ("completed", "")
+
+
 def build_task_manifest(task, result, result_files=None, pipeline_run_id=None):
-    """Build a serializable manifest for a completed analysis task."""
+    """Build a serializable manifest for an analysis task result."""
     params = _safe_json_loads(getattr(task, "params_json", "{}"), {})
     summary = result.get("summary", {}) if isinstance(result, dict) else {}
     output_adata = result.get("output_adata") if isinstance(result, dict) else None
     raw_files = result_files if result_files is not None else result.get("result_files", [])
+    status, error_message = _result_status(result)
     result_file_entries = []
 
     for rf in raw_files or []:
@@ -60,7 +72,7 @@ def build_task_manifest(task, result, result_files=None, pipeline_run_id=None):
         "pipeline_run_id": pipeline_run_id,
         "branch_id": getattr(task, "branch_id", None),
         "module_name": task.module_name,
-        "status": "completed",
+        "status": status,
         "params": params,
         "summary": summary,
         "output_adata": _file_entry(output_adata),
@@ -70,6 +82,8 @@ def build_task_manifest(task, result, result_files=None, pipeline_run_id=None):
             "platform": platform.platform(),
         },
     }
+    if error_message:
+        manifest["error"] = error_message
     review_evidence = build_review_evidence(task.module_name, summary, raw_files)
     if review_evidence:
         manifest["review_evidence"] = review_evidence

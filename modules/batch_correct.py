@@ -268,7 +268,11 @@ class BatchCorrectAnalysis(BaseAnalysis):
                 "scVI 需要 layers['counts'] 中的非负整数原始 UMI counts；"
                 "请先运行保留 counts 层的 QC/标准化流程。"
             )
-        scvi.model.SCVI.setup_anndata(work, layer='counts', batch_key=batch_key)
+        # scVI is fit on the protected raw-count layer.  Keep the same value
+        # in the returned provenance rather than referring to an undefined
+        # local variable after training has completed.
+        training_layer = 'counts'
+        scvi.model.SCVI.setup_anndata(work, layer=training_layer, batch_key=batch_key)
         model = scvi.model.SCVI(
             work,
             n_latent=scvi_n_latent,
@@ -289,7 +293,11 @@ class BatchCorrectAnalysis(BaseAnalysis):
             target_positions = adata.obs_names.get_indexer(work.obs_names)
             target[target_positions, :] = latent
         adata.obsm['X_scVI'] = target
-        return 'X_scVI', {'max_epochs': max_epochs, 'n_hvg_for_scvi': int(work.n_vars), 'layer': layer}
+        return 'X_scVI', {
+            'max_epochs': max_epochs,
+            'n_hvg_for_scvi': int(work.n_vars),
+            'layer': training_layer,
+        }
 
     @staticmethod
     def _numeric_metric(value):

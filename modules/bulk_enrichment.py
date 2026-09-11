@@ -2,6 +2,7 @@ import os
 import json
 import re
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from urllib.parse import urlencode
@@ -43,6 +44,83 @@ ONTOLOGY_COLORS = {
     'KEGG': '#7BC77B',
     'OTHER': '#9CB8D8',
 }
+
+
+_GO_PRIORITY_DATABASES = ('GO_BP', 'GO_CC', 'GO_MF')
+_PATHWAY_TRIPTYCH_DATABASES = ('KEGG', 'Reactome', 'WikiPathways')
+
+
+def _as_enabled(value):
+    """Interpret a persisted checkbox value without accepting arbitrary truthy text."""
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'on', 'yes'}
+    return value is True or value == 1
+
+
+def _go_priority_config_from_params(params, *, databases, top_n):
+    """Validate the optional Bulk GO-priority display contract.
+
+    The triptych is a display layer over three independently tested GO
+    ontologies.  It can therefore only be requested for a batch ORA run that
+    contains BP, CC, and MF; it never widens the selected libraries or changes
+    their individual FDR families.
+    """
+    params = params or {}
+    if not _as_enabled(params.get('go_priority_enabled', False)):
+        return None
+
+    if str(params.get('method', 'ORA') or 'ORA').upper() != 'ORA':
+        raise ValueError('主题优先 GO 三分区图仅适用于 ORA；GSEA 保留原有图型。')
+    missing = [database for database in _GO_PRIORITY_DATABASES if database not in set(databases)]
+    if missing:
+        raise ValueError(
+            '主题优先 GO 三分区图需要批量同时选择 GO_BP、GO_CC、GO_MF；缺少：'
+            + '、'.join(missing)
+        )
+
+    # The single-cell workflow owns the deterministic priority policy.  Import
+    # only after the Bulk feature is explicitly enabled, avoiding a module-level
+    # workflow dependency for ordinary enrichment runs.
+    from modules.sc_cell_go import _go_priority_allocation_from_params, _parse_focus_terms
+
+    focus_terms = _parse_focus_terms(params.get('focus_terms'))
+    focus_label = str(
+        params.get('focus_label', '炎症与脂代谢优先') or '炎症与脂代谢优先'
+    ).strip()
+    if not focus_label:
+        focus_label = '炎症与脂代谢优先'
+    if len(focus_label) > 80:
+        raise ValueError('focus_label 不能超过 80 个字符')
+    try:
+        display_top_n = int(float(params.get('go_priority_top_n', top_n)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError('go_priority_top_n 必须为整数') from exc
+    if display_top_n < 1 or display_top_n > 12:
+        raise ValueError('go_priority_top_n 必须在 1–12 之间')
+    allocation_mode, priority_allocation = _go_priority_allocation_from_params(
+        params, top_n=display_top_n,
+    )
+    return {
+        'focus_terms': focus_terms,
+        'focus_label': focus_label,
+        'allocation_mode': allocation_mode,
+        'priority_allocation': priority_allocation,
+        'top_n': display_top_n,
+    }
+
+
+def _pathway_triptych_config_for_batch(params, *, databases, top_n):
+    """Return the Human pathway triptych display contract when applicable.
+
+    The plot is produced automatically for an ORA batch that contains all
+    three supported Human pathway databases.  It remains a display-only layer:
+    every library keeps its own testing family and FDR correction.
+    """
+    if str((params or {}).get('method', 'ORA') or 'ORA').upper() != 'ORA':
+        return None
+    if not set(_PATHWAY_TRIPTYCH_DATABASES).issubset(set(databases)):
+        return None
+    return {'top_n': min(12, max(1, int(top_n)))}
 
 
 def _safe_output_fragment(value, fallback='unspecified'):
@@ -437,8 +515,337 @@ def _write_integrated_overview_figures(integrated, results_path, *, plots_dir=No
     return outputs
 
 
+def _write_go_priority_figures(integrated, results_path, *, plots_dir=None,
+                               output_prefix='enrichment', config):
+    """Write Bulk counterparts of the audited single-cell GO triptych.
+
+    ``integrated`` retains complete result tables from every selected library.
+    This function selects only rows already significant under their own full
+    GO-ontology FDR correction.  It writes the exact selected rows and the
+    per-ontology decision record before rendering, so the display priorities
+    remain inspectable without rerunning enrichment.
+    """
+    from figure_engine import NatureFigureDirector, export_registered_figure
+    from modules.sc_cell_go import _GO_PRIORITY_POLICY, _select_go_priority_rows
+    import matplotlib.pyplot as plt
+
+    plots_path = Path(plots_dir) if plots_dir else Path(results_path).parent / 'plots'
+    plots_path.mkdir(parents=True, exist_ok=True)
+    results_path = Path(results_path)
+    reverse_database_names = {
+        'GO_BP': 'GO_Biological_Process_2023',
+        'GO_CC': 'GO_Cellular_Component_2023',
+        'GO_MF': 'GO_Molecular_Function_2023',
+    }
+    source_columns = [
+        'Comparison', 'Method', 'Direction', 'Database', 'Term', 'Overlap',
+        'Adjusted P-value', 'Genes', 'selection_rank', 'selection_reason',
+        'selection_priority', 'selection_policy',
+    ]
+    go_rows = integrated.loc[
+        integrated.get('Database', pd.Series('', index=integrated.index)).isin(
+            _GO_PRIORITY_DATABASES
+        )
+    ].copy()
+    outputs = []
+    selected_frames = []
+    audit = {
+        'generated_at': datetime.now(timezone.utc).isoformat(),
+        'focus_label': config['focus_label'],
+        'requested_focus_terms': list(config['focus_terms']),
+        'statistics_note': (
+            'ORA 在完整 GO 本体内分别检验，Adjusted P-value 为各完整本体内的 FDR；'
+            '本审计仅记录展示排序，不重新校正。'
+        ),
+        'selection_policy': _GO_PRIORITY_POLICY,
+        'allocation_mode': config['allocation_mode'],
+        'requested_allocation': config['priority_allocation'],
+        'display_cap_per_ontology': int(config['top_n']),
+        'units': [],
+        'warnings': [],
+    }
+    if go_rows.empty:
+        audit['warnings'].append('整合结果中没有 GO_BP、GO_CC 或 GO_MF 行，未生成三分区图。')
+    else:
+        group_columns = ['Comparison', 'Method', 'Direction']
+        director = NatureFigureDirector()
+        for group_key, source_group in go_rows.groupby(
+            group_columns, dropna=False, sort=True, observed=True,
+        ):
+            comparison, method, direction = (str(value) for value in group_key)
+            present = set(source_group['Database'].dropna().astype(str))
+            missing = [database for database in _GO_PRIORITY_DATABASES if database not in present]
+            unit_audit = {
+                'comparison': comparison,
+                'method': method,
+                'direction': direction,
+                'available_databases': sorted(present),
+            }
+            if method.upper() != 'ORA':
+                unit_audit.update({'status': 'skipped', 'reason': 'GO 三分区图只适用于 ORA'})
+                audit['units'].append(unit_audit)
+                continue
+            if missing:
+                message = (
+                    f'{comparison} / {direction}: 缺少 ' + '、'.join(missing)
+                    + ' 的完整结果，未生成 GO 三分区图。'
+                )
+                unit_audit.update({'status': 'skipped', 'reason': message})
+                audit['warnings'].append(message)
+                audit['units'].append(unit_audit)
+                continue
+
+            # Reuse the single-cell selector only after adapting the common
+            # integrated-table metadata to its explicit completed-run contract.
+            # No test family, p value, or result row is altered here.
+            selection_input = source_group.copy()
+            selection_input['status'] = 'completed'
+            selection_input['gene_set'] = selection_input['Database'].map(reverse_database_names)
+            selection_input['method'] = selection_input['Method'].astype(str)
+            selection_input['direction'] = selection_input['Direction'].astype(str)
+            selected, selection_audit = _select_go_priority_rows(
+                selection_input, config['focus_terms'], top_n=config['top_n'],
+                priority_allocation=config['priority_allocation'],
+            )
+            selected = selected.drop(columns=['status', 'gene_set', 'method', 'direction'], errors='ignore')
+            unit_audit.update(selection_audit)
+            unit_audit['status'] = 'completed'
+            audit['units'].append(unit_audit)
+            if not selected.empty:
+                selected_frames.append(selected)
+
+            direction_label = {
+                'Up': '上调', 'Down': '下调', 'All': '全部显著 DEG',
+            }.get(direction, direction)
+            safe_key = '_'.join((
+                output_prefix, 'go_priority', _safe_output_fragment(comparison),
+                _safe_output_fragment(direction, fallback='all'),
+            ))
+            title_suffix = f'{comparison} · {direction_label} · {config["focus_label"]}'
+            height_mm = min(225, max(132, 62 + 6 * max(len(selected), 6)))
+            for plot_type, suffix, heading in (
+                ('go_priority_dotplot', 'dotplot', 'GO Enrichment Plot'),
+                ('go_priority_barplot', 'barplot', 'GO enrichment'),
+            ):
+                figure = None
+                try:
+                    spec = director.create_spec(
+                        plot_type, width='double', height_mm=height_mm,
+                        top_n=config['top_n'], formats=('svg', 'pdf', 'png'),
+                        database_scope=_GO_PRIORITY_DATABASES,
+                        title=f'{heading}\n{title_suffix}',
+                    )
+                    figure = director.render(spec, selected)
+                    exported, report = export_registered_figure(
+                        figure, plots_path / f'{safe_key}_{suffix}', spec,
+                        category=plot_type,
+                        label=(
+                            f'{config["focus_label"]} GO 主题优先 · {comparison} · '
+                            f'{direction_label} {"气泡图" if suffix == "dotplot" else "柱状图"}'
+                            '（炎症→脂代谢→Top；全库 FDR）'
+                        ),
+                        qa_path=results_path / f'{safe_key}_{suffix}_nature_readiness.json',
+                    )
+                    outputs.extend(exported)
+                    unit_audit.setdefault('figures', []).append({
+                        'plot_type': plot_type,
+                        'status': 'pass' if report.ready else 'warning',
+                        'nature_readiness_score': report.score,
+                        'issues': [issue.message for issue in report.issues],
+                    })
+                except Exception as exc:
+                    message = f'{comparison} / {direction}: GO 主题优先 {suffix} 生成失败（{exc}）'
+                    audit['warnings'].append(message)
+                    unit_audit.setdefault('figures', []).append({
+                        'plot_type': plot_type, 'status': 'failed', 'error': str(exc),
+                    })
+                finally:
+                    if figure is not None:
+                        plt.close(figure)
+
+    selected_source = (
+        pd.concat(selected_frames, ignore_index=True, sort=False)
+        if selected_frames else pd.DataFrame(columns=source_columns)
+    )
+    available_columns = [column for column in source_columns if column in selected_source.columns]
+    selected_source = selected_source[available_columns]
+    source_path = results_path / f'{output_prefix}_go_priority_source.csv'
+    selected_source.to_csv(source_path, index=False)
+    outputs.append({
+        'file_path': str(source_path), 'file_type': 'csv', 'category': 'table',
+        'label': 'GO 主题优先三分区图来源表（炎症→脂代谢→Top；全库 FDR）',
+    })
+    audit_path = results_path / f'{output_prefix}_go_priority_selection_audit.json'
+    audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding='utf-8')
+    outputs.append({
+        'file_path': str(audit_path), 'file_type': 'json', 'category': 'info',
+        'label': 'GO 主题优先三分区图选择审计（可复现）',
+    })
+    return outputs
+
+
+def _write_pathway_triptych_figures(integrated, results_path, *, plots_dir=None,
+                                    output_prefix='enrichment', config):
+    """Write KEGG/Reactome/WikiPathways Human FDR-top triptych figures."""
+    from figure_engine import NatureFigureDirector, export_registered_figure
+    from modules.sc_cell_go import (
+        PATHWAY_TRIPTYCH_DATABASES,
+        _select_pathway_triptych_rows,
+    )
+    import matplotlib.pyplot as plt
+
+    results_path = Path(results_path)
+    plots_path = Path(plots_dir) if plots_dir else results_path.parent / 'plots'
+    plots_path.mkdir(parents=True, exist_ok=True)
+    reverse_database_names = {
+        'KEGG': 'KEGG_2021_Human',
+        'Reactome': 'Reactome_2022',
+        # Bulk uses a version-pinned 2019 cache, whereas the single-cell
+        # registry uses the 2021 snapshot name.  This is an in-memory adapter
+        # for the common display selector only; result provenance remains in
+        # the original integrated table and run manifest.
+        'WikiPathways': 'WikiPathway_2021_Human',
+    }
+    source_columns = [
+        'Comparison', 'Method', 'Direction', 'Database', 'Term', 'Overlap',
+        'Adjusted P-value', 'Genes', 'selection_rank', 'selection_reason',
+        'selection_priority', 'selection_policy',
+    ]
+    pathway_rows = integrated.loc[
+        integrated.get('Database', pd.Series('', index=integrated.index)).isin(
+            _PATHWAY_TRIPTYCH_DATABASES
+        )
+    ].copy()
+    outputs = []
+    selected_frames = []
+    audit = {
+        'generated_at': datetime.now(timezone.utc).isoformat(),
+        'statistics_note': (
+            'KEGG、Reactome 与 WikiPathways Human 在完整库内分别检验，'
+            'Adjusted P-value 为各库内独立 FDR；本审计仅记录 FDR Top 展示排序。'
+        ),
+        'selection_policy': '每个数据库仅展示已显著 term 的 FDR Top 通路。',
+        'display_cap_per_database': int(config['top_n']),
+        'units': [],
+        'warnings': [],
+    }
+    if pathway_rows.empty:
+        audit['warnings'].append('整合结果中没有 KEGG、Reactome 或 WikiPathways 行，未生成 Human 通路三分区图。')
+    else:
+        director = NatureFigureDirector()
+        group_columns = ['Comparison', 'Method', 'Direction']
+        for group_key, source_group in pathway_rows.groupby(
+            group_columns, dropna=False, sort=True, observed=True,
+        ):
+            comparison, method, direction = (str(value) for value in group_key)
+            present = set(source_group['Database'].dropna().astype(str))
+            missing = [database for database in _PATHWAY_TRIPTYCH_DATABASES if database not in present]
+            unit_audit = {
+                'comparison': comparison, 'method': method, 'direction': direction,
+                'available_databases': sorted(present),
+            }
+            if method.upper() != 'ORA':
+                unit_audit.update({'status': 'skipped', 'reason': 'Human 通路三分区图只适用于 ORA'})
+                audit['units'].append(unit_audit)
+                continue
+            if missing:
+                message = (
+                    f'{comparison} / {direction}: 缺少 ' + '、'.join(missing)
+                    + ' 的完整结果，未生成 Human 通路三分区图。'
+                )
+                unit_audit.update({'status': 'skipped', 'reason': message})
+                audit['warnings'].append(message)
+                audit['units'].append(unit_audit)
+                continue
+
+            selection_input = source_group.copy()
+            selection_input['status'] = 'completed'
+            selection_input['gene_set'] = selection_input['Database'].map(reverse_database_names)
+            selection_input['method'] = selection_input['Method'].astype(str)
+            selection_input['direction'] = selection_input['Direction'].astype(str)
+            selected, selection_audit = _select_pathway_triptych_rows(
+                selection_input, top_n=config['top_n'],
+            )
+            selected = selected.drop(columns=['status', 'gene_set', 'method', 'direction'], errors='ignore')
+            unit_audit.update(selection_audit)
+            unit_audit['status'] = 'completed'
+            audit['units'].append(unit_audit)
+            if not selected.empty:
+                selected_frames.append(selected)
+
+            direction_label = {
+                'Up': '上调', 'Down': '下调', 'All': '全部显著 DEG',
+            }.get(direction, direction)
+            safe_key = '_'.join((
+                output_prefix, 'pathway_triptych', _safe_output_fragment(comparison),
+                _safe_output_fragment(direction, fallback='all'),
+            ))
+            height_mm = min(225, max(132, 62 + 6 * max(len(selected), 6)))
+            for plot_type, suffix, heading in (
+                ('pathway_triptych_dotplot', 'dotplot', 'Human Pathway Enrichment Plot'),
+                ('pathway_triptych_barplot', 'barplot', 'Human pathway enrichment'),
+            ):
+                figure = None
+                try:
+                    spec = director.create_spec(
+                        plot_type, width='double', height_mm=height_mm,
+                        top_n=config['top_n'], formats=('svg', 'pdf', 'png'),
+                        database_scope=tuple(PATHWAY_TRIPTYCH_DATABASES.values()),
+                        title=f'{heading}\n{comparison} · {direction_label}',
+                    )
+                    figure = director.render(spec, selected)
+                    exported, report = export_registered_figure(
+                        figure, plots_path / f'{safe_key}_{suffix}', spec,
+                        category=plot_type,
+                        label=(
+                            f'KEGG/Reactome/WikiPathways Human 三分区 · {comparison} · '
+                            f'{direction_label} {"气泡图" if suffix == "dotplot" else "柱状图"}'
+                            '（各库独立 FDR Top）'
+                        ),
+                        qa_path=results_path / f'{safe_key}_{suffix}_nature_readiness.json',
+                    )
+                    outputs.extend(exported)
+                    unit_audit.setdefault('figures', []).append({
+                        'plot_type': plot_type,
+                        'status': 'pass' if report.ready else 'warning',
+                        'nature_readiness_score': report.score,
+                        'issues': [issue.message for issue in report.issues],
+                    })
+                except Exception as exc:
+                    message = f'{comparison} / {direction}: Human 通路三分区 {suffix} 生成失败（{exc}）'
+                    audit['warnings'].append(message)
+                    unit_audit.setdefault('figures', []).append({
+                        'plot_type': plot_type, 'status': 'failed', 'error': str(exc),
+                    })
+                finally:
+                    if figure is not None:
+                        plt.close(figure)
+
+    selected_source = (
+        pd.concat(selected_frames, ignore_index=True, sort=False)
+        if selected_frames else pd.DataFrame(columns=source_columns)
+    )
+    selected_source = selected_source[[
+        column for column in source_columns if column in selected_source.columns
+    ]]
+    source_path = results_path / f'{output_prefix}_pathway_triptych_source.csv'
+    selected_source.to_csv(source_path, index=False)
+    outputs.append({
+        'file_path': str(source_path), 'file_type': 'csv', 'category': 'table',
+        'label': 'KEGG/Reactome/WikiPathways Human 三分区图来源表（各库独立 FDR Top）',
+    })
+    audit_path = results_path / f'{output_prefix}_pathway_triptych_selection_audit.json'
+    audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding='utf-8')
+    outputs.append({
+        'file_path': str(audit_path), 'file_type': 'json', 'category': 'info',
+        'label': 'KEGG/Reactome/WikiPathways Human 三分区图选择审计（可复现）',
+    })
+    return outputs
+
+
 def _write_enrichment_integration(results_dir, *, source_paths=None, plots_dir=None,
-                                  output_prefix='enrichment'):
+                                  output_prefix='enrichment', go_priority_config=None,
+                                  pathway_triptych_config=None):
     """Create an integrated table from explicitly selected enrichment outputs.
 
     Each source table carries ``Comparison``, ``Database``, ``Method`` and
@@ -506,6 +913,16 @@ def _write_enrichment_integration(results_dir, *, source_paths=None, plots_dir=N
         integrated, results_path, plots_dir=plots_dir,
         output_prefix=f'{output_prefix}_overview',
     ))
+    if go_priority_config is not None:
+        output_files.extend(_write_go_priority_figures(
+            integrated, results_path, plots_dir=plots_dir,
+            output_prefix=output_prefix, config=go_priority_config,
+        ))
+    if pathway_triptych_config is not None:
+        output_files.extend(_write_pathway_triptych_figures(
+            integrated, results_path, plots_dir=plots_dir,
+            output_prefix=output_prefix, config=pathway_triptych_config,
+        ))
 
     try:
         xlsx_path = results_path / f'{output_prefix}_integrated_results.xlsx'
@@ -1119,7 +1536,7 @@ def _enrichment_figure(result_df, title, database='GO_BP', score_column=None,
 class BulkEnrichmentAnalysis(BaseAnalysis):
     MODULE_NAME = "bulk_enrichment"
     DISPLAY_NAME = "通路富集分析"
-    DESCRIPTION = "GO/KEGG/WikiPathways 通路富集分析（ORA / GSEA）"
+    DESCRIPTION = "GO/KEGG/Reactome/WikiPathways Human 通路富集分析（ORA / GSEA）"
     INPUT_REQUIRES = []
 
     def validate_input(self, adata):
@@ -1169,6 +1586,14 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
         summary without invalidating successful libraries, and the final
         integration receives only the result paths generated in this task.
         """
+        go_priority_config = _go_priority_config_from_params(
+            self.params, databases=databases,
+            top_n=_bounded_int(self.params.get('top_n', 12), '展示通路数', 1, 60),
+        )
+        pathway_triptych_config = _pathway_triptych_config_for_batch(
+            self.params, databases=databases,
+            top_n=_bounded_int(self.params.get('top_n', 12), '展示通路数', 1, 60),
+        )
         batch_key = _safe_output_fragment(
             self.params.get('_analysis_id', 'adhoc_batch'), fallback='adhoc_batch',
         )
@@ -1249,6 +1674,21 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
             'databases': database_rows,
             'fdr_scope': '每个比较 × 数据库 × 方向独立 BH/FDR；概览不重新校正。',
             'source_result_files': [Path(path).name for path in source_paths],
+            'go_priority_display': ({
+                'enabled': True,
+                'focus_terms': list(go_priority_config['focus_terms']),
+                'focus_label': go_priority_config['focus_label'],
+                'allocation_mode': go_priority_config['allocation_mode'],
+                'requested_allocation': go_priority_config['priority_allocation'],
+                'display_cap_per_ontology': go_priority_config['top_n'],
+                'statistics_note': '仅调整展示排序；各 GO 本体仍使用完整本体内独立 FDR。',
+            } if go_priority_config is not None else {'enabled': False}),
+            'pathway_triptych_display': ({
+                'enabled': True,
+                'databases': list(_PATHWAY_TRIPTYCH_DATABASES),
+                'display_cap_per_database': pathway_triptych_config['top_n'],
+                'statistics_note': 'KEGG、Reactome 与 WikiPathways Human 保留各自完整库内独立 FDR；三分区图不合并或重新校正 FDR。',
+            } if pathway_triptych_config is not None else {'enabled': False}),
         }
         manifest_path = Path(results_dir) / f'enrichment_batch_{batch_key}_manifest.json'
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -1262,6 +1702,8 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
             result_files.extend(_write_enrichment_integration(
                 results_dir, source_paths=source_paths, plots_dir=plots_dir,
                 output_prefix=integration_prefix,
+                go_priority_config=go_priority_config,
+                pathway_triptych_config=pathway_triptych_config,
             ))
 
         completed = [row for row in database_rows if row['status'] == 'completed']
@@ -1276,6 +1718,8 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
             'n_tested': int(sum(row.get('n_tested') or 0 for row in completed)),
             'n_significant': int(sum(row.get('n_significant') or 0 for row in completed)),
             'fdr_scope': manifest['fdr_scope'],
+            'go_priority_display': manifest['go_priority_display'],
+            'pathway_triptych_display': manifest['pathway_triptych_display'],
         }
         if not completed:
             summary['error'] = '所有指定基因集数据库均未能完成；请查看批量富集审计文件。'
@@ -1286,6 +1730,11 @@ class BulkEnrichmentAnalysis(BaseAnalysis):
                 and not self.params.get('_batch_subrun')):
             return self._run_database_batch(
                 input_path, self._batch_database_names(self.params.get('databases', '')),
+            )
+        if (_as_enabled(self.params.get('go_priority_enabled', False))
+                and not self.params.get('_batch_subrun')):
+            raise ValueError(
+                '主题优先 GO 三分区图需要启用“批量执行多个数据库”，并同时选择 GO_BP、GO_CC、GO_MF。'
             )
         method = str(self.params.get('method', 'ORA') or 'ORA').upper()
         database = str(self.params.get('database', 'GO_BP') or 'GO_BP')

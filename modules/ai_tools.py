@@ -2,6 +2,8 @@
 """AI 工具函数 — 平台分析功能的接口"""
 import os
 import json
+import math
+import re
 from config import Config
 
 
@@ -40,10 +42,69 @@ def resolve_current_analysis_input(project_id, module_name=''):
     return ctx
 
 
+_ABSOLUTE_PATH_RE = re.compile(r'^/[^\s\'"<>|]+(?:/[^\s\'"<>|]+)+$')
+# 只有这些服务器根目录下的绝对路径才需要脱敏；否则会把平台自身的
+# API 路由（例如 /api/projects/<pid>/pipeline-runs/<id>）误判为文件路径。
+_SERVER_PATH_PREFIXES = (
+    '/home/', '/data/', '/mnt/', '/srv/', '/var/', '/opt/', '/etc/',
+    '/tmp/', '/media/', '/root/', '/Users/',
+)
+
+
+def _redact_path_string(value, project_dirs):
+    """Rewrite one server path so external models never receive an absolute path."""
+    text = str(value)
+    if not text or text.lower().startswith(('http://', 'https://')):
+        return value
+    for root in project_dirs:
+        if text == root or text.startswith(root + os.sep):
+            return os.path.relpath(text, root)
+    if _ABSOLUTE_PATH_RE.match(text) and text.startswith(_SERVER_PATH_PREFIXES):
+        # 项目外路径只保留文件名：调用方（AI 工具）本来也只被允许使用
+        # 项目内文件，暴露服务器目录结构没有任何收益。
+        return os.path.basename(text)
+    return value
+
+
+def _redact_server_paths(value, project_id):
+    """Recursively strip absolute server paths from a model-facing tool result.
+
+    ``result_json`` 与若干工具会返回项目绝对路径（结果包目录、DEG 来源
+    文件、中间 h5ad 等），这些字段用于平台内部溯源；发送给外部模型前必须
+    改为项目相对路径（或仅文件名），符合“不向外部 AI 发送绝对路径”的底线。
+    """
+    try:
+        project_dir = Config.project_dir(project_id)
+    except (OSError, ValueError):
+        return value
+    # DATA_DIR 可能是符号链接，项目内路径既可能以配置路径出现，也可能以
+    # realpath 出现；两种前缀都要能识别，才能保留 intermediate/ 这样的层级。
+    project_dirs = []
+    for candidate in (os.path.abspath(project_dir), os.path.realpath(project_dir)):
+        if candidate and candidate not in project_dirs:
+            project_dirs.append(candidate)
+    if isinstance(value, dict):
+        return {key: _redact_server_paths(item, project_id) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_server_paths(item, project_id) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_server_paths(item, project_id) for item in value)
+    if isinstance(value, str):
+        return _redact_path_string(value, project_dirs)
+    return value
+
+
 def execute_tool(name, args, project_id):
+    """执行指定的工具函数（对外统一脱敏服务器绝对路径）."""
+    return _redact_server_paths(_execute_tool(name, args, project_id), project_id)
+
+
+def _execute_tool(name, args, project_id):
     """执行指定的工具函数"""
     if name == "run_analysis":
         return _run_analysis(args, project_id)
+    elif name == "get_module_parameters":
+        return _get_module_parameters(args or {})
     elif name == "run_pipeline":
         return _run_pipeline(args, project_id)
     elif name == "get_project_status":
@@ -64,6 +125,10 @@ def execute_tool(name, args, project_id):
         return _score_cell_type_signature(args, project_id)
     elif name == "list_builtin_markers":
         return _list_builtin_markers()
+    elif name == "search_pathway_terms":
+        return _search_pathway_terms(args or {})
+    elif name == "read_task_table":
+        return _read_task_table(args or {}, project_id)
     elif name == "propose_parameter_sweep":
         return _propose_parameter_sweep(args, project_id)
     elif name == "run_parameter_sweep":
@@ -79,6 +144,34 @@ def execute_tool(name, args, project_id):
     elif name in {"inspect_wes_manifest", "inspect_wes_preflight"}:
         return _inspect_wes_manifest(args, project_id)
     return {"error": f"未知工具: {name}"}
+
+
+def _get_module_parameters(args):
+    """Expose the same user-adjustable parameter contract as the web form."""
+    from modules import MODULE_REGISTRY
+    from modules.schemas import PARAM_SCHEMAS
+
+    module_name = str(args.get("module_name", "") or "").strip()
+    if module_name not in MODULE_REGISTRY:
+        return {"error": f"未知模块: {module_name}"}
+    fields = []
+    for entry in PARAM_SCHEMAS.get(module_name, []):
+        fields.append({
+            key: entry[key]
+            for key in (
+                "key", "label", "type", "default", "options", "option_labels",
+                "min", "max", "step", "help", "show_if", "depends_on",
+            )
+            if key in entry
+        })
+    return {
+        "module_name": module_name,
+        "parameters": fields,
+        "usage_note": (
+            "这些键与网页表单共用同一参数契约。带 show_if/depends_on 的字段需同时"
+            "提交其控制字段；数值必须遵守给出的范围。运行前应向用户回显其手动指定值。"
+        ),
+    }
 
 
 def _run_pipeline(args, project_id):
@@ -220,6 +313,10 @@ def _run_analysis(args, project_id):
     params, err = _validate_analysis_params(module_name, params)
     if err:
         return {"error": f"参数校验失败: {err}"}
+    if module_name == "sc_cell_go":
+        source_error = _bind_sc_cell_go_source(params, project_id)
+        if source_error:
+            return {"error": source_error}
 
     # AI 选择样本名自动分组时，由受信任后端注入映射；
     # 不允许模型直接伪造下划线内部参数。
@@ -235,10 +332,13 @@ def _run_analysis(args, project_id):
         return {"error": f"方法与数据不兼容: {compatibility_error}"}
 
     # AI-triggered execution must respect the same hard experimental-design
-    # boundary as the regular form.  Keep this best-effort around malformed
-    # legacy test/placeholder files; module-specific validation remains the
-    # fallback for inputs that cannot be profiled here.
-    if module_name in {'bulk_deg', 'sc_timecourse', 'batch_correct', 'bulk_normalize'}:
+    # boundary as the regular form (shared PREFLIGHT_MODULES constant so the
+    # two entry points cannot drift apart again).  Keep this best-effort
+    # around malformed legacy test/placeholder files; module-specific
+    # validation remains the fallback for inputs that cannot be profiled here.
+    from modules.design_preflight import PREFLIGHT_MODULES
+
+    if module_name in PREFLIGHT_MODULES:
         try:
             from modules.design_preflight import preflight_blockers
             from modules.io_utils import read_expression_matrix
@@ -273,6 +373,67 @@ def _run_analysis(args, project_id):
         "input_source": input_source,
         "message": f"分析任务已提交：{module_name}，任务 ID: {task.id}",
     }
+
+
+def _bind_sc_cell_go_source(params, project_id):
+    """Resolve an AI-requested single-cell DEG task to fixed internal files.
+
+    The browser analysis route already performs this binding.  AI submission
+    must apply the same server-side rule rather than falling back to a
+    timestamp-based discovery of whichever legacy DEG CSV happens to be new.
+    """
+    from models import AnalysisTask
+
+    source_task_id = str(params.get("deg_source_task_id", "") or "").strip()
+    if not source_task_id:
+        return "请明确指定已完成的单细胞 DEG 来源任务（deg_source_task_id）。"
+    source_task = AnalysisTask.get_by_id(source_task_id)
+    if (
+        source_task is None
+        or source_task.project_id != project_id
+        or source_task.status != "completed"
+        or source_task.module_name not in {"sc_cell_deg", "sc_pseudobulk_deg"}
+    ):
+        return "DEG 来源任务不存在、未完成或不属于当前项目。"
+    try:
+        summary = json.loads(source_task.result_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return "DEG 来源任务缺少可解析的溯源摘要。"
+    source_files = summary.get("deg_source_files") or []
+    if isinstance(source_files, str):
+        source_files = [source_files]
+    project_root = os.path.realpath(Config.project_dir(project_id))
+    fixed_files = []
+    for source_path in source_files:
+        source_path = str(source_path or "")
+        valid, _ = Config._validate_path(source_path, project_id)
+        if not valid or not os.path.isfile(source_path):
+            continue
+        current = os.path.abspath(source_path)
+        has_symlink = False
+        while current.startswith(project_root + os.sep):
+            if os.path.islink(current):
+                has_symlink = True
+                break
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        if not has_symlink:
+            fixed_files.append(source_path)
+    if not fixed_files:
+        return "DEG 来源任务没有可安全读取的内部结果文件。"
+    source_level = str(summary.get("deg_source_level") or "").strip().lower()
+    if source_level not in {"cell_level", "pseudobulk"}:
+        return "DEG 来源任务缺少有效的分析层级溯源。"
+    # These values originate solely from the completed task registry and are
+    # set after AI input validation, so the model cannot inject arbitrary
+    # paths or mislabel the evidence level.
+    params["deg_source_files"] = fixed_files
+    params["deg_source_level"] = source_level
+    params["source_level"] = source_level
+    params["source_task_id"] = source_task.id
+    return None
 
 
 def _get_project_status(project_id):
@@ -581,17 +742,14 @@ def _profile_analysis_input(input_path):
     from modules.io_utils import (
         read_expression_matrix, infer_sample_group_candidates,
         rank_obs_grouping_candidates,
+        resolve_expression_measurement,
     )
     from modules.sc_timecourse import _time_value
 
     adata = read_expression_matrix(input_path)
     value_profile = _matrix_value_profile(adata.X, adata.n_obs, adata.n_vars)
     normalization = dict(adata.uns.get('normalization', {})) if hasattr(adata, 'uns') else {}
-    measurement_type = (
-        'log_transformed'
-        if normalization.get('is_log_transformed')
-        else value_profile['measurement_type']
-    )
+    measurement_type, measurement_resolution = resolve_expression_measurement(adata, input_path)
     source_measurement_type = value_profile['measurement_type']
     if 'raw' in adata.layers:
         source_measurement_type = _matrix_value_profile(
@@ -667,9 +825,15 @@ def _profile_analysis_input(input_path):
         'n_genes': int(adata.n_vars),
         'measurement_type': measurement_type,
         'source_measurement_type': source_measurement_type,
+        'measurement_resolution': measurement_resolution,
         **{key: value for key, value in value_profile.items() if key != 'measurement_type'},
         'normalization': normalization,
         'obs_columns': obs_columns,
+        # Only expose representation names, never the embedding values.  This
+        # lets the conversational recommender choose a valid high-dimensional
+        # space for local-neighbourhood analysis without leaking cell data.
+        'obsm_keys': [str(key) for key in list(adata.obsm.keys())[:30]],
+        'has_neighbors_graph': bool('neighbors' in adata.uns),
         'sample_names': [str(name) for name in adata.obs_names[:100]],
         'grouping_candidates': grouping_candidates[:8],
         'batch_candidates': batch_candidates[:8],
@@ -712,12 +876,27 @@ def _validate_method_compatibility(module_name, input_path, params):
     method = str(params.get('method', '') or '').lower()
     count_only_normalizers = {'deseq2', 'tmm', 'cpm', 'vst', 'rlog'}
     count_only_deg = {'deseq2', 'edger', 'limma'}
+    measurement_resolution = profile.get('measurement_resolution', {})
 
     if module_name == 'bulk_normalize':
+        if (
+            measurement == 'continuous_expression'
+            and method in {'log2', 'log2_quantile'}
+            and measurement_resolution.get('requires_confirmation_for_log_transform')
+            and params.get('input_measurement') != 'continuous_expression'
+        ):
+            return (
+                '非整数矩阵无法仅靠数值确认是否已 log；请先确认来源，并显式传入 '
+                'input_measurement=continuous_expression，或选择 log_transformed。'
+            )
         if measurement == 'continuous_expression' and method in count_only_normalizers:
             return f'连续 FPKM/TPM 类表达值不应使用 {method}；请选择 log2'
-        if measurement == 'log_transformed':
-            return '输入已是 log/标准化尺度，不应重复运行 bulk_normalize'
+        if measurement == 'continuous_expression' and method == 'none':
+            return '线性连续表达值不能直接保留；请确认来源后使用 log2(x+1)'
+        if measurement == 'raw_counts' and method in {'log2', 'log2_quantile', 'none'}:
+            return '原始整数 counts 不能跳过文库大小标准化或只做 log2；请选择 DESeq2、TMM、CPM、VST 或 rlog'
+        if measurement == 'log_transformed' and method != 'none':
+            return '输入已是 log/标准化尺度；请选择 bulk_normalize(method=none) 保留表达值，不能再次变换'
 
     if module_name == 'bulk_deg':
         if compromised_normalization:
@@ -804,6 +983,54 @@ def _recommend_analysis_config(args, project_id):
     group_column = preferred_group.get('column') if preferred_group else ''
     group_sizes = preferred_group.get('group_sizes', {}) if preferred_group else {}
     min_group_size = min(group_sizes.values()) if group_sizes else 0
+
+    # Keep the single-cell downstream recommendations conservative: metadata
+    # column names are chosen from the actual input, while cell-type scope is
+    # deliberately left to the user unless they explicitly name its values.
+    # This avoids silently discarding epithelial states with non-standard
+    # labels (for example ``TA`` or ``Metabolic enterocytes``).
+    lower_to_obs = {
+        str(column).strip().lower(): str(column)
+        for column in profile.get('obs_columns', [])
+    }
+
+    def first_observation_column(candidates):
+        return next(
+            (lower_to_obs[candidate] for candidate in candidates
+             if candidate in lower_to_obs),
+            '',
+        )
+
+    sc_sample_key = next(
+        (str(candidate) for candidate in profile.get('sample_candidates', [])
+         if str(candidate).strip() in set(profile.get('obs_columns', []))),
+        '',
+    )
+    sc_condition_key = first_observation_column((
+        'condition', 'condition_group', 'disease', 'disease_status',
+        'treatment', 'treatment_group', 'phenotype', 'cohort', 'group',
+    ))
+    annotated_celltype_key = first_observation_column((
+        'celltype', 'cell_type', 'annotation', 'celltype_final',
+    ))
+    cluster_key = first_observation_column(('leiden', 'louvain', 'cluster'))
+    sc_cell_group_key = annotated_celltype_key or cluster_key
+    condition_candidate = next(
+        (candidate for candidate in groups
+         if str(candidate.get('column', '')) == sc_condition_key),
+        None,
+    )
+    sc_condition_values = list(condition_candidate.get('values', [])) if condition_candidate else []
+    sc_comparisons = _infer_reference_comparisons(sc_condition_values)
+    supported_neighbourhood_representations = (
+        'X_pca_harmony', 'X_scanorama', 'X_scvi', 'X_scVI', 'X_sysvi',
+        'X_pca_combat', 'X_mnn', 'X_pca',
+    )
+    sc_neighbourhood_representation = next(
+        (key for key in supported_neighbourhood_representations
+         if key in set(profile.get('obsm_keys', []))),
+        '',
+    )
     measurement = profile['measurement_type']
     source_measurement = profile.get('source_measurement_type', measurement)
     normalization_method = str(profile.get('normalization', {}).get('method', '')).lower()
@@ -814,6 +1041,9 @@ def _recommend_analysis_config(args, project_id):
     )
     n_obs = profile['n_samples_or_cells']
     n_genes = profile['n_genes']
+    log2_prereq_params = {'method': 'log2'}
+    if not profile.get('measurement_resolution', {}).get('requires_confirmation_for_log_transform'):
+        log2_prereq_params['input_measurement'] = 'continuous_expression'
 
     if module_name == 'bulk_qc':
         if measurement == 'continuous_expression':
@@ -830,6 +1060,14 @@ def _recommend_analysis_config(args, project_id):
             alternatives.append({'method': 'tmm', 'when': '样本间组成偏差明显时'})
         elif measurement == 'continuous_expression':
             recommend('method', 'log2', '连续 FPKM/TPM 类表达值仅做 log2(x+1)，保留真实分布差异')
+            if profile.get('measurement_resolution', {}).get('requires_confirmation_for_log_transform'):
+                should_run = False
+                warnings.append(
+                    '非整数数值不能证明它是线性 FPKM/TPM 而非已 log 表达值；'
+                    '请先确认原始文件来源，再明确选择 input_measurement。'
+                )
+            else:
+                recommend('input_measurement', 'continuous_expression', '明确输入为线性连续表达值，避免平台对未知非整数矩阵重复 log')
             alternatives.append({'method': 'log2_quantile', 'when': '仅在确认所有样本应具有相同分布时'})
         else:
             should_run = False
@@ -851,11 +1089,11 @@ def _recommend_analysis_config(args, project_id):
         elif measurement in {'continuous_expression', 'log_transformed'}:
             recommend('method', 't-test', '连续表达值在 log2 尺度上使用 Welch t-test')
             if measurement == 'continuous_expression':
-                prerequisites.append({'module': 'bulk_normalize', 'params': {'method': 'log2'}, 'reason': 'DEG 前先进行 log2(x+1)'})
+                prerequisites.append({'module': 'bulk_normalize', 'params': dict(log2_prereq_params), 'reason': '确认线性连续表达值后，DEG 前进行 log2(x+1)'})
                 should_run = False
         if compromised_normalization:
             should_run = False
-            prerequisites.append({'module': 'bulk_normalize', 'params': {'method': 'log2'}, 'reason': '原始连续表达值曾被 count-only 方法处理，需从原始上传重新 log2'})
+            prerequisites.append({'module': 'bulk_normalize', 'params': dict(log2_prereq_params), 'reason': '确认线性连续表达值后，从原始上传重新 log2'})
             warnings.append(f'当前中间文件用 {normalization_method} 处理了连续表达值，不建议直接用于 DEG')
         objective_lower = objective.lower()
         strict = any(word in objective_lower for word in ('严格', '严谨', '验证', 'strict'))
@@ -872,10 +1110,10 @@ def _recommend_analysis_config(args, project_id):
         if group_column:
             recommend('color_by', group_column if group_column != '_auto_group_' else '_auto_group', '按推荐分组着色检查样本结构')
         if measurement == 'continuous_expression':
-            prerequisites.append({'module': 'bulk_normalize', 'params': {'method': 'log2'}, 'reason': 'PCA 前先稳定连续表达值方差'})
+            prerequisites.append({'module': 'bulk_normalize', 'params': dict(log2_prereq_params), 'reason': '确认线性连续表达值后，PCA 前进行 log2 方差稳定'})
             should_run = False
         elif compromised_normalization:
-            prerequisites.append({'module': 'bulk_normalize', 'params': {'method': 'log2'}, 'reason': '从原始连续表达文件重新 log2 后再做 PCA'})
+            prerequisites.append({'module': 'bulk_normalize', 'params': dict(log2_prereq_params), 'reason': '确认线性连续表达值后，从原始文件重新 log2 再做 PCA'})
             warnings.append(f'当前中间文件用 {normalization_method} 处理了连续表达值')
             should_run = False
 
@@ -886,10 +1124,10 @@ def _recommend_analysis_config(args, project_id):
         if group_column:
             recommend('groupby', group_column if group_column != '_auto_group_' else '_auto_group', '显示样本分组注释')
         if measurement == 'continuous_expression':
-            prerequisites.append({'module': 'bulk_normalize', 'params': {'method': 'log2'}, 'reason': '热图前先对连续表达值做 log2(x+1)'})
+            prerequisites.append({'module': 'bulk_normalize', 'params': dict(log2_prereq_params), 'reason': '确认线性连续表达值后，热图前进行 log2(x+1)'})
             should_run = False
         elif compromised_normalization:
-            prerequisites.append({'module': 'bulk_normalize', 'params': {'method': 'log2'}, 'reason': '从原始连续表达文件重新 log2 后再生成热图'})
+            prerequisites.append({'module': 'bulk_normalize', 'params': dict(log2_prereq_params), 'reason': '确认线性连续表达值后，从原始文件重新 log2 再生成热图'})
             warnings.append(f'当前中间文件用 {normalization_method} 处理了连续表达值')
             should_run = False
 
@@ -921,6 +1159,142 @@ def _recommend_analysis_config(args, project_id):
         else:
             should_run = False
             warnings.append('未检测到时间列，不应执行时序分析')
+
+    elif module_name == 'functional_state':
+        objective_lower = objective.lower()
+        ibd_focus_tokens = (
+            'ibd', 'inflammatory bowel', 'crohn', 'ulcerative colitis',
+            '炎症性肠病', '克罗恩', '溃疡性结肠炎',
+        )
+        if any(token in objective_lower for token in ibd_focus_tokens):
+            recommend(
+                'analysis_focus', 'ibd_organoid_epithelial',
+                '目标为 IBD/肠炎相关状态，使用冻结 Hallmark/Reactome 与明确标注的上皮假设签名',
+            )
+        if not sc_sample_key:
+            should_run = False
+            warnings.append('未检测到 sample_id/sample 等生物学样本列；功能状态的正式条件比较不能把细胞当作重复。')
+        else:
+            recommend('sample_key', sc_sample_key, '以真实生物学样本聚合功能分数')
+        if not sc_condition_key:
+            should_run = False
+            warnings.append('未检测到 condition/disease/treatment 等条件列；无法运行样本级功能状态比较。')
+        else:
+            recommend('condition_key', sc_condition_key, '使用实际条件列比较状态分数')
+        if not sc_cell_group_key:
+            should_run = False
+            warnings.append('未检测到 celltype/annotation/leiden 列；请先完成注释或聚类后再解释细胞类型内状态。')
+        else:
+            recommend(
+                'celltype_key', sc_cell_group_key,
+                '优先按已注释细胞类型聚合；无注释时该结果仅为 cluster 层面的探索性证据',
+            )
+            if not annotated_celltype_key:
+                warnings.append('当前未发现已注释 celltype 列，功能状态会按 cluster 汇总；正式生物学命名需先人工复核注释。')
+        warnings.append('若只研究上皮谱系，请在确认前通过 scope_key/scope_values 明确选择目标 celltype，避免自动排除非标准命名的 TA/应激状态。')
+
+    elif module_name == 'sc_pseudobulk_deg':
+        if not profile.get('counts_layer_is_raw'):
+            should_run = False
+            warnings.append('未检测到原始整数 counts 层；正式 pseudobulk DESeq2 需要可追溯的 raw counts，请从 QC/原始输入重新开始。')
+        if not sc_sample_key:
+            should_run = False
+            warnings.append('未检测到生物学 sample_id；pseudobulk DEG 不能把单细胞作为重复。')
+        else:
+            recommend('sample_key', sc_sample_key, '每个 sample × celltype 聚合为一个 pseudobulk 重复')
+        if not sc_condition_key:
+            should_run = False
+            warnings.append('未检测到 condition/disease/treatment 条件列；无法构建 disease-vs-control 比较。')
+        else:
+            recommend('condition_key', sc_condition_key, '使用真实疾病/处理条件作为 pseudobulk 对比')
+            if sc_comparisons:
+                recommend('comparisons', ';'.join(sc_comparisons), '识别到对照组，优先按处理-vs-对照方向输出 log2FC')
+        if annotated_celltype_key:
+            recommend('analysis_scope', 'per_cluster', '分别检验各细胞类型内部的表达变化，避免与比例变化混淆')
+            recommend('grouping_mode', 'annotated_celltype', '已存在注释，优先按 celltype 生成 pseudobulk')
+            recommend('celltype_key', annotated_celltype_key, '使用已注释细胞类型列')
+        elif cluster_key:
+            recommend('analysis_scope', 'per_cluster', '分别检验各 cluster 内的表达变化')
+            recommend('grouping_mode', 'cluster', '尚无稳定注释时仅以 cluster 做探索性分层')
+            recommend('cluster_key', cluster_key, '使用已有聚类列')
+            warnings.append('当前仅发现 cluster 而非 celltype 注释；结果可用于探索，不应直接替代细胞类型层面的结论。')
+        else:
+            should_run = False
+            warnings.append('未检测到 celltype/annotation/leiden 列；需先完成聚类或注释后再做 per-cell-type pseudobulk DEG。')
+        recommend('method', 'deseq2', '原始 count 的样本级 pseudobulk 优先使用负二项 DESeq2 模型')
+        recommend('min_samples_per_group', 2, '平台最低要求为每组 2 个独立样本；建议至少 3 个后再作稳健结论')
+
+    elif module_name == 'proportion':
+        if not sc_sample_key:
+            should_run = False
+            warnings.append('未检测到生物学 sample_id；比例图可描述但不能进行样本级统计。')
+        else:
+            recommend('sample_key', sc_sample_key, '以样本而非细胞作为比例统计的独立单位')
+        if not sc_condition_key:
+            should_run = False
+            warnings.append('未检测到条件列；无法比较 disease/control 的细胞组成。')
+        else:
+            recommend('condition_key', sc_condition_key, '按真实条件进行样本级比例比较')
+            if sc_comparisons:
+                recommend('compare_groups', ';'.join(sc_comparisons), '优先比较处理/疾病组相对对照组')
+        if not sc_cell_group_key:
+            should_run = False
+            warnings.append('未检测到可用 celltype/annotation/leiden 列，无法计算组成比例。')
+        else:
+            recommend('groupby', sc_cell_group_key, '以注释细胞类型或 cluster 作为组成单位')
+        recommend('analysis_unit', 'sample', '强制使用样本级统计，避免把细胞数直接作为生物学重复')
+        recommend('min_samples_per_condition', 2, '平台最低样本数要求；建议至少 3 个独立样本')
+
+    elif module_name == 'neighborhood_da':
+        if not sc_sample_key:
+            should_run = False
+            warnings.append('未检测到生物学 sample_id；局部邻域丰度必须以样本而非细胞作重复。')
+        else:
+            recommend('sample_key', sc_sample_key, '每个邻域按样本内细胞比例进行比较')
+        if not sc_condition_key:
+            should_run = False
+            warnings.append('未检测到 condition/disease/treatment 条件列；无法进行邻域差异丰度比较。')
+        else:
+            recommend('condition_key', sc_condition_key, '使用真实条件作样本级邻域比较')
+            if sc_comparisons:
+                recommend('comparisons', ';'.join(sc_comparisons), '识别到对照组，优先使用疾病/处理-vs-对照方向')
+        if not sc_neighbourhood_representation:
+            should_run = False
+            prerequisites.append({'module': 'dimred', 'reason': '邻域需要 X_pca 或整合后的高维表示；UMAP 二维坐标不能替代该输入。'})
+            warnings.append('未检测到 X_pca/Harmony/scVI 等高维表示，不能在二维 UMAP 上构建邻域。')
+        else:
+            recommend('representation', sc_neighbourhood_representation, '使用现有高维 PCA/整合表示构建局部 KNN 邻域，而非二维 UMAP')
+        if 'X_umap' not in set(profile.get('obsm_keys', [])):
+            should_run = False
+            prerequisites.append({'module': 'dimred', 'reason': '邻域结果需要 X_umap 用于可视化；请先完成降维。'})
+            warnings.append('缺少 X_umap；平台不会仅生成无空间定位的邻域差异丰度结果。')
+        if sc_cell_group_key:
+            recommend('celltype_key', sc_cell_group_key, '用已有细胞类型/cluster 标记邻域主导状态，不把它作为统计重复')
+        else:
+            warnings.append('未检测到 celltype/annotation/leiden 列；仍可做局部 DA，但结果难以标记生物学状态。')
+        recommend('min_samples_per_condition', 2, '平台最低重复要求；建议至少 3 个独立样本')
+        warnings.append('本模块为样本级、重叠 KNN 邻域差异丰度实现，不应称为完整 R/Milo 负二项分析。')
+
+    elif module_name == 'trajectory':
+        if not sc_cell_group_key:
+            should_run = False
+            warnings.append('未检测到 celltype/annotation/leiden 列；轨迹需要可解释的离散状态用于 PAGA/DPT 复核。')
+        else:
+            recommend('cluster_key', sc_cell_group_key, '优先用已注释细胞状态复核 Stem/TA/成熟 enterocyte 的连续性')
+        recommend('enable_paga', True, '先输出 PAGA 连通性，再解释 DPT 拟时序方向')
+        warnings.append('DPT 起点决定方向；请在确认时指定 Stem/progenitor 对应的 start_cluster。当前模块不等同 RNA velocity。')
+        if 'X_umap' not in set(profile.get('obsm_keys', [])):
+            should_run = False
+            prerequisites.append({'module': 'dimred', 'reason': '轨迹需要邻居图与 X_umap；请先完成降维。'})
+        elif not profile.get('has_neighbors_graph'):
+            should_run = False
+            prerequisites.append({'module': 'dimred', 'reason': '轨迹需要上游邻居图；请先完成降维。'})
+            warnings.append('已找到 X_umap 但没有邻居图，不能直接运行 DPT/PAGA。')
+
+    elif module_name == 'sc_cell_go':
+        should_run = False
+        warnings.append('通路富集必须绑定一个已完成的 sc_pseudobulk_deg（或明确选择的探索性 sc_cell_deg）任务；请先从任务结果确认来源任务 ID。')
+        alternatives.append({'module': 'functional_state', 'when': '希望直接比较细胞/样本的预定义炎症、应激、代谢和增殖状态分数时'})
 
     elif module_name == 'sc_timecourse':
         time_candidates = profile.get('time_candidates', [])
@@ -1062,7 +1436,9 @@ def _recommend_analysis_config(args, project_id):
                 '目标包含具体比较：custom 只运行 A-vs-B 列表，pairwise 运行全部两两比较',
             )
 
-    cleaned_params, validation_error = _validate_analysis_params(module_name, params)
+    cleaned_params, validation_error = _validate_analysis_params(
+        module_name, params, resolve_dependencies=False,
+    )
     if validation_error:
         return {'error': validation_error}
 
@@ -1083,7 +1459,7 @@ def _recommend_analysis_config(args, project_id):
     }
 
 
-def _validate_analysis_params(module_name, params):
+def _validate_analysis_params(module_name, params, *, resolve_dependencies=True):
     """校验 AI 传入的分析参数，移除未知键，返回 (cleaned_params, error_msg)。"""
     from modules.schemas import PARAM_SCHEMAS, filter_active_params
 
@@ -1105,9 +1481,15 @@ def _validate_analysis_params(module_name, params):
             if expected_type == 'number':
                 try:
                     fval = float(value)
-                    cleaned[key] = int(fval) if fval == int(fval) else fval
                 except (ValueError, TypeError):
                     return None, f"参数 '{key}' 应为数字，收到: {value}"
+                minimum = schema_entry.get('min')
+                maximum = schema_entry.get('max')
+                if minimum is not None and fval < float(minimum):
+                    return None, f"参数 '{key}' 不能小于 {minimum}，收到: {value}"
+                if maximum is not None and fval > float(maximum):
+                    return None, f"参数 '{key}' 不能大于 {maximum}，收到: {value}"
+                cleaned[key] = int(fval) if fval == int(fval) else fval
             elif expected_type == 'checkbox':
                 if isinstance(value, str):
                     cleaned[key] = value.lower() in ('true', '1', 'yes', 'on')
@@ -1117,6 +1499,50 @@ def _validate_analysis_params(module_name, params):
                 cleaned[key] = str(value)
         else:
             cleaned[key] = value
+
+    if not resolve_dependencies:
+        return filter_active_params(schema_list, cleaned), None
+
+    # Web forms submit their controlling select/checkbox together with fields
+    # governed by show_if.  A conversational request may name only the child
+    # field (for example ``go_inflammation_slots=3``).  Resolve an unambiguous
+    # one-value dependency here, or return a useful error for ambiguous and
+    # conflicting combinations instead of silently dropping the user's value.
+    entries_by_key = {entry['key']: entry for entry in schema_list}
+
+    def matches_condition(value, expected):
+        accepted = expected if isinstance(expected, (list, tuple, set)) else (expected,)
+        return value in accepted
+
+    for _pass in range(len(schema_list) + 1):
+        changed = False
+        for entry in schema_list:
+            key = entry['key']
+            if key not in cleaned:
+                continue
+            for controller, expected in (entry.get('show_if') or {}).items():
+                if controller in cleaned:
+                    if not matches_condition(cleaned[controller], expected):
+                        return None, (
+                            f"参数 '{key}' 需要 '{controller}' 为 {expected}，"
+                            f"但收到 {cleaned[controller]}"
+                        )
+                    continue
+                controller_entry = entries_by_key.get(controller)
+                controller_default = (
+                    controller_entry.get('default') if controller_entry else None
+                )
+                if matches_condition(controller_default, expected):
+                    continue
+                choices = expected if isinstance(expected, (list, tuple, set)) else (expected,)
+                if len(choices) != 1:
+                    return None, (
+                        f"参数 '{key}' 还需要明确指定控制参数 '{controller}'（可选 {expected}）"
+                    )
+                cleaned[controller] = choices[0]
+                changed = True
+        if not changed:
+            break
 
     return filter_active_params(schema_list, cleaned), None
 
@@ -1132,6 +1558,10 @@ def _validate_project_path(path, project_id):
         return "项目不存在"
     if not path:
         return "缺少路径参数"
+    # AI 工具现在收到的是项目相对路径（绝对路径在返回前已脱敏），
+    # 因此这里需要先把相对路径解析到项目目录下。
+    if not os.path.isabs(path):
+        path = os.path.join(project_dir, path)
     if os.path.islink(path):
         return "不支持符号链接文件"
     try:
@@ -1586,6 +2016,179 @@ def _list_builtin_markers():
         "cell_types": list_builtin_cell_types(),
         "organoid_panels": organoid_panels,
     }
+
+
+def _search_pathway_terms(args):
+    """[只读] 把自然语言主题（如"脂代谢和炎症"）映射到本地基因集的具体通路 term。
+
+    匹配完全在服务器本地对 term 名称做确定性关键词匹配；不接触表达数据，
+    不向外部服务发送任何内容。返回的 term 名称可直接作为 sc_cell_go 的
+    focus_terms 使用。GO 三分区图会优先展示炎症、脂代谢和确认主题，
+    其余固定名额由完整本体结果中的 FDR Top 通路补足。
+    """
+    from modules import theme_lexicon
+
+    if args.get("list_themes"):
+        return {"themes": theme_lexicon.list_themes()}
+    query = str(args.get("query", "") or "").strip()
+    if not query:
+        return {"error": "缺少 query；或设置 list_themes=true 查看支持的主题"}
+    libraries = args.get("libraries") or []
+    if isinstance(libraries, str):
+        libraries = [item.strip() for item in libraries.split(",") if item.strip()]
+    try:
+        limit = int(args.get("limit", 60) or 60)
+    except (TypeError, ValueError):
+        return {"error": "limit 必须为整数"}
+    try:
+        outcome = theme_lexicon.search_terms(query, libraries=libraries, limit=limit)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    outcome["usage_note"] = (
+        "确认 term 列表后，可用 run_analysis(module_name='sc_cell_go', "
+        "params={'deg_source_task_id': '<已完成的DEG任务ID>', 'focus_terms': [...]}) "
+        "运行主题优先富集；全量统计照常运行，FDR 始终在全库上计算，"
+        "GO 图会保留普通 FDR Top 通路作为补足并输出选择审计。"
+    )
+    return outcome
+
+
+def _read_task_table(args, project_id):
+    """[只读] 读取任务登记的结果表（CSV/TSV/TXT/JSON/XLSX）内容摘要。
+
+    仅接受登记在 ResultFile 中且位于当前项目目录内的文件；路径校验复用
+    ``Config._validate_path``。支持列裁剪、关键词包含过滤、FDR 阈值过滤和
+    行数上限，默认只返回前 50 行，避免把大表整段塞进对话。
+    """
+    import pandas as pd
+
+    from models import ResultFile
+
+    file_id = str(args.get("file_id", "") or "").strip()
+    if not file_id:
+        return {"error": "缺少 file_id"}
+    record = ResultFile.get_by_id(file_id)
+    if not record:
+        return {"error": "结果文件不存在"}
+    if str(record.project_id or "") != str(project_id or ""):
+        return {"error": "结果文件不属于当前项目"}
+    allowed_types = {"csv", "tsv", "txt", "json", "xlsx"}
+    if str(record.file_type or "").lower() not in allowed_types:
+        return {"error": f"只支持读取表格类结果文件（{', '.join(sorted(allowed_types))}）"}
+    path = record.file_path
+    try:
+        is_valid, error = Config._validate_path(path, project_id)
+    except (OSError, ValueError) as exc:
+        return {"error": f"路径校验失败: {exc}"}
+    if not is_valid:
+        return {"error": error}
+    try:
+        project_root = os.path.abspath(Config.project_dir(project_id))
+        supplied_path = os.path.abspath(os.fspath(path))
+        relative_path = os.path.relpath(supplied_path, project_root)
+        if relative_path == os.pardir or relative_path.startswith(os.pardir + os.sep):
+            return {"error": "路径不在项目目录内"}
+        current_path = project_root
+        for component in relative_path.split(os.sep):
+            if component in {"", ".", os.pardir}:
+                continue
+            current_path = os.path.join(current_path, component)
+            if os.path.islink(current_path):
+                return {"error": "不支持含符号链接目录的结果文件"}
+    except (OSError, TypeError, ValueError) as exc:
+        return {"error": f"路径校验失败: {exc}"}
+    if not os.path.isfile(path):
+        return {"error": "文件不存在或已被清理"}
+    if os.path.getsize(path) > 200 * 1024 * 1024:
+        return {"error": "文件过大（>200MB），请改用更聚焦的结果文件"}
+
+    try:
+        limit = min(max(int(args.get("limit", 50) or 50), 1), 200)
+    except (TypeError, ValueError):
+        return {"error": "limit 必须为整数"}
+    columns = args.get("columns") or []
+    if isinstance(columns, str):
+        columns = [item.strip() for item in columns.split(",") if item.strip()]
+    elif not isinstance(columns, (list, tuple)):
+        return {"error": "columns 必须为列名列表或逗号分隔文本"}
+    else:
+        columns = [str(item).strip() for item in columns if str(item).strip()]
+    contains = str(args.get("contains", "") or "").strip().lower()
+    fdr_max = args.get("fdr_max")
+    if fdr_max is not None:
+        try:
+            fdr_max = float(fdr_max)
+        except (TypeError, ValueError):
+            return {"error": "fdr_max 必须为 0 到 1 之间的数字"}
+        if not math.isfinite(fdr_max) or not 0 <= fdr_max <= 1:
+            return {"error": "fdr_max 必须为 0 到 1 之间的数字"}
+
+    suffix = os.path.splitext(path)[1].lower()
+    try:
+        if suffix == ".json":
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if isinstance(payload, list) and (not payload or isinstance(payload[0], dict)):
+                frame = pd.DataFrame(payload)
+            else:
+                text = json.dumps(payload, ensure_ascii=False, default=str)
+                return {
+                    "file_id": file_id, "label": record.label,
+                    "file_type": record.file_type, "format": "json_object",
+                    "excerpt": text[:4000],
+                    "note": "JSON 不是记录列表，返回截断摘要。",
+                }
+        elif suffix == ".xlsx":
+            frame = pd.read_excel(path)
+        elif suffix in {".tsv", ".txt"}:
+            try:
+                frame = pd.read_csv(path, sep="\t")
+            except ValueError:
+                frame = pd.read_csv(path, sep=None, engine="python")
+        else:
+            frame = pd.read_csv(path)
+    except Exception as exc:
+        return {"error": f"读取失败: {exc}"}
+
+    total_rows = int(len(frame))
+    all_columns = [str(item) for item in frame.columns]
+    fdr_column = next(
+        (item for item in ("Adjusted P-value", "FDR", "padj", "fdr", "P-adjusted")
+         if item in frame.columns),
+        None,
+    )
+    if contains:
+        mask = frame.astype(str).apply(
+            lambda row: row.str.contains(contains, case=False, regex=False).any(), axis=1,
+        )
+        frame = frame.loc[mask]
+    if fdr_max is not None:
+        if not fdr_column:
+            return {"error": "结果表不含可识别的 FDR/Adjusted P-value 列，无法应用 fdr_max"}
+        numeric = pd.to_numeric(frame[fdr_column], errors="coerce")
+        frame = frame.loc[numeric < fdr_max]
+    if columns:
+        keep = [item for item in columns if item in all_columns]
+        if not keep:
+            return {"error": f"请求的列都不存在；可用列: {all_columns[:30]}"}
+        frame = frame[keep]
+    returned = min(int(len(frame)), limit)
+    rows = json.loads(frame.head(returned).to_json(orient="records", force_ascii=False))
+    outcome = {
+        "file_id": file_id,
+        "label": record.label,
+        "file_type": record.file_type,
+        "columns": [str(item) for item in frame.columns],
+        "total_rows": total_rows,
+        "filtered_rows": int(len(frame)),
+        "returned_rows": returned,
+        "truncated": int(len(frame)) > returned,
+        "rows": rows,
+    }
+    if fdr_column:
+        outcome["fdr_column"] = fdr_column
+    outcome["note"] = "仅返回筛选后的前若干行；完整文件可在结果页下载。"
+    return outcome
 
 
 # ============================================================

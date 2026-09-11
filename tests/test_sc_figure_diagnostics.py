@@ -183,6 +183,25 @@ def test_composition_by_group_returns_within_group_fractions():
     assert fractions.loc['B', 'T'] == 1.0
 
 
+def test_composition_by_group_keeps_other_in_full_denominator():
+    from modules.sc_figure_diagnostics import composition_by_group
+
+    obs = pd.DataFrame({
+        'donor': ['A'] * 10 + ['B'] * 10,
+        'celltype': (
+            ['T'] * 5 + ['B'] * 3 + ['Myeloid'] + ['Stromal']
+            + ['T'] * 2 + ['B'] * 5 + ['Myeloid'] * 2 + ['Stromal']
+        ),
+    })
+    counts, fractions = composition_by_group(obs, 'donor', 'celltype', max_labels=3)
+
+    assert set(counts.columns) == {'T', 'B', 'Other'}
+    assert counts.loc['A', 'Other'] == 2
+    assert counts.loc['B', 'Other'] == 3
+    assert fractions.sum(axis=1).eq(1.0).all()
+    assert fractions.loc['A', 'T'] == 0.5
+
+
 def test_composition_by_group_figure_reserves_legend_space_and_labels_proportions():
     """Long cell-type legends must not cover the title or stack percentages."""
     import matplotlib.pyplot as plt

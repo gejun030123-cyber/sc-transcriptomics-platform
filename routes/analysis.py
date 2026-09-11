@@ -11,6 +11,7 @@ from modules.schemas import (
     MODULE_DISPLAY_MAP, SC_MODULE_NAMES, BULK_MODULE_NAMES,
     STATUS_MAP, PARAM_SCHEMAS, parse_form_params, list_upload_files,
 )
+from modules.design_preflight import PREFLIGHT_MODULES
 
 analysis_bp = Blueprint('analysis', __name__)
 
@@ -86,7 +87,7 @@ def _sc_deg_enrichment_sources(project_id):
     options = []
     for task in AnalysisTask.get_by_project(project_id):
         if task.status != 'completed' or task.module_name not in {
-            'sc_cell_deg', 'sc_pseudobulk_deg',
+            'deg', 'sc_cell_deg', 'sc_pseudobulk_deg',
         }:
             continue
         try:
@@ -127,13 +128,19 @@ def _sc_deg_enrichment_sources(project_id):
             continue
         contract = str(summary.get('deg_source_task_contract') or '').strip()
         label_level = '样本级 pseudobulk' if source_level == 'pseudobulk' else '细胞级探索性'
+        grouping_mode = str(summary.get('analysis_grouping') or '').strip()
+        group_label = str(summary.get('analysis_group_label') or '').strip()
+        if not group_label:
+            group_label = '细胞类型' if grouping_mode == 'annotated_celltype' else 'cluster'
         options.append({
             'task_id': task.id,
             'files': valid_files,
             'source_level': source_level,
             'contract': contract,
             'clusters': sorted(clusters, key=lambda value: (value != 'All', value)),
-            'label': f'{label_level} · {contract or task.module_name} [{task.id}]',
+            'group_label': group_label,
+            'grouping_mode': grouping_mode,
+            'label': f'{label_level} · {group_label} 分组 · {contract or task.module_name} [{task.id}]',
             'output_adata_path': os.path.abspath(task.output_adata_path or ''),
         })
     return sorted(options, key=lambda item: item['task_id'], reverse=True)
@@ -168,7 +175,6 @@ def _path_has_module_requirements(path, requirements):
 
 BASE_GRN_EXTENSIONS = (
     '.parquet', '.pq', '.csv', '.tsv', '.txt', '.gz',
-    '.pickle', '.pkl', '.gpickle', '.oracle', '.celloracle',
 )
 
 
@@ -215,11 +221,19 @@ def build_input_options(module_name, completed_tasks, uploaded_files):
         'subcluster': ('clustering',),
         'qc_reassess': ('clustering',),
         'annotation': ('qc_reassess', 'clustering'),
+        'functional_state': ('annotation',),
+        'scenic': ('annotation',),
         'sc_timecourse': ('annotation', 'qc_reassess', 'clustering'),
         'deg': ('annotation', 'qc_reassess', 'clustering'),
-        'sc_cell_go': ('sc_pseudobulk_deg', 'sc_cell_deg', 'annotation', 'qc_reassess', 'clustering'),
+        # The default DE contract is condition testing within reviewed cell
+        # types.  Cluster outputs remain valid fallbacks for the explicit
+        # compatibility mode, but do not hide an available annotation output.
+        'sc_cell_deg': ('annotation', 'qc_reassess', 'clustering'),
+        'sc_pseudobulk_deg': ('annotation', 'qc_reassess', 'clustering'),
+        'sc_cell_go': ('sc_pseudobulk_deg', 'sc_cell_deg', 'deg', 'annotation', 'qc_reassess', 'clustering'),
         'trajectory': ('qc_reassess', 'clustering'),
         'proportion': ('annotation', 'qc_reassess', 'clustering'),
+        'neighborhood_da': ('annotation', 'qc_reassess', 'clustering'),
         'cell_communication': ('annotation',),
         'virtual_ko': ('annotation', 'qc_reassess', 'clustering'),
         'bulk_normalize': ('bulk_qc',),
@@ -485,7 +499,7 @@ def analyze(pid, module_name):
         # shown by the preflight card.  Only prerequisites that would make the
         # module fail or invalidate its declared statistical method are
         # blocked here; descriptive/exploratory warnings remain runnable.
-        if module_name in {'bulk_deg', 'sc_timecourse', 'batch_correct', 'bulk_normalize'}:
+        if module_name in PREFLIGHT_MODULES:
             try:
                 from modules.design_preflight import preflight_blockers
                 from modules.io_utils import read_expression_matrix

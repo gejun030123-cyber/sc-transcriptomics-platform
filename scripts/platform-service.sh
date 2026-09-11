@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Manage the web platform without interrupting the independent NAT123 tunnel.
+# Manage the web platform service.
 
 set -Eeuo pipefail
 
@@ -50,7 +50,6 @@ wait_until_ready() {
     for (( attempt = 1; attempt <= 60; attempt++ )); do
         if systemctl is-active --quiet "$SERVICE_NAME" && http_is_ready; then
             echo "平台已就绪：$HEALTH_URL"
-            echo "nat123 服务未重启，原外网地址继续使用。"
             return 0
         fi
         if systemctl is-failed --quiet "$SERVICE_NAME"; then
@@ -79,7 +78,7 @@ case "$ACTION" in
         ;;
     stop)
         run_privileged systemctl stop "$SERVICE_NAME"
-        echo "平台已停止；nat123 服务未停止。"
+        echo "平台已停止。"
         ;;
     status)
         show_status
@@ -89,7 +88,7 @@ case "$ACTION" in
         ;;
     help|-h|--help)
         echo "用法：$0 {restart|start|stop|status|logs}"
-        echo "默认动作：restart；所有动作只管理平台，不管理 nat123。"
+        echo "默认动作：restart。"
         ;;
     *)
         echo "未知动作：$ACTION" >&2

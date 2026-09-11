@@ -1,10 +1,17 @@
+import os
 import sqlite3
 from config import Config
 
 
 def get_conn():
     """创建新的 SQLite 连接，设置 PRAGMA。每次调用返回新连接。"""
-    conn = sqlite3.connect(Config.DB_PATH)
+    db_path = str(Config.DB_PATH)
+    # ``sqlite3.connect`` creates the file but not its parent directory.  Make
+    # a configured deployment path behave like the repository default, while
+    # preserving the in-memory database convention used by lightweight tests.
+    if db_path != ':memory:':
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")

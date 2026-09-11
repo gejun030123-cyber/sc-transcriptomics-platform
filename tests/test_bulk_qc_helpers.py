@@ -1,6 +1,7 @@
 # tests/test_bulk_qc_helpers.py
 import os
 import numpy as np
+import pandas as pd
 import pytest
 
 
@@ -176,9 +177,366 @@ def test_detect_outliers_with_outlier():
     assert 's20' in outliers
 
 
+def test_detect_outliers_uses_later_principal_components():
+    """A PC4-only anomaly must not disappear behind a PC1/PC2-only check."""
+    from modules.bulk_qc import _detect_outliers_mahal
+
+    rng = np.random.default_rng(7)
+    coords = rng.normal(size=(24, 5))
+    coords[-1, 3] = 30.0
+    samples = [f's{i}' for i in range(len(coords))]
+
+    outliers, details = _detect_outliers_mahal(coords, samples, return_details=True)
+
+    assert details['n_components'] >= 4
+    assert 's23' in outliers
+
+
 def test_detect_outliers_too_few():
     """样本数 < 4 → 返回空"""
     from modules.bulk_qc import _detect_outliers_mahal
     coords = np.array([[0, 0], [1, 1], [2, 2]])
     outliers = _detect_outliers_mahal(coords, ['a', 'b', 'c'])
     assert outliers == []
+
+
+def test_within_replicate_outlier_diagnostic_does_not_flag_coherent_factor_stratum():
+    """A B/En-wide shift must not turn every B replicate into a global-PCA outlier."""
+    from modules.bulk_qc import _detect_within_replicate_outliers
+
+    rng = np.random.default_rng(19)
+    groups = ['Ctr_B'] * 3 + ['Ctr_En'] * 3 + ['PEA_B'] * 3 + ['PEA_En'] * 3
+    samples = [f'S{i}' for i in range(len(groups))]
+    centers = {'Ctr_B': 10.0, 'Ctr_En': -10.0, 'PEA_B': 11.0, 'PEA_En': -9.0}
+    coords = np.vstack([rng.normal(loc=centers[group], scale=0.08, size=4) for group in groups])
+    corr = np.full((len(groups), len(groups)), 0.35)
+    np.fill_diagonal(corr, 1.0)
+    for i, group_i in enumerate(groups):
+        for j, group_j in enumerate(groups):
+            if group_i == group_j and i != j:
+                corr[i, j] = 0.98
+
+    table, details = _detect_within_replicate_outliers(coords, corr, samples, groups)
+
+    assert not table['outlier_flag'].any()
+    assert details['method'] == 'within_replicate_group_agreement'
+
+
+def test_within_replicate_outlier_diagnostic_flags_one_aberrant_sample_not_its_group():
+    from modules.bulk_qc import _detect_within_replicate_outliers
+
+    rng = np.random.default_rng(23)
+    groups = ['Ctr_B'] * 3 + ['Ctr_En'] * 3 + ['PEA_B'] * 3 + ['PEA_En'] * 3
+    samples = [f'S{i}' for i in range(len(groups))]
+    coords = rng.normal(scale=0.12, size=(len(groups), 5))
+    # One Ctr_B sample is far from its two own replicates; the other strata
+    # retain their own coherent local centers.
+    for group_index, group in enumerate(('Ctr_B', 'Ctr_En', 'PEA_B', 'PEA_En')):
+        indices = [i for i, value in enumerate(groups) if value == group]
+        coords[indices] += group_index * 4.0
+    coords[2] += 12.0
+    corr = np.full((len(groups), len(groups)), 0.4)
+    np.fill_diagonal(corr, 1.0)
+    for i, group_i in enumerate(groups):
+        for j, group_j in enumerate(groups):
+            if group_i == group_j and i != j:
+                corr[i, j] = 0.985
+    corr[2, 0] = corr[0, 2] = 0.35
+    corr[2, 1] = corr[1, 2] = 0.35
+
+    table, _ = _detect_within_replicate_outliers(coords, corr, samples, groups)
+
+    flagged = table.loc[table['outlier_flag'], 'sample_id'].tolist()
+    assert flagged == ['S2']
+
+
+def test_log2_normalization_omits_library_size_comparison(tmp_path):
+    """A pure log2 transform must not export an unchanged library-size panel."""
+    from modules.bulk_normalize import BulkNormalizeAnalysis
+
+    expression = pd.DataFrame(
+        {
+            'Ctr_1': [118.5, 202.2, 3.1, 0.0, 11.4],
+            'Ctr_2': [121.8, 190.4, 2.9, 0.0, 10.8],
+            'Treat_1': [225.7, 111.3, 8.8, 1.0, 19.2],
+            'Treat_2': [219.2, 108.7, 7.9, 1.2, 18.5],
+        },
+        index=['G1', 'G2', 'G3', 'G4', 'G5'],
+    )
+    input_path = tmp_path / 'continuous_expression.tsv'
+    expression.to_csv(input_path, sep='\t', index_label='gene')
+    module = BulkNormalizeAnalysis(
+        str(tmp_path), {
+            'method': 'log2', 'input_measurement': 'continuous_expression',
+            'min_expr_samples': 0,
+        }, lambda *_: None,
+    )
+
+    result = module.run(str(input_path))
+
+    stems = {os.path.basename(item['file_path']) for item in result['result_files']}
+    assert not any(stem.startswith('bulk_norm_libsize') for stem in stems)
+    assert any(stem.startswith('bulk_norm_boxplot_compare') for stem in stems)
+    assert result['summary']['n_genes_after_filter'] == 5
+    assert result['summary']['max_zero_pct_filter_enabled'] is False
+    assert result['summary']['max_zero_pct_semantics'].startswith('0 disables')
+
+
+def test_bulk_normalize_requires_explicit_scale_before_log2_for_ambiguous_values(tmp_path):
+    """Non-integer values alone cannot prove that another log is safe."""
+    from modules.bulk_qc import BulkQCAnalysis
+    from modules.bulk_normalize import BulkNormalizeAnalysis
+
+    expression = pd.DataFrame(
+        [[2.2, 2.4, 3.1, 3.3], [4.8, 5.0, 4.9, 5.1]],
+        index=['G1', 'G2'], columns=['Ctr_1', 'Ctr_2', 'Treat_1', 'Treat_2'],
+    )
+    input_path = tmp_path / 'unknown_expression.tsv'
+    expression.to_csv(input_path, sep='\t', index_label='gene')
+
+    with pytest.raises(ValueError, match='无法仅靠数值区分'):
+        BulkNormalizeAnalysis(
+            str(tmp_path), {'method': 'log2', 'min_expr_samples': 0}, lambda *_: None,
+        ).run(str(input_path))
+    with pytest.raises(ValueError, match='无法仅靠数值区分'):
+        BulkQCAnalysis(
+            str(tmp_path), {'min_sample_expr': 0}, lambda *_: None,
+        ).run(str(input_path))
+
+
+def test_bulk_normalize_applies_nonzero_zero_filter_even_when_expression_filter_is_off(tmp_path):
+    """A positive zero threshold is active independently of min_expr_samples."""
+    from modules.bulk_normalize import BulkNormalizeAnalysis
+
+    expression = pd.DataFrame(
+        {
+            'Ctr_1': [5.1, 3.2, 0.0], 'Ctr_2': [5.2, 3.4, 0.0],
+            'Treat_1': [7.1, 2.8, 1.0], 'Treat_2': [7.2, 2.9, 1.1],
+        }, index=['G1', 'G2', 'Zero_in_half'],
+    )
+    input_path = tmp_path / 'linear_values.tsv'
+    expression.to_csv(input_path, sep='\t', index_label='gene')
+
+    result = BulkNormalizeAnalysis(
+        str(tmp_path), {
+            'method': 'log2', 'input_measurement': 'continuous_expression',
+            'min_expr_samples': 0, 'max_zero_pct': 25,
+        }, lambda *_: None,
+    ).run(str(input_path))
+
+    assert result['summary']['n_genes_after_filter'] == 2
+    assert result['summary']['max_zero_pct_filter_enabled'] is True
+
+
+def test_bulk_normalize_preserves_explicit_log_expression_without_double_log(tmp_path):
+    """An explicitly declared log matrix must round-trip through ``none``."""
+    import anndata
+    from modules.bulk_normalize import BulkNormalizeAnalysis
+
+    original = np.array([
+        [2.0, 3.0, 4.0, 5.0],
+        [2.2, 3.2, 4.2, 5.2],
+        [3.0, 2.0, 5.0, 4.0],
+        [3.2, 2.2, 5.2, 4.2],
+    ])
+    input_path = tmp_path / 'already_log.h5ad'
+    anndata.AnnData(
+        original,
+        obs=pd.DataFrame(index=['Ctr_1', 'Ctr_2', 'Treat_1', 'Treat_2']),
+        var=pd.DataFrame(index=['G1', 'G2', 'G3', 'G4']),
+    ).write_h5ad(input_path)
+
+    result = BulkNormalizeAnalysis(
+        str(tmp_path), {
+            'method': 'none', 'input_measurement': 'log_transformed',
+            'min_expr_samples': 0,
+        }, lambda *_: None,
+    ).run(str(input_path))
+
+    output = anndata.read_h5ad(result['output_adata'])
+    np.testing.assert_allclose(output.X, original)
+    assert result['summary']['input_measurement'] == 'log_transformed'
+    assert result['summary']['method'] == 'none'
+
+
+def test_bulk_qc_normalize_and_pca_share_the_same_log_pca_convention(tmp_path):
+    """The QC and normalized-output PCA spectra must match for one matrix."""
+    from modules.bulk_qc import BulkQCAnalysis
+    from modules.bulk_normalize import BulkNormalizeAnalysis
+    from modules.bulk_pca import BulkPCAAnalysis
+
+    rng = np.random.default_rng(71)
+    base = rng.gamma(shape=2.5, scale=5.0, size=(40, 6))
+    base[:, 3:] *= np.linspace(1.4, 3.0, 40)[:, None]
+    expression = pd.DataFrame(
+        base,
+        index=[f'G{i}' for i in range(base.shape[0])],
+        columns=['Ctr_1', 'Ctr_2', 'Ctr_3', 'Treat_1', 'Treat_2', 'Treat_3'],
+    )
+    input_path = tmp_path / 'linear_expression.tsv'
+    expression.to_csv(input_path, sep='\t', index_label='gene')
+
+    qc = BulkQCAnalysis(
+        str(tmp_path), {
+            'input_measurement': 'continuous_expression', 'min_sample_expr': 0,
+            'detect_outliers': False,
+        }, lambda *_: None,
+    ).run(str(input_path))
+    normalized = BulkNormalizeAnalysis(
+        str(tmp_path), {
+            'method': 'log2', 'min_expr_samples': 0,
+        }, lambda *_: None,
+    ).run(qc['output_adata'])
+    pca = BulkPCAAnalysis(str(tmp_path), {'n_comps': 4}, lambda *_: None).run(
+        normalized['output_adata']
+    )
+
+    norm_pc1 = normalized['summary']['pca_compare_variance_ratio']['output'][0] * 100
+    assert qc['summary']['pca_preprocessing']['feature_scaling'] == 'none'
+    assert normalized['summary']['pca_preprocessing']['feature_scaling'] == 'none'
+    assert pca['summary']['pca_preprocessing']['feature_scaling'] == 'none'
+    assert qc['summary']['pc1_variance_pct'] == pytest.approx(norm_pc1, abs=0.01)
+    assert pca['summary']['pc1_variance_pct'] == pytest.approx(norm_pc1, abs=0.01)
+
+
+def test_bulk_pca_uses_auto_factor_marker_and_exports_scores(tmp_path):
+    from modules.bulk_pca import BulkPCAAnalysis
+
+    sample_names = [
+        'Ctr_B_1', 'Ctr_B_2', 'Ctr_En_1', 'Ctr_En_2',
+        'PEA_B_1', 'PEA_B_2', 'PEA_En_1', 'PEA_En_2',
+    ]
+    rng = np.random.default_rng(13)
+    expression = pd.DataFrame(
+        rng.poisson(lam=40, size=(12, len(sample_names))),
+        index=[f'G{i}' for i in range(12)], columns=sample_names,
+    )
+    input_path = tmp_path / 'multifactor_counts.tsv'
+    expression.to_csv(input_path, sep='\t', index_label='gene')
+    module = BulkPCAAnalysis(
+        str(tmp_path),
+        {'n_comps': 5, 'color_by': '_auto_group_', 'batch_by': '第2因素：B, En'},
+        lambda *_: None,
+    )
+
+    result = module.run(str(input_path))
+
+    summary = result['summary']
+    assert summary['color_by_used'] == '_auto_group'
+    assert summary['batch_by_used'] == '_auto_factor2'
+    scores_path = next(
+        item['file_path'] for item in result['result_files']
+        if item['label'] == 'PCA sample scores and metadata'
+    )
+    scores = pd.read_csv(scores_path)
+    assert {'sample_id', 'PC1', 'PC3', 'color_group', 'marker_group', 'factor1', 'factor2'} <= set(scores.columns)
+    assert set(scores['marker_group']) == {'B', 'En'}
+
+
+def test_continuous_bulk_qc_uses_total_expression_terms(tmp_path):
+    from modules.bulk_qc import BulkQCAnalysis
+
+    expression = pd.DataFrame(
+        {
+            'Ctr_1': [118.5, 202.2, 3.1, 0.0, 11.4],
+            'Ctr_2': [121.8, 190.4, 2.9, 0.0, 10.8],
+            'Treat_1': [225.7, 111.3, 8.8, 1.0, 19.2],
+            'Treat_2': [219.2, 108.7, 7.9, 1.2, 18.5],
+        },
+        index=['G1', 'G2', 'G3', 'G4', 'G5'],
+    )
+    input_path = tmp_path / 'continuous_expression.tsv'
+    expression.to_csv(input_path, sep='\t', index_label='gene')
+    module = BulkQCAnalysis(
+        str(tmp_path), {
+            'input_measurement': 'continuous_expression',
+            'min_sample_expr': 0, 'detect_outliers': False,
+        }, lambda *_: None,
+    )
+
+    result = module.run(str(input_path))
+
+    assert result['summary']['input_measurement'] == 'continuous_expression'
+    assert 'median_total_expression' in result['summary']
+    assert 'median_library_size' not in result['summary']
+    metrics_path = next(item['file_path'] for item in result['result_files'] if item['label'] == '样本 QC 指标')
+    assert 'total_expression' in pd.read_csv(metrics_path).columns
+    assert result['summary']['qc_transform_for_correlation_and_pca'].startswith('log2(')
+
+
+def test_log_transformed_bulk_qc_does_not_apply_a_second_log(tmp_path):
+    import anndata
+    from modules.bulk_qc import BulkQCAnalysis
+
+    adata = anndata.AnnData(
+        np.log2(np.array([
+            [101.0, 99.0, 3.0, 0.0, 9.0],
+            [100.0, 98.0, 4.0, 0.0, 8.0],
+            [210.0, 105.0, 8.0, 1.0, 18.0],
+            [205.0, 102.0, 9.0, 1.0, 17.0],
+        ]) + 1.0),
+        obs=pd.DataFrame(index=['Ctr_1', 'Ctr_2', 'Treat_1', 'Treat_2']),
+        var=pd.DataFrame(index=['G1', 'G2', 'G3', 'G4', 'G5']),
+    )
+    adata.uns['normalization'] = {'is_log_transformed': True}
+    input_path = tmp_path / 'log_expression.h5ad'
+    adata.write_h5ad(input_path)
+
+    result = BulkQCAnalysis(
+        str(tmp_path), {'min_sample_expr': 0, 'detect_outliers': False}, lambda *_: None,
+    ).run(str(input_path))
+
+    assert result['summary']['input_measurement'] == 'log_transformed'
+    assert result['summary']['qc_transform_for_correlation_and_pca'] == (
+        'input log-transformed expression (no second log)'
+    )
+    assert 'median_total_transformed_expression' in result['summary']
+
+
+def test_bulk_qc_uses_combined_replicate_groups_and_factor_aware_correlation_summary(tmp_path):
+    import anndata
+    from modules.bulk_qc import BulkQCAnalysis
+
+    treatments = ('Ctr', 'NH4Cl', 'PEA', 'TMAO')
+    sample_names = [
+        f'{treatment}_{factor}_{replicate}'
+        for treatment in treatments for factor in ('B', 'En') for replicate in range(1, 4)
+    ]
+    rng = np.random.default_rng(41)
+    expression = np.empty((30, len(sample_names)), dtype=float)
+    # Make factor 2 dominate globally while retaining tight repeats inside
+    # each treatment x factor group: this must not become 12 false outliers.
+    for treatment in treatments:
+        for factor in ('B', 'En'):
+            base = rng.uniform(10.0, 30.0, size=30)
+            if factor == 'B':
+                base[:12] += 90.0
+            indices = [index for index, name in enumerate(sample_names)
+                       if name.startswith(f'{treatment}_{factor}_')]
+            expression[:, indices] = base[:, None] + rng.normal(scale=0.08, size=(30, len(indices)))
+    frame = pd.DataFrame(expression, index=[f'G{i}' for i in range(30)], columns=sample_names)
+    input_path = tmp_path / 'multifactor_continuous.tsv'
+    frame.to_csv(input_path, sep='\t', index_label='gene')
+
+    result = BulkQCAnalysis(
+        str(tmp_path), {
+            'input_measurement': 'continuous_expression',
+            'min_sample_expr': 0, 'detect_outliers': True,
+        }, lambda *_: None,
+    ).run(str(input_path))
+
+    assert result['summary']['outlier_samples'] == []
+    assert result['summary']['outlier_detection']['replicate_group_column'] == '_auto_group'
+    assert {'factor2_within:B', 'factor2_within:En', 'factor2_between:B_vs_En'} <= set(
+        result['summary']['correlation_medians']
+    )
+    outlier_path = next(
+        item['file_path'] for item in result['result_files']
+        if item['label'] == '重复组内离群诊断（相关性、PCA 与 QC 指标）'
+    )
+    outlier_table = pd.read_csv(outlier_path)
+    assert set(outlier_table['replicate_group']) == {
+        f'{treatment}_{factor}' for treatment in treatments for factor in ('B', 'En')
+    }
+    output = anndata.read_h5ad(result['output_adata'])
+    assert {'_auto_group', '_auto_factor1', '_auto_factor2'} <= set(output.obs.columns)

@@ -218,6 +218,25 @@ def test_manual_map_csv_is_parsed_and_applied(tmp_path):
     assert second['summary']['manual_map_csv_applied']['n_clusters'] == 1
 
 
+def test_manual_map_path_must_stay_inside_project_and_not_be_a_symlink(tmp_path):
+    _syspath()
+    from modules.annotation import resolve_annotation_manual_map_path
+
+    project_csv = tmp_path / 'review.csv'
+    project_csv.write_text('cluster,manual_label\n0,Type A\n', encoding='utf-8')
+    assert resolve_annotation_manual_map_path(str(tmp_path), str(project_csv)) == str(project_csv)
+
+    outside = tmp_path.parent / 'outside_review.csv'
+    outside.write_text('cluster,manual_label\n0,Type A\n', encoding='utf-8')
+    with pytest.raises(ValueError, match='当前项目目录内'):
+        resolve_annotation_manual_map_path(str(tmp_path), str(outside))
+
+    linked = tmp_path / 'linked_review.csv'
+    linked.symlink_to(project_csv)
+    with pytest.raises(ValueError, match='符号链接'):
+        resolve_annotation_manual_map_path(str(tmp_path), str(linked))
+
+
 def test_organoid_uses_derived_anchor_signature():
     _syspath()
     ad = pytest.importorskip('anndata')

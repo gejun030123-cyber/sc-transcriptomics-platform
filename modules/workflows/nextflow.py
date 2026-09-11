@@ -44,6 +44,9 @@ class LaunchSpec:
     params_file_path: str = ""
     reference_bundle_id: str = ""
     capture_bed_id: str = ""
+    stage_key: str = ""
+    analysis_workflow_key: str = ""
+    pipeline_options: Dict[str, Any] = field(default_factory=dict)
     parameters: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -65,6 +68,9 @@ class LaunchSpec:
             "params_file_path": self.params_file_path,
             "reference_bundle_id": self.reference_bundle_id,
             "capture_bed_id": self.capture_bed_id,
+            "stage_key": self.stage_key,
+            "analysis_workflow_key": self.analysis_workflow_key,
+            "pipeline_options": dict(self.pipeline_options),
             "parameters": dict(self.parameters),
         }
 
@@ -74,6 +80,34 @@ class LaunchSpec:
 # queue/worker service.
 _PROCESS_HANDLES: Dict[str, subprocess.Popen] = {}
 _PROCESS_LOG_HANDLES: Dict[str, tuple[Any, Any]] = {}
+
+
+def _summarize_failed_nextflow_run(*, stdout_path: str, stderr_path: str,
+                                  exit_code: int) -> str:
+    """Return a short, non-sensitive diagnosis for the run table.
+
+    The full logs remain in the protected run directory/API.  This summary is
+    intentionally signature-based so it helps a lab user decide what to fix
+    without persisting sample names or absolute input paths in the database.
+    """
+    tail = b""
+    for path in (stderr_path, stdout_path):
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, handle.tell() - 512 * 1024))
+                tail += handle.read().lower()
+        except OSError:
+            continue
+    if b"igzip: unexpected eof" in tail or b"unexpected end of file" in tail:
+        return "FASTQ 压缩文件可能被截断或损坏（unexpected EOF）；请重新下载并完整性预检。"
+    if b"no space left on device" in tail:
+        return "输出磁盘空间不足；释放空间后可用 -resume 恢复。"
+    if b"permission denied" in tail:
+        return "运行目录、参考资源或容器运行时权限不足；请联系管理员检查权限。"
+    if b"cannot connect to the docker daemon" in tail:
+        return "Docker daemon 不可用；请联系管理员恢复 Docker 后再运行。"
+    return f"Nextflow 以退出码 {exit_code} 结束；请查看受控运行日志后修正输入或配置。"
 
 
 class NextflowExecutor:
@@ -109,18 +143,31 @@ class NextflowExecutor:
                 stdout_path: str = "", stderr_path: str = "",
                 resume: bool = False, intervals_path: str = "",
                 params_file_path: str = "", input_type: str = "",
-                reference_bundle_id: str = "", capture_bed_id: str = "") -> LaunchSpec:
+                reference_bundle_id: str = "", capture_bed_id: str = "",
+                pipeline_options: Optional[Dict[str, Any]] = None,
+                stage_key: str = "", analysis_workflow_key: str = "") -> LaunchSpec:
         selected_profile = profile or self.profile
         input_path = samplesheet_path or manifest_id
         normalized_input_type = str(input_type or "").strip().lower()
-        step = self._WORKFLOW_STEPS.get(workflow.key)
-        if workflow.key in {"wes_germline", "wes_somatic"} and normalized_input_type in {"bam", "cram"}:
-            step = "variant_calling"
-        tools = self._WORKFLOW_TOOLS.get(workflow.key)
-        if not step or not tools:
-            raise WorkflowNotConfiguredError(f"WES workflow 尚未定义 Sarek step/tools: {workflow.key}")
-        if not Config.WES_NEXTFLOW_GENOME:
-            raise WorkflowNotConfiguredError("尚未配置经验证的 WES_NEXTFLOW_GENOME")
+        stage = None
+        normalized_stage_key = str(stage_key or "").strip()
+        resolved_analysis_key = str(analysis_workflow_key or workflow.key).strip()
+        if normalized_stage_key:
+            from .stages import get_stage
+            stage = get_stage(normalized_stage_key, resolved_analysis_key)
+            if not stage or stage["run_workflow_key"] != workflow.key:
+                raise WorkflowNotConfiguredError(
+                    f"WES 分步运行与 workflow 不匹配: {normalized_stage_key}"
+                )
+            step = stage["sarek_step"]
+            tools = stage["tools"]
+        else:
+            step = self._WORKFLOW_STEPS.get(workflow.key)
+            if workflow.key in {"wes_germline", "wes_somatic"} and normalized_input_type in {"bam", "cram"}:
+                step = "variant_calling"
+            tools = self._WORKFLOW_TOOLS.get(workflow.key)
+        if not step:
+            raise WorkflowNotConfiguredError(f"WES workflow 尚未定义 Sarek step: {workflow.key}")
         if workflow.key in {"wes_germline", "wes_somatic"} and not intervals_path:
             raise WorkflowNotConfiguredError("WES calling run 必须提供 capture BED")
         resolved_params_path = os.path.abspath(
@@ -132,22 +179,49 @@ class NextflowExecutor:
         parameters: Dict[str, Any] = {
             "input": os.path.abspath(input_path),
             "outdir": os.path.abspath(results_dir),
-            "genome": Config.WES_NEXTFLOW_GENOME,
             "wes": True,
             "step": step,
-            "tools": tools,
         }
+        # ``tools=null`` is Sarek's documented preprocessing-only mode. Keep
+        # the value in parameters.json rather than inventing a shell argument.
+        if tools is not None:
+            parameters["tools"] = tools
+        from .guided import normalize_guided_options
+        # A registered manifest already contains fixed workflow-contract
+        # values.  They are accepted only when they equal the server default;
+        # a browser preflight never accepts them as a user option.
+        normalized_options = normalize_guided_options(
+            pipeline_options,
+            resolved_analysis_key if stage else workflow.key,
+            allow_fixed=True,
+        )
+        parameters.update(normalized_options)
         if intervals_path:
             parameters["intervals"] = os.path.abspath(intervals_path)
-        if Config.WES_NEXTFLOW_IGENOMES_BASE:
-            parameters["igenomes_base"] = Config.validate_wes_reference_path(
-                Config.WES_NEXTFLOW_IGENOMES_BASE, require_directory=True
-            )
+        bundle_parameters = {}
+        if reference_bundle_id:
+            from .references import reference_bundle_sarek_parameters
+            bundle = reference_bundle_sarek_parameters(reference_bundle_id, workflow.key)
+            if bundle["configured"] and bundle["errors"]:
+                raise WorkflowNotConfiguredError(
+                    "reference bundle Sarek 参数无效: " + "; ".join(bundle["errors"])
+                )
+            bundle_parameters = bundle["parameters"]
+        if bundle_parameters:
+            parameters.update(bundle_parameters)
+        else:
+            if not Config.WES_NEXTFLOW_GENOME:
+                raise WorkflowNotConfiguredError("尚未配置经验证的 WES_NEXTFLOW_GENOME")
+            parameters["genome"] = Config.WES_NEXTFLOW_GENOME
+            if Config.WES_NEXTFLOW_IGENOMES_BASE:
+                parameters["igenomes_base"] = Config.validate_wes_reference_path(
+                    Config.WES_NEXTFLOW_IGENOMES_BASE, require_directory=True
+                )
         if workflow.key == "wes_annotate_only" and Config.WES_NEXTFLOW_VEP_CACHE:
             parameters["vep_cache"] = Config.validate_wes_reference_path(
                 Config.WES_NEXTFLOW_VEP_CACHE, require_directory=True
             )
-        if workflow.key == "wes_somatic":
+        if workflow.key == "wes_somatic" and not bundle_parameters:
             if Config.WES_NEXTFLOW_PON:
                 parameters["pon"] = Config.validate_wes_reference_path(Config.WES_NEXTFLOW_PON)
             if Config.WES_NEXTFLOW_GERMLINE_RESOURCE:
@@ -178,6 +252,9 @@ class NextflowExecutor:
             params_file_path=resolved_params_path,
             reference_bundle_id=str(reference_bundle_id or "").strip(),
             capture_bed_id=str(capture_bed_id or "").strip(),
+            stage_key=normalized_stage_key,
+            analysis_workflow_key=resolved_analysis_key,
+            pipeline_options=normalized_options,
             parameters=parameters,
         )
 
@@ -212,7 +289,11 @@ class NextflowExecutor:
                 raise WorkflowNotConfiguredError("尚未配置本地 WES_NEXTFLOW_IGENOMES_BASE")
             if spec.workflow.key == "wes_annotate_only" and not Config.WES_NEXTFLOW_VEP_CACHE:
                 raise WorkflowNotConfiguredError("注释 workflow 尚未配置本地 WES_NEXTFLOW_VEP_CACHE")
-            if spec.workflow.key == "wes_somatic":
+            requires_somatic_resources = (
+                spec.analysis_workflow_key == "wes_somatic" and
+                (not spec.stage_key or spec.stage_key == "variant_calling")
+            )
+            if requires_somatic_resources:
                 if not Config.WES_NEXTFLOW_PON:
                     raise WorkflowNotConfiguredError("somatic workflow 尚未配置本地 WES_NEXTFLOW_PON")
                 if not Config.WES_NEXTFLOW_GERMLINE_RESOURCE:
@@ -330,9 +411,17 @@ class NextflowExecutor:
             target = "cancelled" if current and current.get("status") == "cancel_requested" else (
                 "completed" if code == 0 else "failed"
             )
+            error_text = None
+            if target == "failed":
+                error_text = _summarize_failed_nextflow_run(
+                    stdout_path=current.get("stdout_path", "") if current else "",
+                    stderr_path=current.get("stderr_path", "") if current else "",
+                    exit_code=code,
+                )
             completed_run = transition_workflow_run(
                 run_id, project_id, target,
                 expected_statuses=("running", "cancel_requested"), exit_code=code,
+                error_text=error_text,
                 finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             )
             if target == "completed" and collect_artifacts:

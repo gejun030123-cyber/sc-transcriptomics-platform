@@ -16,8 +16,14 @@ class TestModuleMetadata:
 
     def test_sc_module_count(self):
         """主单细胞流程不再展示兼容用的批量 CSV 导出。"""
-        assert len(SC_MODULE_LIST) == 18
+        assert len(SC_MODULE_LIST) == 21
         assert all(item['name'] != 'sc_csv_export' for item in SC_MODULE_LIST)
+
+    def test_ibd_downstream_modules_are_visible_in_sc_page_metadata(self):
+        """单细胞分析页面由此列表动态渲染，必须包含新增下游入口。"""
+        names = {item['name'] for item in SC_MODULE_LIST}
+        assert {'functional_state', 'scenic', 'sc_pseudobulk_deg', 'sc_cell_go',
+                'proportion', 'trajectory', 'neighborhood_da'} <= names
 
     def test_bulk_module_count(self):
         """Bulk 模块有 8 个。"""
@@ -53,7 +59,10 @@ class TestModuleMetadata:
 
     def test_param_types_valid(self):
         """参数类型都是合法值。"""
-        valid_types = {'number', 'select', 'checkbox', 'text', 'textarea', 'dynamic_select', 'dynamic_multiselect', 'multiselect'}
+        valid_types = {
+            'number', 'select', 'checkbox', 'text', 'textarea', 'dynamic_select',
+            'dynamic_multiselect', 'static_multiselect', 'multiselect',
+        }
         for module_name, params in PARAM_SCHEMAS.items():
             for p in params:
                 assert p['type'] in valid_types, f"{module_name}.{p['key']}: 无效类型 {p['type']}"

@@ -220,3 +220,142 @@ class TestSignatureScoring:
 
         for cs1, cs2 in zip(result1['cluster_scores'], result2['cluster_scores']):
             assert cs1['total_score'] == cs2['total_score']
+
+
+class TestSignatureScoringExpressionScale:
+    """评分必须与表达量尺度无关，并拒绝无法比较的矩阵。"""
+
+    @staticmethod
+    def _write(adata, path):
+        import anndata
+        adata.write_h5ad(path)
+
+    def _two_cluster_adata(self, counts):
+        import anndata
+        import pandas as pd
+
+        adata = anndata.AnnData(X=counts.astype('float32'))
+        adata.var_names = ['P2RY12', 'TMEM119', 'S100A8', 'ACTB']
+        adata.obs['leiden'] = pd.Categorical(['0'] * 20 + ['1'] * 20)
+        return adata
+
+    def test_raw_counts_are_normalized_before_scoring(self, tmp_path):
+        """原始 counts 输入不再因为量纲而把 total_score 顶到饱和值."""
+        import numpy as np
+        from modules.evaluators.sc_cluster import score_cluster_signature
+
+        counts = np.full((40, 4), 1.0)
+        # cluster 0 高表达 microglia marker，cluster 1 高表达 S100A8
+        counts[0:20, 0] = 400.0
+        counts[0:20, 1] = 300.0
+        counts[20:40, 2] = 500.0
+        adata = self._two_cluster_adata(counts)
+        path = tmp_path / 'counts.h5ad'
+        self._write(adata, path)
+
+        result = score_cluster_signature(
+            adata_path=str(path),
+            cluster_key='leiden',
+            positive_markers=['P2RY12', 'TMEM119'],
+            negative_markers=['S100A8'],
+        )
+
+        assert 'error' not in result
+        assert result['expression_scale'] == 'log1p_normalized_from_X_counts'
+        best = result['cluster_scores'][0]
+        assert best['cluster'] == '0'
+        assert best['total_score'] < 1.0  # 旧的 0.35*原始均值 会直接饱和到 1.0
+        assert best['positive_evidence'] == pytest.approx(1.0)
+
+    def test_scoring_is_invariant_to_input_expression_scale(self, tmp_path):
+        """同一份数据的 counts 与 log1p 输入必须给出同一结论与同一分数."""
+        import numpy as np
+        import scanpy as sc
+        from modules.evaluators.sc_cluster import score_cluster_signature
+
+        counts = np.full((40, 4), 1.0)
+        counts[0:20, 0] = 400.0
+        counts[0:20, 1] = 300.0
+        counts[20:40, 2] = 500.0
+        counts_path = tmp_path / 'counts.h5ad'
+        self._write(self._two_cluster_adata(counts), counts_path)
+
+        normalized = self._two_cluster_adata(counts)
+        sc.pp.normalize_total(normalized, target_sum=1e4)
+        sc.pp.log1p(normalized)
+        normalized_path = tmp_path / 'normalized.h5ad'
+        self._write(normalized, normalized_path)
+
+        scores = {}
+        for label, path in (('counts', counts_path), ('log1p', normalized_path)):
+            result = score_cluster_signature(
+                adata_path=str(path),
+                cluster_key='leiden',
+                positive_markers=['P2RY12', 'TMEM119'],
+                negative_markers=['S100A8'],
+            )
+            assert 'error' not in result
+            scores[label] = result['cluster_scores'][0]
+
+        assert scores['counts']['cluster'] == scores['log1p']['cluster'] == '0'
+        assert scores['counts']['total_score'] == pytest.approx(
+            scores['log1p']['total_score'], abs=0.05,
+        )
+
+    def test_scaled_matrix_is_rejected_instead_of_scored(self, tmp_path):
+        """已 scale（含负值）且无 counts 层时明确报错，而不是给出虚假高分."""
+        import numpy as np
+        from modules.evaluators.sc_cluster import score_cell_type_signature
+
+        rng = np.random.default_rng(0)
+        scaled = rng.normal(size=(40, 4)).astype('float32')
+        adata = self._two_cluster_adata(scaled)
+        path = tmp_path / 'scaled.h5ad'
+        self._write(adata, path)
+
+        result = score_cell_type_signature(
+            adata_path=str(path),
+            cluster_key='leiden',
+            target_cell_type='microglia',
+        )
+
+        assert 'error' in result
+        assert result['confidence'] == 'none'
+        assert result['cluster_scores'] == []
+
+    def test_batch_and_size_do_not_change_marker_confidence(self, tmp_path):
+        """簇大小/单批次只作为 qc_flags，不再进入 marker 得分."""
+        import numpy as np
+        import pandas as pd
+        from modules.evaluators.sc_cluster import score_cluster_signature
+
+        counts = np.full((40, 4), 1.0)
+        counts[0:20, 0] = 400.0
+        counts[0:20, 1] = 300.0
+        adata = self._two_cluster_adata(counts)
+        adata.obs['batch'] = pd.Categorical(['b1'] * 20 + ['b2'] * 20)
+        path = tmp_path / 'batch.h5ad'
+        self._write(adata, path)
+
+        result = score_cluster_signature(
+            adata_path=str(path),
+            cluster_key='leiden',
+            positive_markers=['P2RY12', 'TMEM119'],
+            negative_markers=[],
+        )
+
+        for score in result['cluster_scores']:
+            assert 0.0 <= score['total_score'] <= 1.0
+            assert isinstance(score['qc_flags'], list)
+        # 每个簇都只来自一个批次：罚分只出现在 qc_flags / batch_penalty
+        assert result['cluster_scores'][0]['batch_penalty'] == pytest.approx(0.5)
+        assert 'single_batch_only' in result['cluster_scores'][0]['qc_flags']
+        marker_only = (
+            0.40 * result['cluster_scores'][0]['positive_evidence']
+            + 0.25 * result['cluster_scores'][0]['detection_fraction']
+            + 0.35 * result['cluster_scores'][0]['specificity_score']
+            - 0.30 * result['cluster_scores'][0]['negative_ratio']
+        )
+        assert result['cluster_scores'][0]['total_score'] == pytest.approx(
+            max(0.0, min(1.0, marker_only)), abs=5e-4,
+        )

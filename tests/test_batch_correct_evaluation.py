@@ -1,6 +1,7 @@
 """Focused tests for bounded before/after batch-integration evaluation."""
 
 from types import SimpleNamespace
+import sys
 
 import numpy as np
 import pandas as pd
@@ -121,3 +122,38 @@ def test_pre_post_comparison_writes_downloadable_delta_table(tmp_path):
         'abs_asw_batch', 'mean_neighbor_batch_entropy',
         'mean_neighbor_same_batch_fraction',
     }
+
+
+def test_scvi_records_the_actual_training_layer(monkeypatch):
+    """The scVI completion path must not reference a missing ``layer`` name."""
+    setup_calls = []
+
+    class FakeSCVI:
+        @classmethod
+        def setup_anndata(cls, adata, layer, batch_key):
+            setup_calls.append((adata, layer, batch_key))
+
+        def __init__(self, _adata, **_kwargs):
+            pass
+
+        def train(self, **_kwargs):
+            return None
+
+        def get_latent_representation(self):
+            return np.ones((3, 2), dtype=np.float32)
+
+    fake_scvi = SimpleNamespace(model=SimpleNamespace(SCVI=FakeSCVI))
+    monkeypatch.setitem(sys.modules, 'scvi', fake_scvi)
+    work = SimpleNamespace(
+        layers={'counts': np.array([[1, 0], [0, 2], [3, 1]])},
+        n_obs=3, n_vars=2, obs_names=['a', 'b', 'c'], obsm={},
+    )
+    analysis = _analysis({'max_epochs': 1})
+    monkeypatch.setattr(analysis, '_hvg_adata', lambda _adata: work)
+
+    representation, info = analysis._run_scvi(work, 'batch')
+
+    assert representation == 'X_scVI'
+    assert setup_calls[0][1:] == ('counts', 'batch')
+    assert info['layer'] == 'counts'
+    assert work.obsm['X_scVI'].shape == (3, 2)

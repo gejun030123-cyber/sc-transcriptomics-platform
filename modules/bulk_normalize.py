@@ -22,10 +22,10 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         from modules.figure_style import NATURE_PALETTE, NATURE_TEXT, NATURE_GRID
 
         self.progress(5, "加载数据...")
-        from modules.io_utils import read_expression_matrix, infer_expression_measurement
+        from modules.io_utils import read_expression_matrix, resolve_expression_measurement, run_bulk_sample_pca
         adata = read_expression_matrix(input_path)
 
-        method = self.params.get('method', 'deseq2')
+        method = str(self.params.get('method', 'deseq2')).strip().lower()
         self.progress(20, f"标准化方法: {method}...")
 
         # 前置过滤参数
@@ -33,32 +33,59 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         min_expr_samples = int(self.params.get('min_expr_samples', 3))
         max_zero_pct = float(self.params.get('max_zero_pct', 0))
 
-        input_measurement = infer_expression_measurement(adata, input_path)
+        input_measurement, measurement_info = resolve_expression_measurement(
+            adata, input_path, self.params.get('input_measurement', 'auto'),
+        )
+        # Persist source-scale provenance through the QC/normalization handoff.
+        # ``normalization.is_log_transformed`` below remains the authoritative
+        # description of the *output* scale.
+        adata.uns['input_measurement'] = input_measurement
+        adata.uns['input_measurement_provenance'] = measurement_info
         count_only_methods = {'deseq2', 'tmm', 'cpm', 'vst', 'rlog'}
-        if input_measurement == 'continuous_expression' and method in count_only_methods:
+        if input_measurement != 'raw_counts' and method in count_only_methods:
             raise ValueError(
-                f"检测到 FPKM/TPM 类连续表达值，{method} 仅适用于原始整数 counts。"
-                "请使用 log2；仅在确认样本分布必须强制一致时使用 log2_quantile。"
+                f"检测到 {input_measurement}，{method} 仅适用于原始整数 counts。"
+                "线性 FPKM/TPM 请使用 log2；已经 log 变换的输入请选择 none。"
             )
+        if method == 'log2' and input_measurement == 'raw_counts':
+            raise ValueError(
+                'raw_counts 不能只做 log2(x+1)。请使用 DESeq2、TMM、CPM、VST 或 rlog 的文库大小标准化。'
+            )
+        if method == 'log2' and input_measurement == 'log_transformed':
+            raise ValueError(
+                '输入已经是 log-transformed expression，不能再次执行 log2(x+1)。请选择 none 保留当前表达尺度。'
+            )
+        if (method in {'log2', 'log2_quantile'}
+                and measurement_info['requires_confirmation_for_log_transform']):
+            raise ValueError(
+                '自动检测到非整数连续值，但无法仅靠数值区分线性 FPKM/TPM 与已 log 的表达矩阵。'
+                '请在“输入表达量尺度”中明确选择 continuous_expression 或 log_transformed 后重试。'
+            )
+        if method == 'log2_quantile' and input_measurement != 'continuous_expression':
+            raise ValueError('log2_quantile 仅适用于确认的线性连续表达值；已 log 数据请选择 none。')
+        if method == 'none' and input_measurement != 'log_transformed':
+            raise ValueError('none 仅用于已经 log 变换的表达矩阵；线性 FPKM/TPM 请使用 log2。')
 
         # 低表达基因前置过滤
         n_genes_before = adata.n_vars
         # CPM 是 count 数据的文库大小标准化单位；对 FPKM/TPM 直接用
         # CPM 过滤会扭曲其含义，因此连续表达值只按原始表达阈值过滤。
-        if min_expr_samples > 0:
+        if min_expr_samples > 0 or max_zero_pct > 0:
             from scipy import sparse as _sp
             raw_for_filter = adata.X.toarray() if _sp.issparse(adata.X) else np.asarray(adata.X)
-            if input_measurement == 'raw_counts':
-                lib_for_filter = raw_for_filter.sum(axis=1, keepdims=True)
-                lib_for_filter[lib_for_filter == 0] = 1
-                expr_for_filter = raw_for_filter / lib_for_filter * 1e6
-            else:
-                expr_for_filter = raw_for_filter
-            n_expr = np.array((expr_for_filter >= min_expr_value).sum(axis=0)).flatten()
-            gene_mask = n_expr >= min_expr_samples
+            gene_mask = np.ones(adata.n_vars, dtype=bool)
+            if min_expr_samples > 0:
+                if input_measurement == 'raw_counts':
+                    lib_for_filter = raw_for_filter.sum(axis=1, keepdims=True)
+                    lib_for_filter[lib_for_filter == 0] = 1
+                    expr_for_filter = raw_for_filter / lib_for_filter * 1e6
+                else:
+                    expr_for_filter = raw_for_filter
+                n_expr = np.array((expr_for_filter >= min_expr_value).sum(axis=0)).flatten()
+                gene_mask &= n_expr >= min_expr_samples
             if max_zero_pct > 0:
                 zero_pct = np.array((raw_for_filter == 0).sum(axis=0)).flatten() / adata.n_obs * 100
-                gene_mask = gene_mask & (zero_pct <= max_zero_pct)
+                gene_mask &= zero_pct <= max_zero_pct
             adata = adata[:, gene_mask].copy()
 
         if adata.n_vars == 0:
@@ -109,6 +136,13 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             adata.X = np.log2(raw_counts + 1)
             adata.X = _sanitize(adata.X, 'log2 X')
 
+        elif method == 'none':
+            # This is deliberately restricted to explicitly recognised log
+            # input above.  It gives downstream PCA/heatmap steps a normal
+            # pipeline artifact without applying a silent second log.
+            adata.layers['normalized'] = raw_counts.copy()
+            adata.X = _sanitize(raw_counts.copy(), 'preserved log-expression X')
+
         elif method == 'log2_quantile':
             log_counts = np.log2(raw_counts + 1)
             # 按样本（行）排序，计算每个秩次的参考分布
@@ -141,20 +175,23 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             adata.layers['normalized'] = rlog_vals
 
         else:
-            raise ValueError(f"未知标准化方法: {method}，支持: deseq2/tmm/cpm/log2/log2_quantile/vst/rlog")
+            raise ValueError(f"未知标准化方法: {method}，支持: deseq2/tmm/cpm/log2/log2_quantile/vst/rlog/none")
 
         # 统一输出标记
         linear_layer_methods = ('deseq2', 'tmm', 'cpm')
         adata.uns['normalization'] = {
             'method': method,
-            'is_log_transformed': method in ('deseq2', 'tmm', 'cpm', 'vst', 'log2', 'log2_quantile', 'rlog'),
+            'is_log_transformed': method in ('deseq2', 'tmm', 'cpm', 'vst', 'log2', 'log2_quantile', 'rlog', 'none'),
             'X_scale': ('log2(TMM-CPM+1)' if method == 'tmm' else
                         'log2(CPM+1)' if method in linear_layer_methods else
                         'log2(input+1)' if method == 'log2' else
+                        'input log-expression (preserved)' if method == 'none' else
                         ('log2(normed+0.5)' if method in ('vst', 'rlog') else 'quantile-normalized')),
             'normalized_layer_scale': ('linear' if method in linear_layer_methods or method == 'log2' else
-                                       ('same as X' if method in ('vst', 'rlog') else 'linear(2^X-1)')),
+                                       ('same as X' if method in ('vst', 'rlog', 'none') else 'linear(2^X-1)')),
             'note': '近似实现：log2(normed + 0.5)，非 DESeq2 原始 VST/rlog' if method in ('vst', 'rlog') else '',
+            'input_measurement': input_measurement,
+            'input_measurement_provenance': measurement_info,
         }
 
         self.progress(60, "生成标准化前后对比图...")
@@ -185,35 +222,52 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             _plt.close(fig)
             return exported
 
-        # 文库大小对比图（静态展示图）
-        if method in ('vst', 'rlog'):
-            # VST/rlog 输出不是 counts，展示标准化前后每样本均值对比
-            raw_means = np.log2(raw_counts + 1).mean(axis=1)
-            norm_means = np.asarray(adata.X).mean(axis=1)
-            raw_lib_for_plot = np.asarray(raw_means, dtype=float).reshape(-1)
-            norm_lib_for_plot = np.asarray(norm_means, dtype=float).reshape(-1)
+        # Log2 is a value transform, not library-size normalization.  A former
+        # implementation summed the preserved linear ``normalized`` layer in
+        # this branch, yielding an unchanged, misleading "after" library-size
+        # panel.  Do not render that invalid comparison.
+        if method in ('log2', 'none'):
+            self.progress(-1, f'{method} 不进行文库大小标准化，已跳过不适用的 library-size 前后对比图。')
         else:
-            norm_layer = adata.layers.get('normalized', adata.X)
-            norm_lib = norm_layer.sum(axis=1) if hasattr(norm_layer, 'sum') else np.ones(adata.n_obs)
-            raw_lib_for_plot = np.asarray(raw_lib, dtype=float).reshape(-1)
-            norm_lib_for_plot = np.asarray(norm_lib, dtype=float).reshape(-1)
-        result_files.extend(_export_diagnostic(
-            director.render(
-                director.spec_from_params('diagnostic', self.params, width='double',
-                                          title='Normalization library-size check').with_updates(
-                                              extra={'kind': 'normalization_library'},
-                                              formats=nature_formats, height_mm=60.0),
-                {
-                    'kind': 'normalization_library',
-                    'sample_labels': adata.obs.index.tolist(),
-                    'raw_values': raw_lib_for_plot,
-                    'normalized_values': norm_lib_for_plot,
-                    'raw_ylabel': 'Mean log2(raw + 1)' if method in ('vst', 'rlog') else 'Library size',
-                    'normalized_ylabel': 'Mean transformed' if method in ('vst', 'rlog') else 'Library size',
-                },
-            ),
-            'bulk_norm_libsize', '文库大小对比', width='double', height_mm=60.0,
-        ))
+            if method in ('vst', 'rlog'):
+                # VST/rlog 输出不是 counts，展示标准化前后每样本均值对比。
+                raw_means = np.log2(raw_counts + 1).mean(axis=1)
+                norm_means = np.asarray(adata.X).mean(axis=1)
+                raw_lib_for_plot = np.asarray(raw_means, dtype=float).reshape(-1)
+                norm_lib_for_plot = np.asarray(norm_means, dtype=float).reshape(-1)
+                raw_ylabel = 'Mean log2(raw + 1)'
+                normalized_ylabel = 'Mean transformed expression'
+                library_title = 'Transformation mean-value check'
+            else:
+                norm_layer = adata.layers.get('normalized', adata.X)
+                norm_lib = norm_layer.sum(axis=1) if hasattr(norm_layer, 'sum') else np.ones(adata.n_obs)
+                raw_lib_for_plot = np.asarray(raw_lib, dtype=float).reshape(-1)
+                norm_lib_for_plot = np.asarray(norm_lib, dtype=float).reshape(-1)
+                if input_measurement == 'raw_counts':
+                    raw_ylabel = 'Library size (counts)'
+                    normalized_ylabel = 'Normalized expression total'
+                    library_title = 'Normalization library-size check'
+                else:
+                    raw_ylabel = 'Total expression'
+                    normalized_ylabel = 'Normalized expression total'
+                    library_title = 'Total-expression normalization check'
+            result_files.extend(_export_diagnostic(
+                director.render(
+                    director.spec_from_params('diagnostic', self.params, width='double',
+                                              title=library_title).with_updates(
+                                                  extra={'kind': 'normalization_library'},
+                                                  formats=nature_formats, height_mm=60.0),
+                    {
+                        'kind': 'normalization_library',
+                        'sample_labels': adata.obs.index.tolist(),
+                        'raw_values': raw_lib_for_plot,
+                        'normalized_values': norm_lib_for_plot,
+                        'raw_ylabel': raw_ylabel,
+                        'normalized_ylabel': normalized_ylabel,
+                    },
+                ),
+                'bulk_norm_libsize', '文库大小对比', width='double', height_mm=60.0,
+            ))
 
         if method in ('deseq2', 'tmm') and ('size_factor' in adata.obs.columns or 'tmm_factor' in adata.obs.columns):
             factor_col = 'tmm_factor' if method == 'tmm' else 'size_factor'
@@ -241,14 +295,19 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         # 按样本展示表达分布，才能判断样本分布是否真正被对齐；将全部值
         # 压成一个箱线图会掩盖这一关键信息。
         sample_labels = adata.obs.index.tolist()
-        raw_log2 = np.log2(raw_counts + 1)
         norm_values = adata.X.toarray() if hasattr(adata.X, 'toarray') else np.asarray(adata.X)
         if method == 'log2':
-            box_title = 'Log2 表达变换核查（不强制各样本同分布）'
-            box_note = '两侧分布相近是预期行为：log2 压缩数值范围，但不改变样本间总体分布。'
+            box_title = 'Raw input vs log2-transformed expression'
+            box_note = '左侧为未经变换的输入值；右侧为实际输出 log2(input + 1)。log2 只压缩数值范围，不强制各样本同分布。'
+            box_panel_titles = ['Raw input', 'Actual log2-transformed output']
+        elif method == 'none':
+            box_title = 'Already log-transformed input (preserved)'
+            box_note = '输入已被明确标记为 log 表达值；平台未执行第二次 log2 变换。两侧相同是预期行为。'
+            box_panel_titles = ['Input log-expression', 'Preserved output']
         else:
-            box_title = '标准化前后样本表达分布对比'
-            box_note = '分位数标准化会使各样本的边际表达分布一致；请结合实验设计判断其是否合理。'
+            box_title = 'Raw input vs normalized expression distribution'
+            box_note = '左侧始终为真实输入值，右侧为实际标准化/变换输出；不会再把预期 log2 值误标为变换前数据。'
+            box_panel_titles = ['Raw input', 'Actual normalized output']
         result_files.extend(_export_diagnostic(
             director.render(
                 director.spec_from_params('diagnostic', self.params, width='double',
@@ -258,34 +317,40 @@ class BulkNormalizeAnalysis(BaseAnalysis):
                 {
                     'kind': 'normalization_boxplot',
                     'sample_labels': sample_labels,
-                    'raw_matrix': raw_log2,
+                    'raw_matrix': raw_counts,
                     'normalized_matrix': norm_values,
                     'note': box_note,
                     'ylabel': 'Expression',
+                    'panel_titles': box_panel_titles,
                 },
             ),
             'bulk_norm_boxplot_compare', '表达分布对比', width='double', height_mm=76.0,
         ))
 
         # PCA 前后对比
-        n_pcs = min(10, adata.n_obs - 1)
+        n_pcs = min(10, adata.n_obs - 1, adata.n_vars - 1)
+        pca_preprocessing = None
+        pca_compare_variance = None
         if n_pcs >= 2:
-            # 原始数据 PCA
-            adata_raw_pca = sc.AnnData(X=np.log2(raw_counts + 1), obs=adata.obs.copy())
-            sc.pp.scale(adata_raw_pca, max_value=10)
-            sc.pp.pca(adata_raw_pca, n_comps=n_pcs)
+            # Left panel uses the real input.  Both PCA calls use the shared
+            # Bulk convention: PCA mean-centres genes but never Z-scores them.
+            # This makes the right log2 panel directly comparable to QC PCA.
+            adata_raw_pca = sc.AnnData(X=raw_counts.copy(), obs=adata.obs.copy())
+            pca_preprocessing = run_bulk_sample_pca(adata_raw_pca, n_comps=n_pcs)
             pc_raw = adata_raw_pca.obsm['X_pca']
             # 标准化后 PCA
             adata_norm_pca = sc.AnnData(X=adata.X.copy(), obs=adata.obs.copy())
-            sc.pp.scale(adata_norm_pca, max_value=10)
-            sc.pp.pca(adata_norm_pca, n_comps=n_pcs)
+            run_bulk_sample_pca(adata_norm_pca, n_comps=n_pcs)
             pc_norm = adata_norm_pca.obsm['X_pca']
             if method == 'log2':
-                pca_titles = ['log2(input + 1) PCA', 'log2 输出 PCA（预期相近）']
-                pca_title = 'Log2 变换前后 PCA（不移除组间生物学差异）'
+                pca_titles = ['Raw input PCA', 'Actual log2-transformed output PCA']
+                pca_title = 'Raw-vs-log2 PCA comparison'
+            elif method == 'none':
+                pca_titles = ['Input log-expression PCA', 'Preserved output PCA']
+                pca_title = 'Preserved log-expression PCA check'
             else:
-                pca_titles = ['变换前 PCA', '标准化后 PCA']
-                pca_title = '标准化前后 PCA 对比'
+                pca_titles = ['Raw input PCA', 'Actual normalized output PCA']
+                pca_title = 'Raw-vs-normalized PCA comparison'
             # 解释方差必须来自实际 PCA，而不能由调用方临时填充。
             # 旧实现传入 NaN，最终会在投稿图轴标签中显示为 ``(nan%)``。
             raw_variance = np.asarray(
@@ -302,6 +367,10 @@ class BulkNormalizeAnalysis(BaseAnalysis):
                     explained_variance, (0, 4 - explained_variance.size),
                     constant_values=np.nan,
                 )
+            pca_compare_variance = {
+                'input': [float(value) for value in raw_variance],
+                'output': [float(value) for value in norm_variance],
+            }
             result_files.extend(_export_diagnostic(
                 director.render(
                     director.spec_from_params('diagnostic', self.params, width='double',
@@ -340,6 +409,13 @@ class BulkNormalizeAnalysis(BaseAnalysis):
                 'median_size_factor': round(float(adata.obs['size_factor'].median()), 3) if 'size_factor' in adata.obs.columns else None,
                 'median_tmm_factor': round(float(adata.obs['tmm_factor'].median()), 3) if 'tmm_factor' in adata.obs.columns else None,
                 'is_log_transformed': adata.uns.get('normalization', {}).get('is_log_transformed', True),
+                'input_measurement_source': measurement_info['source'],
+                'input_measurement_confidence': measurement_info['confidence'],
+                'pca_preprocessing': pca_preprocessing if n_pcs >= 2 else None,
+                'pca_compare_variance_ratio': pca_compare_variance,
+                'max_zero_pct': max_zero_pct,
+                'max_zero_pct_filter_enabled': max_zero_pct > 0,
+                'max_zero_pct_semantics': '0 disables this optional zero-value filter',
             }
         }
 

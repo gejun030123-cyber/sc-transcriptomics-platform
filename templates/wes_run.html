@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}WES 阶段结果 - {{ project.name }}{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-start mb-3">
+    <div>
+        <h4>{{ stage.title if stage else 'WES 运行结果' }}</h4>
+        <p class="text-muted mb-0">Run <code>{{ run.id }}</code> · 每个阶段只展示自身的参数与输出。</p>
+    </div>
+    <a class="btn btn-sm btn-outline-secondary" href="/projects/{{ project.id }}/wes#wes-runs">返回 WES 工作台</a>
+</div>
+
+<div class="card p-3 mb-3">
+    <div class="d-flex align-items-center gap-2 mb-2">
+        <span class="status-badge status-{{ run.status }}">{{ run.status }}</span>
+        <span class="small text-muted">创建于 {{ run.created_at }}</span>
+    </div>
+    {% if run.error_text %}<div class="alert alert-danger small mb-0">{{ run.error_text }}</div>{% endif %}
+    {% if stage %}<p class="small text-muted mb-0">{{ stage.description }}</p>{% endif %}
+</div>
+
+<div class="row g-3">
+    <div class="col-lg-5">
+        <div class="card p-3 h-100">
+            <h6>本阶段固定设置</h6>
+            <dl class="row small mb-0">
+                <dt class="col-5">Sarek step</dt><dd class="col-7">{{ run.launch.get('parameters', {}).get('step', '—') }}</dd>
+                <dt class="col-5">工具</dt><dd class="col-7">{{ run.launch.get('parameters', {}).get('tools') or '仅预处理/比对' }}</dd>
+                <dt class="col-5">Reference</dt><dd class="col-7 text-break">{{ run.launch.get('reference_bundle_id', '—') }}</dd>
+                <dt class="col-5">Capture kit</dt><dd class="col-7 text-break">{{ run.launch.get('capture_bed_id') or '不适用' }}</dd>
+                <dt class="col-5">Nextflow profile</dt><dd class="col-7">{{ run.launch.get('profile', '—') }}</dd>
+            </dl>
+            {% if run.launch.get('pipeline_options') %}
+            <details class="mt-2">
+                <summary class="small">查看已锁定的分析参数</summary>
+                <pre class="small bg-light border rounded p-2 mt-2 mb-0 text-wrap">{{ run.launch.get('pipeline_options')|tojson(indent=2) }}</pre>
+            </details>
+            {% endif %}
+        </div>
+    </div>
+    <div class="col-lg-7">
+        <div class="card p-3 h-100">
+            <h6>本阶段输出</h6>
+            {% if artifacts %}
+            <ul class="list-group list-group-flush small">
+                {% for item in artifacts %}
+                <li class="list-group-item px-0 d-flex justify-content-between gap-2">
+                    <a class="text-break" href="/projects/{{ project.id }}/wes/artifacts/{{ item.id }}">{{ item.artifact_kind }} · {{ item.metadata.relative_path }}</a>
+                    {% if item.required %}<span class="badge text-bg-primary">required</span>{% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}<p class="small text-muted mb-0">尚未收集工件；运行完成后会自动登记。</p>{% endif %}
+        </div>
+    </div>
+</div>
+
+{% if visual_artifacts %}
+<div class="card p-3 mt-3" id="wes-result-figures">
+    <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+        <div>
+            <h6 class="mb-0">本阶段结果图与交互报告</h6>
+            <p class="small text-muted mb-0">本次运行产生的 MultiQC、HTML 报告及 PNG/JPEG/PDF/SVG 图会按输出逐项展示；原始 VCF、BAM 等仍在上方工件列表下载。</p>
+        </div>
+    </div>
+    {% for item in visual_artifacts %}
+    <div class="border rounded p-2 {% if not loop.last %}mb-3{% endif %}">
+        <div class="d-flex justify-content-between align-items-center gap-2 mb-2 small">
+            <span class="text-break"><strong>{{ item.artifact_kind }}</strong> · {{ item.metadata.relative_path }}</span>
+            <a class="btn btn-sm btn-outline-secondary flex-shrink-0" target="_blank" rel="noopener"
+               href="/projects/{{ project.id }}/wes/artifacts/{{ item.id }}">单独查看</a>
+        </div>
+        {% if item.artifact_kind == 'wes_raster_figure' %}
+        <img class="img-fluid d-block mx-auto" loading="lazy"
+             alt="{{ stage.title if stage else 'WES' }} 结果图：{{ item.metadata.relative_path }}"
+             src="/projects/{{ project.id }}/wes/artifacts/{{ item.id }}">
+        {% else %}
+        <iframe class="w-100 border rounded" title="{{ stage.title if stage else 'WES' }}：{{ item.metadata.relative_path }}"
+                src="/projects/{{ project.id }}/wes/artifacts/{{ item.id }}"
+                sandbox="allow-scripts" referrerpolicy="no-referrer" height="760" loading="lazy">
+        </iframe>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+<div class="card p-3 mt-3">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+        <h6 class="mb-0">运行日志（末尾）</h6>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="wes-refresh-log">刷新日志</button>
+    </div>
+    <pre class="small bg-light border rounded p-2 mb-0" id="wes-log-output">正在读取…</pre>
+</div>
+
+{% if run.status == 'completed' and next_stage %}
+<div class="alert alert-success mt-3 mb-0 small">
+    本阶段已完成。返回工作台后，点击“准备：{{ next_stage.title }}”审阅并启动下一阶段。
+</div>
+{% endif %}
+
+<script>
+(function () {
+    const pid = {{ project.id|tojson }};
+    const runId = {{ run.id|tojson }};
+    const output = document.getElementById('wes-log-output');
+    async function refreshLog() {
+        try {
+            const response = await fetch(`/api/projects/${pid}/wes/runs/${runId}/logs?stream=stderr&tail_bytes=65536`);
+            const data = await response.json();
+            output.textContent = data.text || '当前 stderr 尚无内容。';
+        } catch (_) {
+            output.textContent = '日志暂时无法读取。';
+        }
+    }
+    document.getElementById('wes-refresh-log').addEventListener('click', refreshLog);
+    refreshLog();
+    {% if is_active %}window.setTimeout(() => window.location.reload(), 10000);{% endif %}
+})();
+</script>
+{% endblock %}

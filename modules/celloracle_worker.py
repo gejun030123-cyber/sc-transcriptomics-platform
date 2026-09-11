@@ -76,8 +76,7 @@ def _load_base_grn(source, path, version):
     支持：
     - 内置人类 promoter base GRN（CellOracle 官方 hg19/hg38）
     - 用户上传的 TF_info matrix（parquet/csv）
-    - 用户上传的 TFdict 字典 pickle
-    - 用户上传的完整 Oracle 对象 pickle（取其中的 TFdict）
+    - 用户上传的 TF_info matrix（parquet/csv/tsv）
     """
     import pandas as pd
     import celloracle as co
@@ -95,50 +94,31 @@ def _load_base_grn(source, path, version):
         fail("base GRN 文件不存在: " + str(path))
     ext = os.path.splitext(path)[1].lower()
     obj = None
-    pickle_warning = None
     if ext in (".parquet", ".pq"):
         obj = pd.read_parquet(path)
     elif ext in (".csv", ".tsv", ".txt", ".gz"):
-        sep = "\t" if ext in (".tsv", ".txt") else ","
+        lower_path = path.lower()
+        sep = "\t" if lower_path.endswith((".tsv", ".tsv.gz", ".txt", ".txt.gz")) else ","
         obj = pd.read_csv(path, sep=sep)
-    elif ext in (".pickle", ".pkl", ".gpickle", ".oracle", ".celloracle", ".links"):
-        # 安全提示：pickle 反序列化可执行任意代码，仅应加载可信来源文件。
-        # 平台限制这些文件只能来自项目 uploads 目录，但仍需用户知晓风险。
-        pickle_warning = ("base GRN 为 pickle 格式；pickle 反序列化存在代码执行风险，"
-                          "请确认文件来源可信。")
-        obj = co.utility.load_pickled_object(path)
     else:
         fail("不支持的 base GRN 文件格式: " + ext)
 
     def _meta(**extra):
         base = {"source": path}
-        if pickle_warning:
-            base["pickle_security_warning"] = pickle_warning
         base.update(extra)
         return base
 
-    # 完整 Oracle 对象：提取 TFdict
-    if hasattr(obj, "TFdict") and getattr(obj, "TFdict"):
-        return dict(obj.TFdict), _meta(kind="oracle_object"), None
-    # 字典：{TF: [target_genes]}
-    if isinstance(obj, dict):
-        return dict(obj), _meta(kind="TFdict", n_tfs=len(obj)), None
     # DataFrame：TF_info matrix（含 peak_id / gene_short_name 列）
     if hasattr(obj, "columns") and "gene_short_name" in obj.columns:
         return None, _meta(kind="TF_info_matrix", n_rows=int(obj.shape[0])), obj
-    fail("无法识别的 base GRN 对象: %s；请上传 CellOracle TF_info matrix（parquet/csv）、TFdict 字典 pickle 或包含 TFdict 的 Oracle 对象 pickle。" % type(obj).__name__)
+    fail("无法识别 base GRN 表格；请上传含 gene_short_name 列的 CellOracle TF_info matrix（parquet/csv/tsv）。")
 
 
 def _load_links(path):
-    """加载可选的 co-accessibility links 对象。"""
-    import celloracle as co
-    if not path or not os.path.isfile(path):
+    """Links are deliberately disabled because CellOracle loads them as pickle."""
+    if not path:
         return None
-    obj = co.utility.load_pickled_object(path)
-    if not hasattr(obj, "filter_links"):
-        fail("links 文件不是有效的 CellOracle Links 对象")
-    obj.filter_links()
-    return obj
+    fail("用户提供的 CellOracle Links/pickle 文件已禁用；请使用表格 base GRN。")
 
 
 def run(config):
@@ -252,8 +232,6 @@ def run(config):
         config.get("base_grn_file", ""),
         config.get("base_grn_version", ""),
     )
-    if meta and meta.get("pickle_security_warning"):
-        summary["warnings"].append(meta["pickle_security_warning"])
     summary["base_grn"] = meta
     if tfdict is not None:
         tfs = set(tfdict.keys())
@@ -264,6 +242,21 @@ def run(config):
     summary["n_tfs_in_data"] = len(tfs_in_data)
     if not tfs_in_data:
         fail("base GRN 中的 TF 与 scRNA-seq 数据没有任何交集，请检查物种/基因名是否一致。")
+
+    # 扰动基因必须是 base GRN 中的 TF，且必须在表达矩阵中。CellOracle 的
+    # simulate_shift 对非 TF 会直接抛错，必须在这里（昂贵的 GRN 推断之前）
+    # 拦下，而不是让用户等几十分钟后拿到一个与参数无关的底层错误。
+    requested_perturb = _parse_genes(config.get("perturb_genes", ""))
+    missing_in_data = [g for g in requested_perturb if g not in set(adata.var_names)]
+    if missing_in_data:
+        fail("以下扰动基因不在表达矩阵中: " + ", ".join(missing_in_data))
+    not_tf = [g for g in requested_perturb if g not in tfs]
+    if not_tf:
+        fail(
+            "以下扰动基因不是 base GRN 中的 TF，CellOracle 无法模拟: "
+            + ", ".join(not_tf)
+            + "。请改用 base GRN 中的 TF（可参考结果摘要中的 TF 列表）。"
+        )
 
     # ---------- 3. 基因筛选（HVG ∪ TF ∩ data ∪ 扰动基因）----------
     if config.get("use_hvg", True) and adata.n_vars > 4000:
@@ -366,17 +359,17 @@ def run(config):
 
     # ---------- 7. 扰动基因 ----------
     perturb_genes = _parse_genes(config.get("perturb_genes", ""))
-    missing = [g for g in perturb_genes if g not in oracle.adata.var_names]
-    if missing:
-        fail("以下扰动基因不在表达矩阵中: " + ", ".join(missing))
-    not_tf = [g for g in perturb_genes if g not in tfs]
-    if not_tf:
-        summary["warnings"].append(
-            "以下基因不是 base GRN 中的 TF（仍会按目标基因方式模拟）: " + ", ".join(not_tf))
     if not perturb_genes:
         fail("请至少填写一个扰动基因。")
+    # TF 身份与基因名已在第 2/3 步校验；此处只对 HVG 收敛后的实际基因集
+    # 做防御性复核（不放宽任何条件，也不再输出与 CellOracle 行为矛盾的警告）。
+    still_missing = [g for g in perturb_genes if g not in oracle.adata.var_names]
+    if still_missing:
+        fail("以下扰动基因不在 GRN 推断使用的基因集中: " + ", ".join(still_missing))
 
     n_propagation = int(config.get("n_propagation") or 3)
+    if not 1 <= n_propagation <= 5:
+        fail("n_propagation 必须在 1–5 之间（CellOracle 限制）。")
     n_neighbors = int(config.get("n_neighbors") or 200)
     min_mass = float(config.get("min_mass") or 0.01)
     n_grid = int(config.get("n_grid") or 40)

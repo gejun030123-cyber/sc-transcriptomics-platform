@@ -93,12 +93,10 @@ async function loadPipelineTemplates() {
         const select = document.getElementById('pipeline-template');
         select.innerHTML = '<option value="">-- 选择已保存的模板 --</option>';
         for (const p of (data.presets || [])) {
-            if (p.pipeline && p.pipeline.modules && p.pipeline.modules.length > 0) {
+            if (p.has_pipeline) {
                 const opt = document.createElement('option');
-                opt.value = p._id;
+                opt.value = p.id;
                 opt.textContent = p.name + (p.description ? ` (${p.description})` : '');
-                opt.dataset.modules = JSON.stringify(p.pipeline.modules);
-                opt.dataset.params = JSON.stringify(p.params || {});
                 select.appendChild(opt);
             }
         }
@@ -137,18 +135,11 @@ document.getElementById('btn-run-pipeline').addEventListener('click', async () =
     if (!selected || !selected.value) return alert('请选择流程模板');
     if (!fileSelect.value) return alert('请选择输入文件');
 
-    const modules = JSON.parse(selected.dataset.modules || '[]');
-    const params = JSON.parse(selected.dataset.params || '{}');
-
     try {
-        const resp = await fetch(`/api/projects/${PID}/pipeline-runs`, {
+        const resp = await fetch(`/api/projects/${PID}/pipeline-templates/${encodeURIComponent(selected.value)}/run`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                name: selected.textContent,
-                analysis_type: 'bulk',
-                modules: modules,
-                params: params,
                 input_path: fileSelect.value
             })
         });
@@ -193,10 +184,15 @@ async function pollPipelineStatus(runId) {
     }, 2000);
 }
 
-// 启用/禁用运行按钮
-document.getElementById('pipeline-template').addEventListener('change', (e) => {
-    document.getElementById('btn-run-pipeline').disabled = !e.target.value;
-});
+// 输入与模板都选定后才允许一键启动；模块和参数会由服务端读取已保存模板。
+function updatePipelineLaunchButton() {
+    document.getElementById('btn-run-pipeline').disabled = !(
+        document.getElementById('pipeline-template').value &&
+        document.getElementById('pipeline-input-file').value
+    );
+}
+document.getElementById('pipeline-template').addEventListener('change', updatePipelineLaunchButton);
+document.getElementById('pipeline-input-file').addEventListener('change', updatePipelineLaunchButton);
 
 // 初始化
 loadPipelineTemplates();

@@ -1,39 +1,40 @@
 {% extends "base.html" %}
 {% block title %}{{ project.name }} - 项目详情{% endblock %}
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-3">
+<section class="project-page-header">
     <div>
-        <h4>{{ project.name }}</h4>
-        <p class="text-muted mb-0">{{ project.description }}</p>
+        <div class="project-page-eyebrow">Research project</div>
+        <h1>{{ project.name }}</h1>
+        <p class="project-page-description">{{ project.description or '在此组织数据、分析流程与研究结论。' }}</p>
     </div>
-    <div>
+    <div class="project-page-actions">
         <a href="/projects/{{ project.id }}/workspace" class="btn btn-primary btn-sm">进入 AI 主工作台</a>
-        <a href="/projects/{{ project.id }}/upload" class="btn btn-primary btn-sm">上传数据</a>
+        <a href="/projects/{{ project.id }}/upload" class="btn btn-outline-primary btn-sm">上传数据</a>
         <a href="/projects/{{ project.id }}/results" class="btn btn-outline-primary btn-sm">全部结果</a>
     </div>
-</div>
+</section>
 
 <div class="row mb-4">
     <div class="col-md-4">
         <a href="/projects/{{ project.id }}/sc-analysis" class="text-decoration-none">
-            <div class="card p-4 h-100" style="border-left: 4px solid #1a237e;">
-                <h5 class="text-dark mb-2">单细胞转录组分析</h5>
+            <div class="card analysis-module-card">
+                <h2>单细胞转录组分析</h2>
                 <p class="text-muted small mb-0">质控 → 预处理 → 降维 → 聚类 → 注释 → 差异表达 → 轨迹分析</p>
             </div>
         </a>
     </div>
     <div class="col-md-4">
         <a href="/projects/{{ project.id }}/bulk-analysis" class="text-decoration-none">
-            <div class="card p-4 h-100" style="border-left: 4px solid #e53935;">
-                <h5 class="text-dark mb-2">Bulk RNA-seq 分析</h5>
+            <div class="card analysis-module-card">
+                <h2>Bulk RNA-seq 分析</h2>
                 <p class="text-muted small mb-0">质控 → 标准化 → 差异表达 → PCA/UMAP → 热图（支持 Excel 导入）</p>
             </div>
         </a>
     </div>
     <div class="col-md-4">
         <a href="/projects/{{ project.id }}/wes" class="text-decoration-none">
-            <div class="card p-4 h-100" style="border-left: 4px solid #f59e0b;">
-                <h5 class="text-dark mb-2">WES 外显子组分析</h5>
+            <div class="card analysis-module-card">
+                <h2>WES 外显子组分析</h2>
                 <p class="text-muted small mb-0">输入预检 → Sarek 运行 → 工件归档 → 科学验证</p>
             </div>
         </a>
@@ -42,7 +43,7 @@
 
 <div class="row">
     <div class="col-md-4">
-        <div class="card p-3 mb-3">
+        <div class="card project-side-card p-3 mb-3">
             <div class="d-flex justify-content-between align-items-center mb-2">
                 <h6 class="mb-0">已上传文件</h6>
                 <button class="btn btn-sm btn-outline-secondary" onclick="loadAdataInfo()" id="btn-adata-info"
@@ -64,7 +65,7 @@
         </div>
 
         <!-- H5ad 数据结构面板 -->
-        <div class="card p-3 mb-3" id="adata-info-panel" style="display:none;">
+        <div class="card project-side-card p-3 mb-3" id="adata-info-panel" style="display:none;">
             <div class="d-flex justify-content-between align-items-center mb-2">
                 <h6 class="mb-0">H5ad 数据结构</h6>
                 <button class="btn-close btn-sm" onclick="document.getElementById('adata-info-panel').style.display='none';"></button>
@@ -76,7 +77,7 @@
     </div>
 
     <div class="col-md-8">
-        <div class="card p-3">
+        <div class="card project-side-card p-3">
             <h6 class="mb-2">最近任务</h6>
             {% if tasks %}
                 {% for t in tasks %}

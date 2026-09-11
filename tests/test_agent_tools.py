@@ -76,6 +76,46 @@ class TestPathValidation:
         # 可能因为文件不存在而返回错误，但至少不应该接受
         assert err is not None
 
+    def test_validate_project_path_accepts_project_relative_path(self, tmp_path, monkeypatch):
+        """脱敏后的相对路径必须仍能在项目目录内解析."""
+        from modules.ai_tools import _validate_project_path
+        from config import Config
+
+        monkeypatch.setattr(Config, 'DATA_DIR', str(tmp_path))
+        project_dir = tmp_path / 'projects' / 'test_pid'
+        (project_dir / 'intermediate').mkdir(parents=True)
+        target = project_dir / 'intermediate' / 'qc_output.h5ad'
+        target.write_text('x')
+
+        assert _validate_project_path('intermediate/qc_output.h5ad', 'test_pid') is None
+        assert _validate_project_path('../outside.h5ad', 'test_pid') is not None
+
+    def test_redact_server_paths_hides_absolute_locations(self, tmp_path, monkeypatch):
+        """发给外部模型的结果里不能出现服务器绝对路径."""
+        from modules.ai_tools import _redact_server_paths
+        from config import Config
+
+        monkeypatch.setattr(Config, 'DATA_DIR', str(tmp_path))
+        project_dir = tmp_path / 'projects' / 'test_pid'
+        payload = {
+            'csv_package_dir': str(project_dir / 'results' / 'sc_batch_results'),
+            'deg_source_files': [str(project_dir / 'results' / 'deg_a.csv')],
+            'checksum_file': '/etc/passwd',
+            'note': 'no path here',
+            'url': 'https://example.org/x',
+        }
+
+        redacted = _redact_server_paths(payload, 'test_pid')
+
+        assert redacted['csv_package_dir'] == 'results/sc_batch_results'
+        assert redacted['deg_source_files'] == ['results/deg_a.csv']
+        assert redacted['checksum_file'] == 'passwd'
+        assert redacted['note'] == 'no path here'
+        assert redacted['url'] == 'https://example.org/x'
+        joined = json.dumps(redacted)
+        assert str(tmp_path) not in joined
+        assert '/etc/passwd' not in joined
+
     def test_find_latest_adata_no_project(self):
         """测试项目不存在时返回 None."""
         from modules.ai_tools import _find_latest_adata
@@ -99,6 +139,21 @@ class TestAIToolsCoverage:
         from modules.ai_tools import _list_modules
         result = _list_modules('sc')
         assert 'modules' in result
+        assert 'functional_state' in result['modules']
+        assert 'sc_pseudobulk_deg' in result['modules']
+        assert 'neighborhood_da' in result['modules']
+
+    def test_ibd_downstream_parameter_contract_matches_web_schema(self):
+        """AI must expose the same form fields as the web entry point."""
+        from modules.ai_tools import _get_module_parameters
+
+        functional = _get_module_parameters({'module_name': 'functional_state'})
+        functional_keys = {field['key'] for field in functional['parameters']}
+        assert {'analysis_focus', 'sample_key', 'condition_key', 'celltype_key'} <= functional_keys
+
+        neighbourhood = _get_module_parameters({'module_name': 'neighborhood_da'})
+        neighbourhood_keys = {field['key'] for field in neighbourhood['parameters']}
+        assert {'representation', 'n_neighbourhoods', 'sample_key', 'condition_key'} <= neighbourhood_keys
 
     def test_list_builtin_markers(self):
         """测试列出内置 marker."""
@@ -242,6 +297,40 @@ class TestAnalysisConfigRecommendation:
             rows.append(f'G{idx}\t' + '\t'.join(map(str, row)))
         path.write_text('\n'.join(rows) + '\n', encoding='utf-8')
 
+    @staticmethod
+    def _write_ibd_organoid_h5ad(path):
+        """Write a minimal, replicated IBD/control epithelial input for AI recommendations."""
+        anndata = pytest.importorskip('anndata')
+        import numpy as np
+        import pandas as pd
+
+        rows = []
+        for condition, sample_id in (
+            ('Control', 'CTRL_1'), ('Control', 'CTRL_2'),
+            ('IBD', 'IBD_1'), ('IBD', 'IBD_2'),
+        ):
+            for celltype in ('TA cells', 'Metabolic enterocytes'):
+                for cell_index in range(3):
+                    rows.append({
+                        'sample_id': sample_id,
+                        'condition': condition,
+                        'celltype': celltype,
+                        'leiden': '0' if celltype == 'TA cells' else '1',
+                        'barcode_note': f'{sample_id}_{cell_index}',
+                    })
+        counts = np.tile(np.array([4, 8, 12, 16], dtype=float), (len(rows), 1))
+        adata = anndata.AnnData(
+            counts,
+            obs=pd.DataFrame(rows),
+            var=pd.DataFrame(index=['HNF4A', 'PPARA', 'MKI67', 'NFKB1']),
+        )
+        adata.layers['counts'] = counts.copy()
+        adata.obsm['X_pca'] = np.arange(len(rows) * 3, dtype=float).reshape(len(rows), 3)
+        adata.obsm['X_umap'] = np.arange(len(rows) * 2, dtype=float).reshape(len(rows), 2)
+        # The recommender only needs the persisted graph marker, not graph data.
+        adata.uns['neighbors'] = {'params': {'n_neighbors': 5}}
+        adata.write_h5ad(path)
+
     def test_continuous_bulk_recommends_log2(self, test_project):
         from pathlib import Path
         from config import Config
@@ -255,7 +344,9 @@ class TestAnalysisConfigRecommendation:
 
         assert result['data_profile']['measurement_type'] == 'continuous_expression'
         assert result['recommended_params']['method'] == 'log2'
-        assert result['should_run'] is True
+        assert result['recommended_params']['input_measurement'] == 'auto'
+        assert result['should_run'] is False
+        assert any('不能证明' in warning for warning in result['warnings'])
 
     def test_raw_counts_recommend_deseq2_normalization(self, test_project):
         from pathlib import Path
@@ -357,6 +448,81 @@ class TestAnalysisConfigRecommendation:
         assert '分析前检查未通过' in result['error']
         assert AnalysisTask.get_by_project(test_project) == []
 
+    def test_ai_sc_go_binds_completed_deg_task_to_fixed_internal_sources(self, test_project):
+        from pathlib import Path
+        from models import AnalysisTask
+        from config import Config
+        from modules.ai_tools import _bind_sc_cell_go_source
+
+        source_path = Path(Config.results_dir(test_project)) / 'deg_source.csv'
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text('comparison_id,cluster\ndemo,9\n', encoding='utf-8')
+        source_task = AnalysisTask(
+            project_id=test_project, module_name='sc_pseudobulk_deg', status='completed',
+            result_json=json.dumps({
+                'deg_source_files': [str(source_path)],
+                'deg_source_level': 'pseudobulk',
+            }),
+        )
+        source_task.save()
+
+        params = {'deg_source_task_id': source_task.id, 'source_level': 'cell_level'}
+        assert _bind_sc_cell_go_source(params, test_project) is None
+        assert params['deg_source_files'] == [str(source_path)]
+        assert params['source_level'] == 'pseudobulk'
+        assert params['source_task_id'] == source_task.id
+
+    def test_ai_can_query_every_web_adjustable_parameter(self):
+        from modules import MODULE_REGISTRY
+        from modules.ai_tools import _get_module_parameters
+        from modules.schemas import PARAM_SCHEMAS
+
+        for module_name in MODULE_REGISTRY:
+            result = _get_module_parameters({'module_name': module_name})
+            assert 'error' not in result
+            returned_keys = {field['key'] for field in result['parameters']}
+            expected_keys = {field['key'] for field in PARAM_SCHEMAS.get(module_name, [])}
+            assert returned_keys == expected_keys
+
+    def test_ai_preserves_active_custom_go_display_parameters(self):
+        from modules.ai_tools import _validate_analysis_params
+
+        requested = {
+            'go_priority_allocation_mode': 'custom',
+            'go_inflammation_slots': 3,
+            'go_lipid_slots': 2,
+            'go_confirmed_theme_slots': 1,
+            'go_top_pathway_slots': 2,
+            'plot_top_n': 8,
+        }
+        cleaned, error = _validate_analysis_params('sc_cell_go', requested)
+
+        assert error is None
+        assert cleaned == requested
+
+    def test_ai_activates_an_unambiguous_dependent_web_parameter(self):
+        from modules.ai_tools import _validate_analysis_params
+
+        cleaned, error = _validate_analysis_params(
+            'sc_cell_go', {'go_inflammation_slots': 3},
+        )
+
+        assert error is None
+        assert cleaned == {
+            'go_priority_allocation_mode': 'custom',
+            'go_inflammation_slots': 3,
+        }
+
+    def test_ai_rejects_a_number_outside_the_web_parameter_range(self):
+        from modules.ai_tools import _validate_analysis_params
+
+        cleaned, error = _validate_analysis_params(
+            'sc_cell_go', {'plot_top_n': 31},
+        )
+
+        assert cleaned is None
+        assert '不能大于 30' in error
+
     def test_auto_group_mapping_for_ai_uses_combined_groups(self, test_project):
         from pathlib import Path
         from config import Config
@@ -411,6 +577,48 @@ class TestAnalysisConfigRecommendation:
         assert 'batch' not in result['data_profile']['sample_candidates']
         assert 'batch' not in result['data_profile']['time_candidates']
 
+    def test_ibd_downstream_recommendations_choose_sample_level_modules(self, test_project):
+        from pathlib import Path
+        from config import Config
+        from modules.ai_tools import _recommend_analysis_config
+
+        path = Path(Config.uploads_dir(test_project)) / 'ibd_organoid.h5ad'
+        self._write_ibd_organoid_h5ad(path)
+
+        functional = _recommend_analysis_config({
+            'module_name': 'functional_state', 'input_path': str(path),
+            'objective': 'IBD 类器官中炎症应激、TA 增殖和代谢 enterocyte 分化状态',
+        }, test_project)
+        assert functional['should_run'] is True
+        assert functional['recommended_params']['analysis_focus'] == 'ibd_organoid_epithelial'
+        assert functional['recommended_params']['sample_key'] == 'sample_id'
+        assert functional['recommended_params']['condition_key'] == 'condition'
+
+        pseudobulk = _recommend_analysis_config({
+            'module_name': 'sc_pseudobulk_deg', 'input_path': str(path),
+            'objective': '比较 IBD 与对照中各 cell type 的表达变化',
+        }, test_project)
+        assert pseudobulk['should_run'] is True
+        assert pseudobulk['recommended_params']['grouping_mode'] == 'annotated_celltype'
+        assert pseudobulk['recommended_params']['celltype_key'] == 'celltype'
+        assert pseudobulk['recommended_params']['comparisons'] == 'IBD-vs-Control'
+
+        neighbourhood = _recommend_analysis_config({
+            'module_name': 'neighborhood_da', 'input_path': str(path),
+            'objective': '查找 IBD 富集的连续 epithelial state',
+        }, test_project)
+        assert neighbourhood['should_run'] is True
+        assert neighbourhood['recommended_params']['representation'] == 'X_pca'
+        assert neighbourhood['recommended_params']['comparisons'] == 'IBD-vs-Control'
+
+        proportion = _recommend_analysis_config({
+            'module_name': 'proportion', 'input_path': str(path),
+            'objective': '检验 TA 和 metabolic enterocyte 的比例变化',
+        }, test_project)
+        assert proportion['should_run'] is True
+        assert proportion['recommended_params']['analysis_unit'] == 'sample'
+        assert proportion['recommended_params']['groupby'] == 'celltype'
+
     def test_organoid_annotation_recommends_matching_marker_panel(self, test_project):
         """自然语言中的类器官类型应映射到对应的 annotation 参数。"""
         anndata = pytest.importorskip('anndata')
@@ -438,14 +646,20 @@ class TestAnalysisConfigRecommendation:
         assert result['recommended_params']['method'] == 'multi_evidence'
 
     def test_recommendation_tool_is_read_only_and_sweep_proposal_requires_confirmation(self):
-        from modules.ai_adapter import AUTO_EXEC_TOOLS, CONFIRM_TOOLS, TOOLS_ANTHROPIC
+        from modules.ai_adapter import (
+            AUTO_EXEC_TOOLS, CONFIRM_TOOLS, TOOLS_ANTHROPIC, SYSTEM_PROMPT,
+        )
 
         tool_names = {tool['name'] for tool in TOOLS_ANTHROPIC}
         assert 'recommend_analysis_config' in tool_names
+        assert 'get_module_parameters' in tool_names
         assert 'recommend_analysis_config' in AUTO_EXEC_TOOLS
+        assert 'get_module_parameters' in AUTO_EXEC_TOOLS
         assert 'recommend_analysis_config' not in CONFIRM_TOOLS
         assert 'propose_parameter_sweep' not in AUTO_EXEC_TOOLS
         assert 'propose_parameter_sweep' in CONFIRM_TOOLS
+        assert 'IBD / 对照类器官单细胞下游流程' in SYSTEM_PROMPT
+        assert 'neighborhood_da' in SYSTEM_PROMPT
 
 
 class TestProposeParameterSweep:

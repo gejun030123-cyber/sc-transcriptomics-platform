@@ -16,6 +16,7 @@
 - 项目管理：创建项目、上传数据、查看项目状态和历史任务；主线任务完成后项目状态会自动同步为 `completed`，存在运行中任务时为 `processing`，全部失败时为 `failed`。
 - AI 主工作台：项目内 `/projects/<pid>/workspace` 页面聚合单细胞、Bulk RNA、WES 分析入口、最近任务和数据文件，并预留 Bulk ATAC-seq 工作流。
 - 异步任务：分析任务通过后台 worker 执行，前端可查看进度、日志和失败信息。
+- 流程模板：可将已排好顺序的单细胞或 Bulk 模块及参数保存为项目模板；在分析页选择项目内输入文件后可一键提交。服务端会重新读取模板，并校验模块依赖、参数 schema、项目路径与符号链接，浏览器不能借模板注入任意模块、参数或命令。
 - 参数面板：每个模块有结构化参数 schema，包含中文标签、默认值、类型和帮助说明。
 - 结果管理：任务结果写入数据库，支持图表查看、CSV/XLSX 表格下载和 h5ad 中间文件下载；模块写出的每个结果文件都会登记到任务结果清单。
 - 科研级图表：Scanpy/Matplotlib 原生图默认保存为 300 dpi PNG 和 SVG 矢量图，结果页优先展示 PNG，并提供 PNG/SVG 下载。
@@ -26,12 +27,12 @@
 
 ### 单细胞转录组分析
 
-平台提供 14 个核心单细胞分析模块，并补充批量导入、细胞级 DEG、GO 富集、pseudobulk DEG 和标准 CSV 结果包等交付模块。核心顺序为：
+平台提供 16 个核心单细胞分析模块，并补充批量导入、细胞级 DEG、GO 富集、pseudobulk DEG 和标准 CSV 结果包等交付模块。核心顺序为：
 
 ```text
 qc -> normalize -> hvg -> dimred -> batch_correct -> clustering
-  -> qc_reassess / annotation / subcluster / sc_timecourse / deg
-  -> trajectory / proportion / cell_communication / virtual_ko
+  -> qc_reassess / annotation -> functional_state / subcluster / sc_timecourse / deg
+  -> trajectory / proportion / neighborhood_da / cell_communication / virtual_ko
 ```
 
 | 模块 | 主要功能 | 典型输出 |
@@ -45,14 +46,21 @@ qc -> normalize -> hvg -> dimred -> batch_correct -> clustering
 | `subcluster` | 对指定 cluster 进行子簇重聚类、差异表达和通路富集 | 子簇 UMAP、marker 表、热图、富集结果 |
 | `qc_reassess` | 聚类后按簇评估 doublet、MT、ribo、细胞数，支持自动移除低质量簇 | 低质量簇表、按簇 QC 汇总图、doublet/MT UMAP、QC 指标 UMAP 面板、低质量簇高亮图 |
 | `annotation` | 分层 cell lineage/type/subtype、独立 multi-label cell state；`Colorectal` 面板先判 broad lineage 再细分 goblet/TA/absorptive/inflammatory 等上皮亚型；逐簇保存候选、正负 Marker、决策原因；Doublet 继承 QC 实际运行的 caller，Marker 混合不冒充 Doublet；环境 RNA 仅检查异源谱系 Marker；可选本地 CellTypist 参考（不覆盖 Marker 标签） | 细胞类型 UMAP、细胞类型组成图、marker score heatmap、marker dotplot、marker 表达验证图、annotation score UMAP、成熟度 UMAP、CellTypist 参考 UMAP、逐簇复核表 |
+| `functional_state` | 在选定 celltype 范围内并列评估关键基因表达、`scanpy.score_genes` 功能通路和 CollecTRI + decoupler ULM 支持的 TF 活性；正式条件比较以 sample × celltype 聚合，逐细胞图仅作描述性展示 | 基因表达 dotplot、TF/通路评分热图、condition UMAP、样本级 violin/FDR、相关性散点、TF–pathway concordance matrix、coverage/overlap QC 与 manifest |
 | `sc_timecourse` | 按真实时间点进行样本级细胞组成和伪 bulk 基因动态分析，区分描述性趋势与统计推断 | 时间点 UMAP、组成曲线/热图、动态基因表和趋势图 |
 | `deg` | cluster/celltype marker（探索性） | 火山图、显著 DEG 数量图、top marker UMAP 面板、dotplot、marker heatmap、基因表达 UMAP |
 | `trajectory` | Diffusion Map、DPT、PAGA 拟时序 | pseudotime UMAP、pseudotime 分布图、PAGA 图、基因随拟时序变化图 |
 | `proportion` | 细胞比例统计和组间比较，支持卡方、Fisher、置换检验 | 堆叠柱图、比例 heatmap、饼图、比例统计表 |
+| `neighborhood_da` | 在高维整合/PCA 空间构建重叠 KNN 邻域，并以每个样本的邻域比例进行条件比较；适合连续的 stress/TA/absorptive 上皮状态 | 邻域元数据、样本级邻域比例、Mann–Whitney + 每比较 BH-FDR、DA UMAP 图 |
 | `cell_communication` | 基于 LIANA 的配体-受体通讯分析 | 通讯热图、气泡图、通讯网络图、交互表 |
 | `virtual_ko` | 基于 CellOracle 的 GRN 推断（Ridge 回归）与 in silico 基因敲除扰动模拟；内置人类 promoter base GRN（hg19/hg38）或上传自定义 base GRN；在独立 celloracle 环境（Python 3.9/3.10）中运行 | GRN 边表 CSV、每个基因的状态偏移 CSV、Top 受调控基因 CSV、quiver 向量场、模拟流场网格、细胞分群+流场、偏移分布图（PNG+SVG）、含模拟结果的 h5ad |
+| `scenic` | 本地读取预计算的 SCENIC AUCell 及 regulon 定义；不以 TF 表达替代 regulon 活性，也不在网页运行中隐式重建网络 | AUCell regulon 热图、RSS 特异性气泡/条形图、可选 regulon 靶基因网络、regulon 共活性相关热图、完整 RSS/选择审计 CSV |
 
 `annotation` 还提供可选的脱敏 LLM 辅助注释：仅向配置的模型发送 cluster 级 marker 摘要（不含表达矩阵、细胞条码、样本元数据或项目路径），返回结果只作为候选证据，须人工复核后采纳。
+
+`functional_state` 的 TF activity 绝不等同于 TF 基因表达：前者仅在本地、版本冻结的网络靶基因覆盖充分时计算。它还将 ctrl/dis 分层相关性与 regulator–pathway 一致性作为探索性效应量展示，不以细胞数替代生物学重复。完整的输入安全、资源校验、统计合同和延期范围见 [功能状态模块说明](docs/FUNCTIONAL_STATE_IMPLEMENTATION.md)；标准 Hallmark/Reactome/GO 通路库的管理员同步、许可和覆盖度策略见[托管基因集注册表](docs/MANAGED_GENE_SET_REGISTRY.md)。
+
+`scenic` 与上述 ULM TF activity 是互补模块：它展示预计算 SCENIC regulon 的 AUCell 与 RSS 细胞群特异性，而不是在网页中从表达量临时推断 GRN。输入结构、图形解释边界以及与 CellOracle/样本级 pseudobulk 的分工见 [SCENIC 分析说明](docs/SCENIC_ANALYSIS.md)。
 
 ### Bulk RNA-seq 分析
 
@@ -181,7 +189,33 @@ data/projects/<project_id>/
 
 ## 安装与启动
 
-建议使用 Python 3.10+ 和独立虚拟环境。`requirements.txt` 是非锁定依赖清单，包含核心运行包和注释、通讯、批次整合、AI 等扩展功能所需的可选包；生产部署应在验证环境后生成自己的锁定文件。
+### 从 GitHub 克隆后的可运行范围
+
+可以从 GitHub 克隆后直接启动 Web 应用、创建项目，并运行不依赖外部参考的常规
+scRNA-seq / Bulk RNA-seq 流程；`data/`、SQLite 数据库、缓存和项目目录都会在首次
+运行时创建。仓库**不会**也不应包含研究数据、密钥、CellTypist 模型、通路库、WES
+参考或容器镜像。因此，“启动应用”和“启用所有可选分析能力”是两件不同的事：
+
+| 能力 | 克隆 + `requirements.txt` | 额外需要 |
+| --- | --- | --- |
+| Web、项目管理、常规单细胞/Bulk 分析、PNG/SVG、Excel 输入/输出 | 可以 | 用户自行上传的表达数据；不附带示例人类数据 |
+| Bulk `bulk_enrichment` | 首次运行可联网下载 Enrichr 基因集 | 无外网时，管理员须预置 `genesets/<library>.txt` 或 `data/go_gene_sets/<library>.gmt` |
+| `sc_cell_go` 的离线 ORA/GSEA | 不会自动下载 | `data/go_gene_sets/<library>.gmt`（或项目内目录的同名 `.gmt`/`.txt`）；见下方“本地资源” |
+| `functional_state` 标准 Hallmark/Reactome/GO | 内置小型 signature 可运行 | 管理员同步版本冻结的基因集；CollecTRI TF activity 另需本地网络快照 |
+| CellTypist 参考注释 | 包已安装，但模型未随仓库提供 | 可信 `.pkl` 模型放入 `SC_CELLTYPIST_MODEL_DIR` |
+| `scenic` | 可运行 | 输入 H5AD 必须已有 AUCell `obsm` 矩阵和 regulon 定义；网页不重建 SCENIC 网络 |
+| `virtual_ko` | 不可仅靠主 Python 环境运行 | 独立 Python 3.9/3.10 的 CellOracle 环境，以及 base GRN（首次使用内置 GRN 需要联网下载） |
+| WES 真正执行 | 默认关闭 | Nextflow/Docker 与 Sarek 工具链、已验证的 GRCh38/capture/VEP 资源；见 [WES P2/P3 Runbook](docs/WES_P2_P3_RUNBOOK.md) |
+
+这使克隆环境保持轻量且不分发受许可或敏感资源；缺少上述可选资源时，对应模块应给出
+`unavailable`、警告或资源缺失信息，而不是把任务标为成功。
+
+### 基础安装
+
+建议在 Linux 上使用 Python 3.10–3.12 和独立虚拟环境。安装时需要访问 PyPI；部分
+科学计算扩展（例如 `louvain`、`inmoose`）可能从源码构建，因此无预编译 wheel 的主机还
+需要标准 C/C++ 构建工具和 Python 开发头文件。`requirements.txt` 是运行时依赖清单，尚未
+锁定版本，生产环境应在验证后生成自己的锁定文件。
 
 ```bash
 git clone https://github.com/gejun030123-cyber/sc-transcriptomics-platform.git
@@ -192,56 +226,72 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
+# 可选：只有在需要覆盖默认路径、访问控制或 AI/WES 配置时才创建 .env
+cp .env.example .env
+
+# 初始化检查：会创建空的本地 data/ 与 instance/，不需要参考数据
+python - <<'PY'
+from app import create_app
+create_app()
+print('应用初始化成功')
+PY
+
 python app.py
 ```
 
-可选依赖：
+默认访问地址为 `http://localhost:5000`。`SECRET_KEY` 未设置时会在
+`instance/.secret_key` 自动生成；服务器若暴露到受控内网以外，必须在 `.env` 设置
+强 `PLATFORM_ACCESS_PASSWORD`，并通过 HTTPS / VPN 等受控入口访问。
 
-- `celltypist`：启用本地人类 CellTypist 参考交叉验证；类器官注释不把外部模型作为默认真值，冲突结果保留人工复核。
-- `liana`：启用细胞通讯分析；未安装时该任务会明确返回 `unavailable` 和安装提示，不会伪装成成功。
-- `gseapy`：用于本地 GMT/TXT 过度富集分析，以及子簇/Bulk 的兼容富集路径；未安装时核心聚类和差异分析仍可使用。
-- `harmonypy`、`bbknn`、`scanorama`、`scvi-tools`、`torch`：启用 Harmony、BBKNN、Scanorama、SysVI/scVI 批次整合路径；未安装时对应方法不可用。
-- `kneed`：启用 Kneedle 自动 PC 选择。
-- `plotly`：仅用于兼容历史分析模块的内部数据结构；网页、报告和下载结果均不再输出 Plotly 交互图。
-- `openai` 或 `anthropic`：启用对应 AI API 客户端。
+`requirements.txt` 已包括以下 Python 包；安装成功不等于其所需的本地参考也已具备：
 
-默认访问地址：
+- `openpyxl`：`.xlsx` 输入、样本 manifest 与 Excel 结果导出。
+- `celltypist`：本地人类 CellTypist 参考交叉验证；模型文件需另行放置，且不会覆盖 Marker 注释。
+- `liana`、`gseapy`、`decoupler==2.2.0`：分别用于细胞通讯、富集和 CollecTRI ULM TF activity。
+- `harmonypy`、`bbknn`、`scanorama`、`scvi-tools`、`torch`、`kneed`：批次整合、深度模型与 Kneedle 自动 PC 选择。
+- `pydeseq2`、`inmoose`、`pysam`：Bulk 统计和 WES 内容预检；WES calling 本身仍是外部工作流。
+- `openai`、`anthropic`：AI 客户端；未配置 API key 时 AI 对话会明确拒绝，不影响其他模块。
 
-```text
-http://localhost:5000
-```
-
-### 受控外网访问（NAT123）
-
-如果需要通过 NAT123 将平台提供给其他网络的实验室成员使用，先在服务器的
-`.env` 中设置共享访问密码（不要把密码提交到 Git）：
-
-```dotenv
-PLATFORM_ACCESS_PASSWORD=请替换为长度较长的随机密码
-PLATFORM_ACCESS_SESSION_HOURS=12
-```
-
-重启平台进程后，所有网页、上传/下载路径和 `/api/` 接口都会要求先在
-`/login` 输入该密码；登录状态保存在 Flask 签名会话中。NAT123 映射时选择
-“非 80 网站”，内网地址填写 `127.0.0.1`，内网端口填写 `5000`，然后使用 NAT123
-生成的外网域名和端口访问。
-
-NAT123 会把服务发布到公网，访问密码只是共享访问门槛，不等同于按用户隔离的
-项目权限。涉及真实人类基因组数据时，应优先使用学校 VPN/WireGuard，并为正式
-部署增加 HTTPS、用户登录和项目权限；不要直接把未设置
-`PLATFORM_ACCESS_PASSWORD` 的平台映射到公网。
-
-平台进程与 NAT123 隧道是两个独立的 systemd 服务。修改代码后只需重启平台，
-无需重启 NAT123，外网地址也不会改变：
+下列路径有兼容回退，因而不放入基础依赖；需要相应增强结果时再安装：
 
 ```bash
-./scripts/platform-service.sh restart  # 重启并等待本地 HTTP 就绪
-./scripts/platform-service.sh status   # 查看平台状态
-./scripts/platform-service.sh logs     # 跟踪平台日志，Ctrl+C 退出
+# MDE 降维、模糊 c-means 时间轨迹、2–3 个比较的 Venn 图
+python -m pip install pymde fuzzy-c-means matplotlib-venn
 ```
 
-若 5000 端口仍由手工执行的 `python app.py` 占用，脚本会拒绝启动第二个实例，
-也不会自动杀死旧进程，以免中断正在运行的分析。
+### 本地资源与管理员准备
+
+所有资源目录必须由管理员控制，使用普通文件而非符号链接；不要把 FASTQ、BAM、CRAM、
+全量 VCF、项目路径或身份信息发送给外部服务。
+
+- **CellTypist：** 将已审核的模型（例如 `Immune_All_Low.pkl`）放入
+  `data/references/celltypist/`，或在 `.env` 设置 `SC_CELLTYPIST_MODEL_DIR`。
+- **`sc_cell_go` 离线富集：** 在 `data/go_gene_sets/` 放置页面所选库的同名
+  `<library>.gmt` 或 `<library>.txt`。pseudobulk ORA/GSEA 强制使用本地库；只有兼容的
+  细胞级 ORA 可显式选择 Enrichr，此时基因列表会发送到该在线服务。
+- **`functional_state`：** 标准库同步到
+  `${FUNCTIONAL_STATE_RESOURCE_DIR:-data/functional_state_resources}/gene_sets/`：
+
+  ```bash
+  python scripts/sync_managed_gene_sets.py \
+    --resource-dir "${FUNCTIONAL_STATE_RESOURCE_DIR:-data/functional_state_resources}"
+  ```
+
+  该管理员命令从固定的官方来源下载 Hallmark、Reactome 和 GO，并记录版本、许可与
+  SHA-256；细节见[托管基因集注册表](docs/MANAGED_GENE_SET_REGISTRY.md)。若要计算 TF
+  activity，还需在同一资源根放置 `collectri_human.tsv`，并为其保存来源/版本/SHA-256
+  元数据；缺失时仍输出基因表达和通路评分，但不会声称计算了 TF activity。
+- **`virtual_ko`：** 设置 `CELLORACLE_PYTHON` 指向独立 Python 3.9/3.10 环境；该环境
+  必须安装 CellOracle 及其依赖。内置人类 promoter base GRN 首次使用会下载并缓存；无外网
+  部署应预先缓存，或上传经审核的 base GRN。
+- **WES：** 保持 `WES_EXECUTOR_ENABLED=false`，直到 Nextflow、Docker/Apptainer profile、
+  Sarek release、GRCh38 FASTA/索引/known sites、somatic PoN、VEP cache 与 capture BED
+  都已登记和 checksum 验证。它们不能通过 `pip` 或本仓库获得；完整清单与登记步骤见
+  [WES P2/P3 Runbook](docs/WES_P2_P3_RUNBOOK.md)。
+
+启动后可在网页的依赖状态页查看模块可用性；设置了 `AI_API_TOKEN` 时，访问
+`/api/system/dependencies` 需要携带相应 Bearer token。每个模块会分别报告 `missing`
+（无法运行）与 `optional_missing`（只影响增强能力）。
 
 频繁开发时，可在服务器 `.env` 中临时开启自动重载：
 
@@ -254,8 +304,6 @@ HTML、CSS 或 JavaScript 文件会自动重载应用进程，浏览器刷新即
 交互式调试器仍保持关闭。安装/升级依赖或修改 `.env` 后仍应执行完整重启。
 自动重载会中断进程内正在执行的分析任务，因此只应在无人运行分析的开发时段
 开启；跑正式分析前将该值改为 `0` 并重启平台。
-
-运行后可访问 `/api/system/dependencies` 查看依赖状态。每个模块同时返回 `missing`（缺少即不可运行的依赖）和 `optional_missing`（只影响某项扩展能力的依赖），因此页面或部署检查不应仅依据整组依赖是否全部安装来判断模块是否可用。
 
 ### 图像输出与下载
 
@@ -321,7 +369,7 @@ AI_API_TOKEN=""
 5. 执行 `qc_reassess` 检查低质量簇。
 6. 执行 `annotation`：结直肠/肠类器官选择 `Colorectal`，未知组织先用 `Universal`，其他场景选择 `Organoid`、`PBMC`、`Immune`、`Blood`、`TME` 或自定义 marker。
 7. 执行 `deg`，检查 marker heatmap、火山图和统计审计。
-8. 根据项目需要继续 `trajectory`、`proportion`、`cell_communication`。
+8. 根据项目需要继续 `trajectory`、`proportion`、`neighborhood_da`、`cell_communication`。
 9. 单样本/探索性项目运行 `sc_cell_deg`，有生物学重复的正式条件比较运行 `sc_pseudobulk_deg`；随后在 `sc_cell_go` 明确选择对应的 DEG 任务运行 Human ORA/GSEA。默认无需整理 CSV 数据包。
 
 ### Bulk 网页流程
@@ -333,6 +381,10 @@ AI_API_TOKEN=""
 5. 执行 `bulk_deg`，设置比较组、统计方法和阈值。
 6. 执行 `bulk_heatmap` 或 `bulk_enrichment`。
 7. 多比较场景执行 `bulk_deg_integration`。
+
+### 流程模板一键运行
+
+在单细胞或 Bulk 分析页中，将当前拖拽排序后的模块和参数保存为“流程模板”。之后在对应分析首页选择该模板与项目内输入文件，点击“运行流程”即可后台顺序执行。模板只保存分析配置，不保存输入路径；每次运行都会重新检查模块顺序、参数可用性和输入文件边界。长时间或重计算步骤仍由现有后台并发上限控制，失败流程可从结果页按已有机制续跑。
 
 ### WES 网页流程
 
@@ -375,6 +427,7 @@ AI_API_TOKEN=""
 | `/projects/<pid>/upload/discover-10x-directory` | `POST` | 在允许的服务器目录内扫描 10x 矩阵并生成 manifest 模板 |
 | `/projects/<pid>/upload/import-10x-manifest` | `POST` | 校验已填写的 sample manifest 后异步合并任意多个 10x 样本 |
 | `/api/projects/<pid>/pipeline-runs` | `POST/GET` | 创建或列出批量 pipeline run |
+| `/api/projects/<pid>/pipeline-templates/<preset_id>/run` | `POST` | 按服务端保存的项目/全局流程模板启动一次 pipeline run（请求体只提供项目内输入文件） |
 | `/api/pipeline-runs/<run_id>/status` | `GET` | 查看 pipeline run 状态 |
 | `/api/projects/<pid>/current-context` | `GET` | 查看当前分析基线 |
 | `/api/projects/<pid>/branches` | `GET/POST` | 列出或创建候选分支 |
@@ -403,9 +456,10 @@ python scripts/run_bulk_reference.py --help
 
 ## 测试
 
-运行全部测试：
+安装测试依赖后运行全部测试：
 
 ```bash
+python -m pip install -r requirements-dev.txt
 python -m pytest tests/ -q
 ```
 
@@ -500,7 +554,7 @@ templates/                  # Jinja2 页面模板
 tests/                      # 单元、集成、语义和 Agent 测试
 scripts/                    # 参考流程、工具脚本和平台服务管理
 docs/                       # 设计、计划和审批文档
-deploy/                     # systemd 服务文件（平台进程与 NAT123 隧道）
+deploy/                     # 平台的 systemd 服务文件
 genesets/                   # 通路基因集资源
 data/                       # 本地项目数据，默认不纳入 git
 ```
@@ -510,11 +564,31 @@ data/                       # 本地项目数据，默认不纳入 git
 Git 仓库只保存源代码、模板、测试和维护文档。以下内容只属于本地运行环境，默认由 `.gitignore` 排除：
 
 - `data/`、`instance/`、`cache/`：用户数据、SQLite 数据库、中间矩阵和运行缓存。
+- `data/references/`、`data/go_gene_sets/`、`data/functional_state_resources/`、`genesets/`：
+  参考模型、受控基因集与首次富集下载缓存；它们需按上述资源流程另行准备。
 - `bulk_reference_output*/`、`artifacts/`：参考流程、图形验证和导出产物，可由脚本重新生成。
 - `.env`：本地密钥和部署参数，禁止提交。
-- Python/pytest 缓存、覆盖率输出、安装包以及根目录下自动生成的运行报告。
+- `.runtime/`、Python/pytest 缓存、覆盖率输出、安装包以及根目录下自动生成的运行报告。
 
 需要分享分析结果时，请从项目结果页导出，或使用 `sc_csv_export` 等交付模块生成独立结果包，不要把大型 `.h5ad`、原始矩阵或含样本信息的运行目录直接提交到 Git。
+
+### 分析产物保留与磁盘空间
+
+当前版本**不会自动删除**已完成任务的 `results/task_artifacts/`；这保证历史结果可追溯，但重复运行大型单细胞流程会累积 `.h5ad` 快照。管理员应定期监控 `DATA_DIR` 所在数据卷，并在人工确认后处理过期产物，不能直接删除仍被分支或任务结果引用的文件。
+
+产物去重、快照保留和带审计的清理尚未实现，后续应按[单细胞分析产物保留策略设计](docs/single-cell-artifact-retention-design.md)分阶段落地。该文档中的 `SC_ARTIFACT_*` 配置项是设计提案，**并非当前版本可直接启用的功能**。
+
+发布到 GitHub 前，维护者应确认所有新源码、模板、脚本和文档都已加入版本控制，而不是只
+存在于开发机；下面三项检查不应出现意外输出：
+
+```bash
+git diff --check
+git status --short
+git ls-files --others --exclude-standard
+```
+
+第二、三条中出现的功能源码必须 `git add` 后再提交；`.env`、`data/`、`instance/` 和真实
+人类数据仍应保持忽略。否则 GitHub 用户得到的克隆会缺少模块，即使本机工作树能运行。
 
 ## 配置项
 
@@ -525,11 +599,14 @@ Git 仓库只保存源代码、模板、测试和维护文档。以下内容只�
 | `CACHE_DIR` | `<DATA_DIR>/cache` | Scanpy 等分析读取缓存目录 |
 | `DB_PATH` | `<repo>/instance/bioinfo.db` | SQLite 数据库路径 |
 | `BULK_REFERENCE_OUTPUT_DIR` | `<DATA_DIR>/bulk_reference_output` | Bulk 参考流程默认输出目录 |
-| `CELLMARKER_PATH` | repo 上级目录下 `CellMarker_Augmented_2021.txt` | 可选 CellMarker 数据 |
+| `CELLMARKER_PATH` | repo 上级目录下 `CellMarker_Augmented_2021.txt` | 兼容保留项；当前默认流程不要求克隆者提供该文件 |
+| `SC_CELLTYPIST_MODEL_DIR` | `<repo>/data/references/celltypist` | 可选 CellTypist `.pkl` 模型的受控目录 |
+| `FUNCTIONAL_STATE_RESOURCE_DIR` | `<DATA_DIR>/functional_state_resources` | 管理员冻结的 Hallmark/Reactome/GO 与 CollecTRI 资源根目录 |
 | `MAX_WORKERS` | `2` | 后台分析任务并发数 |
 | `MIN_FREE_RAM_GB` | `4` | 资源保护阈值 |
 | `CUDA_DEVICES` | `0,1` | GPU 设备配置 |
 | `SC_BATCH_SOURCE_ROOTS` | 空（关闭） | 可供网页只读批量导入的服务器数据根目录；Linux 多个根用 `:` 分隔，例如 `/home/oelab/data/GJ:/mnt/sc_data` |
+| `PLATFORM_ACCESS_PASSWORD` | 空 | 受控部署的共享访问门槛；公网/跨网访问必须设置并结合 HTTPS/VPN |
 | `AI_API_KEY` | 空 | AI API key |
 | `AI_API_URL` | 默认兼容 Anthropic 的 URL | AI API endpoint；DeepSeek 可用 `https://api.deepseek.com/anthropic` |
 | `AI_MODEL` | `mimo-v2.5-pro` | AI 模型名；DeepSeek 常用 `deepseek-chat` |
@@ -537,7 +614,7 @@ Git 仓库只保存源代码、模板、测试和维护文档。以下内容只�
 | `WES_SOURCE_ROOTS` | 空（关闭） | WES 服务器只读数据根目录白名单，多个根用 `:` 分隔 |
 | `WES_EXECUTOR_ENABLED` | 关闭 | 是否允许启动 Nextflow WES 运行；关闭时仍可准备和审阅 run |
 | `WES_NEXTFLOW_GENOME` | `GATK.GRCh38` | Sarek/iGenomes 参考键；配套资源路径见 `WES_NEXTFLOW_*` 变量 |
-| `CELLORACLE_PYTHON` | 独立 celloracle 环境 | virtual_ko 使用的 Python 3.9/3.10 解释器路径 |
+| `CELLORACLE_PYTHON` | 本机开发路径（必须覆盖） | virtual_ko 使用的独立 CellOracle Python 3.9/3.10 解释器路径；新部署不可依赖该默认绝对路径 |
 
 ## 功能边界
 

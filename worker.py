@@ -72,8 +72,14 @@ def _snapshot_task_artifacts(task, project_dir, result):
         path_map.setdefault(source_path, target)
         return target
 
+    # A module can return its input h5ad alongside an ``error`` merely to
+    # satisfy the historical result shape.  It is not an output and copying it
+    # both wastes storage and makes a failed task look usable downstream.
+    failed_result = bool(_result_error(result))
     output_path = result.get('output_adata')
-    if isinstance(output_path, str) and output_path:
+    if failed_result:
+        result['output_adata'] = None
+    elif isinstance(output_path, str) and output_path:
         result['output_adata'] = copy_one(output_path, 'output_adata' + os.path.splitext(output_path)[1])
 
     snapshots = []
@@ -223,20 +229,38 @@ def _run_task(task_id, project_id, module_name, params, project_dir, input_path)
 
         module = cls(project_dir=project_dir, params=params, progress_callback=progress_cb)
 
-        # Best-effort input validation before running
-        try:
-            adata = module.load_adata(input_path)
-            validation_error = module.validate_input(adata)
-            if validation_error:
-                raise ValueError(f"输入验证失败: {validation_error}")
-        except FileNotFoundError:
-            logger.debug(f"[Worker] Input file not found for validation: {input_path}")
-        except ImportError as ie:
-            logger.debug(f"[Worker] Module dependency missing for validation: {ie}")
-        except (OSError, ValueError) as e:
-            # 非 h5ad 文件（CSV/TSV/Excel）无法通过 load_adata 加载，
-            # 但模块内部的 run() 可能使用 read_expression_matrix() 正确处理
-            logger.debug(f"[Worker] Input validation skipped for {input_path}: {e}")
+        # ``sc_cell_go`` does not read the chained h5ad at all.  It uses the
+        # server-bound, task-scoped DEG CSV files validated by its own module
+        # contract.  Avoid importing Scanpy merely to preflight an irrelevant
+        # h5ad; besides needless latency this made an otherwise independent
+        # ORA task fail when launched from a short-lived worker process.
+        if module_name != "sc_cell_go":
+            # Best-effort input validation before running
+            adata = None
+            try:
+                adata = module.load_adata(input_path)
+                validation_error = module.validate_input(adata)
+                if validation_error:
+                    raise ValueError(f"输入验证失败: {validation_error}")
+            except FileNotFoundError:
+                logger.debug(f"[Worker] Input file not found for validation: {input_path}")
+            except ImportError as ie:
+                logger.debug(f"[Worker] Module dependency missing for validation: {ie}")
+            except (OSError, ValueError) as e:
+                # 非 h5ad 文件（CSV/TSV/Excel）无法通过 load_adata 加载，
+                # 但模块内部的 run() 可能使用 read_expression_matrix() 正确处理
+                logger.debug(f"[Worker] Input validation skipped for {input_path}: {e}")
+            finally:
+                # ``module.run()`` re-reads the same h5ad.  Releasing the
+                # preflight object first keeps peak memory at one copy of the
+                # dataset instead of two (the local name would otherwise stay
+                # alive for the whole run).
+                del adata
+        else:
+            logger.debug(
+                "[Worker] Skipping chained h5ad preflight for sc_cell_go; "
+                "the bound DEG source files are validated by the module."
+            )
 
         result = module.run(input_path)
 
@@ -421,7 +445,7 @@ def _run_pipeline_run(run_id, project_id, modules, params_by_module, project_dir
 
             # 链式传递
             current_input = output_adata
-            if module_name in {'sc_cell_deg', 'sc_pseudobulk_deg'}:
+            if module_name in {'deg', 'sc_cell_deg', 'sc_pseudobulk_deg'}:
                 source_files = summary.get('deg_source_files') or []
                 source_level = str(summary.get('deg_source_level') or '')
                 if source_files and source_level in {'cell_level', 'pseudobulk'}:
