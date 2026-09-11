@@ -157,7 +157,7 @@ def _search_keywords(query):
 
 def _managed_gene_set_dir():
     """与 sc_cell_go 相同的平台本地基因集目录。"""
-    return (Path(Config.DATA_DIR) / "go_gene_sets").resolve()
+    return Path(Config.sc_cell_go_gene_set_dir()).resolve()
 
 
 def _resolve_libraries(libraries):

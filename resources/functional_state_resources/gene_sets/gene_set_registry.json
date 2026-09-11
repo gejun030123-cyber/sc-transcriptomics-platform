@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-11T03:38:24.954612+00:00",
+  "organism": "Human",
+  "libraries": [
+    {
+      "key": "hallmark_human",
+      "resource": "MSigDB Hallmark",
+      "version": "2026.1.Hs",
+      "file": "hallmark/h.all.v2026.1.Hs.symbols.gmt",
+      "sha256": "eecaf6dad908334ae885406ec72bdc0646d8917588ed7c219fac92fc5363f596",
+      "n_gene_sets": 50,
+      "source_url": "https://data.broadinstitute.org/gsea-msigdb/msigdb/release/2026.1.Hs/h.all.v2026.1.Hs.symbols.gmt",
+      "license": "CC BY 4.0 (per-gene-set terms retained by MSigDB)",
+      "license_url": "https://www.gsea-msigdb.org/gsea/msigdb/index.jsp"
+    },
+    {
+      "key": "reactome_human",
+      "resource": "Reactome Pathways",
+      "version": "ReactomePathways.gmt_2026-06-21",
+      "file": "reactome/reactome_human_current.gmt",
+      "sha256": "89983d5c1f0af11c52edfeee7323eb425580ac6281d387a528562ab1787ce56b",
+      "n_gene_sets": 2868,
+      "source_url": "https://reactome.org/download/current/ReactomePathways.gmt.zip",
+      "license": "CC0 1.0",
+      "license_url": "https://reactome.org/license"
+    },
+    {
+      "key": "go_bp_human",
+      "resource": "GO Biological Process",
+      "version": "2026-07-26_direct_gaf",
+      "file": "go/go_bp_human_2026-07-26.gmt",
+      "sha256": "7496c7d99c9cf271926b0e4dc2ae0c1ce2b7ddeeccfa42d8544724e097ad1683",
+      "n_gene_sets": 11172,
+      "source_url": "https://current.geneontology.org/annotations/gaf/HUMAN-uniprot.gaf.gz",
+      "ontology_source_url": "https://current.geneontology.org/ontology/go-basic.obo",
+      "license": "CC BY 4.0",
+      "license_url": "https://geneontology.org/docs/go-citation-policy/",
+      "annotation_policy": "direct human GAF annotations only; no ancestor propagation"
+    },
+    {
+      "key": "go_mf_human",
+      "resource": "GO Molecular Function",
+      "version": "2026-07-26_direct_gaf",
+      "file": "go/go_mf_human_2026-07-26.gmt",
+      "sha256": "cb77ace6de1e022c1bb03b8c502d7dc69f76b3f7ba292788ec3a3c990bd40c8e",
+      "n_gene_sets": 4865,
+      "source_url": "https://current.geneontology.org/annotations/gaf/HUMAN-uniprot.gaf.gz",
+      "ontology_source_url": "https://current.geneontology.org/ontology/go-basic.obo",
+      "license": "CC BY 4.0",
+      "license_url": "https://geneontology.org/docs/go-citation-policy/",
+      "annotation_policy": "direct human GAF annotations only; no ancestor propagation"
+    },
+    {
+      "key": "go_cc_human",
+      "resource": "GO Cellular Component",
+      "version": "2026-07-26_direct_gaf",
+      "file": "go/go_cc_human_2026-07-26.gmt",
+      "sha256": "bc1ffeb52b0de62bd415fdd73e07df8ef05fb695d858d9582aebd971235f24ea",
+      "n_gene_sets": 1949,
+      "source_url": "https://current.geneontology.org/annotations/gaf/HUMAN-uniprot.gaf.gz",
+      "ontology_source_url": "https://current.geneontology.org/ontology/go-basic.obo",
+      "license": "CC BY 4.0",
+      "license_url": "https://geneontology.org/docs/go-citation-policy/",
+      "annotation_policy": "direct human GAF annotations only; no ancestor propagation"
+    }
+  ]
+}

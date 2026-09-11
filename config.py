@@ -91,6 +91,11 @@ class Config:
     FUNCTIONAL_STATE_RESOURCE_DIR = os.environ.get(
         'FUNCTIONAL_STATE_RESOURCE_DIR', ''
     ).strip()
+    # The repository carries a small, versioned public baseline so a clean
+    # clone can run local pathway and TF-activity analyses without fetching
+    # resources at runtime.  An administrator may override it with a
+    # separately maintained controlled directory.
+    SC_CELL_GO_GENE_SET_DIR = os.environ.get('SC_CELL_GO_GENE_SET_DIR', '').strip()
     DB_PATH = os.environ.get('DB_PATH', os.path.join(_BASE_DIR, 'instance', 'bioinfo.db'))
     CELLMARKER_PATH = os.environ.get('CELLMARKER_PATH', os.path.join(os.path.dirname(_BASE_DIR), 'CellMarker_Augmented_2021.txt'))
 
@@ -238,11 +243,33 @@ class Config:
 
     @classmethod
     def functional_state_resource_dir(cls):
-        """Return the administrator-controlled functional-state resource root."""
+        """Return an administrator override, local snapshot, or bundled baseline."""
         configured = str(cls.FUNCTIONAL_STATE_RESOURCE_DIR or '').strip()
-        return os.path.abspath(
-            configured or os.path.join(cls.DATA_DIR, 'functional_state_resources')
-        )
+        if configured:
+            return os.path.abspath(configured)
+        local_root = os.path.abspath(os.path.join(cls.DATA_DIR, 'functional_state_resources'))
+        if (
+            os.path.isfile(os.path.join(local_root, 'gene_sets', 'gene_set_registry.json'))
+            or os.path.isfile(os.path.join(local_root, 'collectri_human.tsv'))
+        ):
+            return local_root
+        return os.path.abspath(os.path.join(cls._BASE_DIR, 'resources', 'functional_state_resources'))
+
+    @classmethod
+    def sc_cell_go_gene_set_dir(cls):
+        """Return the local override or bundled GMT directory for ``sc_cell_go``."""
+        configured = str(cls.SC_CELL_GO_GENE_SET_DIR or '').strip()
+        if configured:
+            return os.path.abspath(configured)
+        local_root = os.path.abspath(os.path.join(cls.DATA_DIR, 'go_gene_sets'))
+        if os.path.isdir(local_root) and any(
+            name.lower().endswith(('.gmt', '.txt')) for name in os.listdir(local_root)
+        ):
+            return local_root
+        functional_root = os.path.join(cls.functional_state_resource_dir(), 'gene_sets')
+        if os.path.isfile(os.path.join(functional_root, 'gene_set_registry.json')):
+            return functional_root
+        return os.path.join(cls._BASE_DIR, 'resources', 'functional_state_resources', 'gene_sets')
 
     @classmethod
     def configure_runtime_tmpdir(cls):

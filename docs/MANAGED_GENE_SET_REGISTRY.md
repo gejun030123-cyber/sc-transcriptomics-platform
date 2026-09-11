@@ -1,33 +1,33 @@
 # 托管基因集注册表
 
-`functional_state` 的标准通路评分使用受管理员控制的本地快照，不在分析任务中联网，也不接受网页传入的文件路径。资源默认位于：
+`functional_state` 的标准通路评分使用受管理员控制的本地快照，不在分析任务中联网，也不接受网页传入的文件路径。干净克隆默认使用随仓库提供的只读基线：
 
 ```text
-data/functional_state_resources/gene_sets/
+resources/functional_state_resources/gene_sets/
 ├── gene_set_registry.json
 ├── hallmark/
 ├── reactome/
-├── go/
-└── sources/
+└── go/
 ```
 
 `gene_set_registry.json` 保存每个 GMT 的来源 URL、版本、许可证、SHA-256 和 term 数；`sources/` 保留 Reactome ZIP、GO OBO 与 Human GAF 的原始校验对象。分析开始时会重新计算所选 GMT 的 SHA-256，校验失败即停止，不会悄悄使用被替换的基因集。
 
 ## 管理员同步
 
-在部署环境中执行：
+随库基线已覆盖 Hallmark、Reactome、GO 与 CollecTRI v2.0，不必联网同步即可运行默认功能。若管理员需要替换或更新通路快照，先将资源根设置为独立的受控目录，再执行：
 
 ```bash
+export FUNCTIONAL_STATE_RESOURCE_DIR=/srv/sc-platform/references/functional_state
 python scripts/sync_managed_gene_sets.py --resource-dir "$FUNCTIONAL_STATE_RESOURCE_DIR"
 ```
 
-未设置 `FUNCTIONAL_STATE_RESOURCE_DIR` 时，使用 `data/functional_state_resources`。该命令只访问固定的官方来源并写入管理员资源目录：
+未设置 `FUNCTIONAL_STATE_RESOURCE_DIR` 时，平台会继续使用随库基线；该命令只访问固定的官方来源并写入管理员资源目录：
 
 - MSigDB Hallmark Human 2026.1.Hs；
 - Reactome `ReactomePathways.gmt`；
 - Gene Ontology `go-basic.obo` 与 `HUMAN-uniprot.gaf.gz`，生成 direct-annotation 的 Human BP/MF/CC GMT。
 
-GO 转换不进行祖先 term 传播；该策略与 GO release、GAF 生成日期共同写入注册表。同步前应确认 MSigDB 的适用许可；Reactome 数据为 CC0，GO 数据为 CC BY 4.0，许可证链接随运行 manifest 输出。
+GO 转换不进行祖先 term 传播；该策略与 GO release、GAF 生成日期共同写入注册表。同步前应确认 MSigDB 的适用许可；Reactome 数据为 CC0，GO 数据为 CC BY 4.0，许可证链接随运行 manifest 输出。替换 TF 网络时，还须同时放入 `collectri_human.tsv` 与同名 `.metadata.json`，并核对 SHA-256、来源和许可。随库的第三方资源说明见 [`resources/THIRD_PARTY_DATA_NOTICES.md`](../resources/THIRD_PARTY_DATA_NOTICES.md)。
 
 ## 分析时的 QC
 

@@ -11,6 +11,7 @@ but the implementation now has two explicit evidence levels:
 
 import os
 import json
+import hashlib
 import re
 import ast
 from datetime import datetime, timezone
@@ -61,6 +62,16 @@ PATHWAY_TRIPTYCH_DATABASES = {
     "KEGG_2021_Human": "KEGG",
     "Reactome_2022": "Reactome",
     "WikiPathway_2021_Human": "WikiPathways",
+}
+
+# The UI identifiers are retained for saved runs and historical result names.
+# A fresh clone resolves the public, versioned bundled snapshots through the
+# functional-state registry rather than requiring a writable ``data/`` cache.
+BUNDLED_GENE_SET_ALIASES = {
+    "GO_Biological_Process_2023": "go_bp_human",
+    "GO_Cellular_Component_2023": "go_cc_human",
+    "GO_Molecular_Function_2023": "go_mf_human",
+    "Reactome_2022": "reactome_human",
 }
 
 
@@ -160,6 +171,38 @@ def _local_gene_set_path(library, directory):
         if base not in resolved.parents:
             raise ValueError('本地 GO 基因集文件必须位于选定目录内。')
         if resolved.is_file():
+            return resolved
+
+    registry_path = base / "gene_set_registry.json"
+    if registry_path.is_symlink():
+        raise ValueError('本地 GO 基因集注册表不能是符号链接。')
+    if registry_path.is_file():
+        try:
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError('本地 GO 基因集注册表格式无效。') from exc
+        registry_key = BUNDLED_GENE_SET_ALIASES.get(library, library)
+        records = registry.get("libraries", []) if isinstance(registry, dict) else []
+        record = next(
+            (item for item in records if isinstance(item, dict) and item.get("key") == registry_key),
+            None,
+        )
+        if record is not None:
+            relative_path = str(record.get("file", "")).strip()
+            expected_sha = str(record.get("sha256", "")).strip().lower()
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", relative_path):
+                raise ValueError(f'本地 GO 基因集 {library} 的注册表路径无效。')
+            if not re.fullmatch(r"[a-f0-9]{64}", expected_sha):
+                raise ValueError(f'本地 GO 基因集 {library} 的注册表校验值无效。')
+            candidate = base / relative_path
+            if candidate.is_symlink():
+                raise ValueError('本地 GO 基因集文件不能是符号链接。')
+            resolved = candidate.resolve()
+            if base not in resolved.parents or not resolved.is_file():
+                raise FileNotFoundError(f'本地 GO 基因集缺失: {library}')
+            digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            if digest != expected_sha:
+                raise ValueError(f'本地 GO 基因集 {library} 校验失败；请重新获取受控资源快照。')
             return resolved
     raise FileNotFoundError(
         f"本地 GO 基因集缺失: {library}；请在 {base} 放置 {library}.gmt 或 .txt"

@@ -17,6 +17,9 @@ venv/
 /data
 /.test_tmp/
 genesets/
+# The bundled resource registry and compiled GMTs are versioned; downloaded
+# source caches are reproducibility inputs, not runtime requirements.
+/resources/functional_state_resources/gene_sets/sources/
 .superpowers/
 /cache
 
