@@ -206,6 +206,31 @@ def adjust_labels(texts: Sequence, ax, *, arrow_color='#77808C'):
         return
 
 
+def ensure_angled_annotation_leaders(texts: Sequence, y_limit: float):
+    """Keep short annotation leaders visibly diagonal after a repel pass.
+
+    ``adjustText`` can correctly resolve a collision by landing a label at the
+    same y coordinate as its point.  For a volcano plot that reads as an
+    unnecessarily long horizontal callout.  This small, bounded correction is
+    applied only to annotations already expressed in data coordinates.
+    """
+    vertical_offset = max(0.20, float(y_limit) * 0.025)
+    lower, upper = float(y_limit) * 0.04, float(y_limit) * 0.96
+    for text in texts:
+        if not hasattr(text, 'xy') or not hasattr(text, 'get_position'):
+            continue
+        try:
+            point_x, point_y = (float(value) for value in text.xy)
+            text_x, text_y = (float(value) for value in text.get_position())
+        except (TypeError, ValueError):
+            continue
+        if abs(text_y - point_y) >= vertical_offset * 0.65:
+            continue
+        direction = -1 if point_y >= float(y_limit) * 0.82 else 1
+        corrected_y = min(upper, max(lower, point_y + direction * vertical_offset))
+        text.set_position((text_x, corrected_y))
+
+
 def prune_overlapping_labels(texts: Sequence, ax):
     """Hide only the lowest-priority labels that still collide after layout.
 
@@ -226,8 +251,26 @@ def prune_overlapping_labels(texts: Sequence, ax):
     visible = [text for text in texts if text.get_visible()]
     hidden = []
     while len(visible) > 1:
-        boxes = [text.get_window_extent(renderer=renderer).expanded(1.02, 1.08)
-                 for text in visible]
+        boxes = []
+        for text in visible:
+            # Annotation.get_window_extent() includes its leader line.  Two
+            # non-overlapping labels that point to nearby genes would then be
+            # reported as colliding solely because their leaders cross.  The
+            # boxed text is the visual element that needs collision control.
+            patch = text.get_bbox_patch() if hasattr(text, 'get_bbox_patch') else None
+            if patch is not None and patch.get_visible():
+                box = patch.get_window_extent(renderer=renderer)
+            else:
+                # Annotation.get_window_extent() includes its leader line.
+                # With unboxed, short volcano labels, that line can cross a
+                # neighbour even when the glyphs themselves do not overlap.
+                # Ask the Text base class for the label-only rectangle.
+                try:
+                    from matplotlib.text import Text
+                    box = Text.get_window_extent(text, renderer=renderer)
+                except Exception:
+                    box = text.get_window_extent(renderer=renderer)
+            boxes.append(box.expanded(1.02, 1.08))
         conflict = None
         for left in range(len(visible)):
             for right in range(left + 1, len(visible)):

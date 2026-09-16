@@ -1,7 +1,47 @@
 import os
+import re
 import numpy as np
 import pandas as pd
 from modules.base import BaseAnalysis
+
+
+# Human mitochondrial genes in Ensembl use stable IDs rather than an ``MT-``
+# prefix.  This local set covers the 37 genes encoded by the human mitochondrial
+# genome (protein-coding genes, rRNAs and tRNAs).  It is deliberately only a
+# fallback: a supplied gene symbol or chromosome annotation remains the
+# preferred and more general source of truth.
+#
+# The tRNAs are the fragile part.  Different GTF releases assign the same
+# genomic tRNA to different stable IDs (e.g. MT-TP is ENSG00000210195 in some
+# GENCODE builds and ENSG00000210196 in others), so the set is a *union* over
+# releases rather than a single-release snapshot.  A chromosome column or a
+# symbol column therefore always wins over this list.
+_HUMAN_MITOCHONDRIAL_ENSEMBL_IDS = frozenset({
+    'ENSG00000210049', 'ENSG00000211459', 'ENSG00000210077', 'ENSG00000210082',
+    'ENSG00000209082', 'ENSG00000198888', 'ENSG00000210100', 'ENSG00000210107',
+    'ENSG00000210112', 'ENSG00000198763', 'ENSG00000210117', 'ENSG00000210127',
+    'ENSG00000210135', 'ENSG00000210140', 'ENSG00000210144', 'ENSG00000198804',
+    'ENSG00000210151', 'ENSG00000210154', 'ENSG00000198712', 'ENSG00000210156',
+    'ENSG00000228253', 'ENSG00000198899', 'ENSG00000198938', 'ENSG00000210164',
+    'ENSG00000198840', 'ENSG00000210165', 'ENSG00000210196', 'ENSG00000212907',
+    'ENSG00000198886', 'ENSG00000210174', 'ENSG00000210176', 'ENSG00000210184',
+    'ENSG00000198786', 'ENSG00000198695', 'ENSG00000210191', 'ENSG00000198727',
+    'ENSG00000210194', 'ENSG00000210195',
+})
+
+_GENE_SYMBOL_COLUMNS = frozenset({
+    'gene_name', 'genename', 'gene_symbol', 'genesymbol', 'gene_symbols',
+    'symbol', 'feature_name', 'gene',
+})
+_GENE_ID_COLUMNS = frozenset({
+    'gene_id', 'geneid', 'gene_ids', 'ensembl_gene_id', 'ensembl_id', 'feature_id',
+})
+_CHROMOSOME_COLUMNS = frozenset({
+    'chromosome', 'chrom', 'chr', 'seqname', 'seq_name', 'sequence_name',
+})
+_MITOCHONDRIAL_CHROMOSOMES = frozenset({
+    'MT', 'M', 'CHRMT', 'CHRM', 'MITOCHONDRION', 'MITOCHONDRIAL',
+})
 
 
 class BulkQCAnalysis(BaseAnalysis):
@@ -27,6 +67,7 @@ class BulkQCAnalysis(BaseAnalysis):
         from modules.io_utils import (
             read_expression_matrix, materialize_auto_sample_metadata,
             resolve_expression_measurement, run_bulk_sample_pca,
+            validate_bulk_raw_counts,
         )
         adata = read_expression_matrix(input_path)
         input_measurement, measurement_info = resolve_expression_measurement(
@@ -39,6 +80,8 @@ class BulkQCAnalysis(BaseAnalysis):
             )
         adata.uns['input_measurement'] = input_measurement
         adata.uns['input_measurement_provenance'] = measurement_info
+        if input_measurement == 'raw_counts':
+            validate_bulk_raw_counts(adata, context='Bulk QC')
 
         # 应用自定义过滤规则
         adata = self.apply_filters(adata, 'bulk_qc')
@@ -88,15 +131,84 @@ class BulkQCAnalysis(BaseAnalysis):
         materialize_auto_sample_metadata(adata, self.params.get('_auto_group_mapping', {}))
 
         self.progress(20, "计算质控指标...")
-        # 优先用 gene_name 检测线粒体基因（Ensembl ID 不以 MT- 开头）
-        if 'gene_name' in adata.var.columns:
-            # h5ad 会将重复字符串列读为 categorical；先转 StringDtype 再填空值。
-            gene_names_for_mt = adata.var['gene_name'].astype('string').fillna('')
-        else:
-            gene_names_for_mt = adata.var_names.astype(str)
-        adata.var['mt'] = gene_names_for_mt.str.startswith('MT-')
-        adata.var['ribo'] = gene_names_for_mt.str.startswith(('RPL', 'RPS'))
+        # ``var_names`` may be Ensembl IDs, so MT- prefix matching alone is
+        # not enough.  Prefer a supplied symbol, then chromosome annotation,
+        # then the local canonical human Ensembl-MT IDs.  Never silently turn
+        # an unidentifiable MT fraction into 0%.
+        mt_detection = _detect_mitochondrial_genes(adata)
+        adata.var['mt'] = mt_detection['mask']
+        ribo_names = _preferred_gene_symbols(adata)
+        adata.var['ribo'] = ribo_names.str.upper().str.startswith(('RPL', 'RPS'))
         sc.pp.calculate_qc_metrics(adata, qc_vars=['mt', 'ribo'], percent_top=None, log1p=False, inplace=True)
+        # A fraction is only meaningful when matching mitochondrial features
+        # actually carry signal.  ``calculate_qc_metrics`` returns a
+        # deceptively reassuring 0.0 both when no MT feature was identified and
+        # when the identified MT features are entirely absent from the matrix,
+        # so keep those two failure modes explicit instead of reporting 0% as
+        # evidence of clean samples.
+        mt_evaluable = bool(mt_detection['n_mitochondrial_genes'] > 0)
+        mt_feature_totals = (
+            pd.to_numeric(adata.var.loc[adata.var['mt'], 'total_counts'], errors='coerce')
+            if 'total_counts' in adata.var.columns else pd.Series(dtype=float)
+        )
+        mt_genes_with_counts = (
+            int((mt_feature_totals.fillna(0.0) > 0).sum()) if mt_evaluable else 0
+        )
+        mt_total_counts = (
+            float(np.nansum(adata.obs['total_counts_mt'].to_numpy(dtype=float)))
+            if 'total_counts_mt' in adata.obs.columns else 0.0
+        )
+        mt_has_signal = bool(mt_evaluable and mt_total_counts > 0)
+        # Hard filtering only makes sense for raw counts with usable MT signal;
+        # comparing an all-zero column against max_mt_pct would "apply" a
+        # threshold that can never reject a sample.
+        mt_filter_enabled = bool(input_measurement == 'raw_counts' and mt_has_signal)
+        if not mt_evaluable:
+            adata.obs['pct_counts_mt'] = np.nan
+            mt_detection.update({
+                'status': 'not_identified',
+                'figure_annotation': '',
+                'message': (
+                    '未识别到线粒体基因；MT% 无法计算，max_mt_pct 阈值未应用。'
+                    '请提供 gene symbol、chromosome=MT/chrM 注释，或使用标准 human Ensembl gene ID。'
+                ),
+            })
+        elif not mt_has_signal:
+            mt_detection.update({
+                'status': 'identified_no_reads',
+                'figure_annotation': 'MT genes found, 0 MT reads',
+                'message': (
+                    f'识别到 {mt_detection["n_mitochondrial_genes"]} 个线粒体基因，但全部样本的 MT counts 均为 0；'
+                    'MT% 恒为 0，不能作为样本质量证据，max_mt_pct 阈值未应用。'
+                    '请检查上游定量是否遗漏 chrM/MT（例如 featureCounts 参考 GTF 未包含线粒体序列，'
+                    '或表达矩阵在导入前已剔除 MT 基因）。'
+                ),
+            })
+        else:
+            mt_detection.update({
+                'status': 'identified',
+                'figure_annotation': (
+                    f'{mt_genes_with_counts}/{mt_detection["n_mitochondrial_genes"]} MT genes with counts'
+                ),
+                'message': (
+                    '' if mt_filter_enabled else
+                    '已计算 MT expression fraction；连续/已变换表达输入不应用 max_mt_pct 硬过滤。'
+                ),
+            })
+        mt_detection.update({
+            'informative': mt_has_signal,
+            'total_mt_counts': mt_total_counts,
+            'mt_genes_with_counts': mt_genes_with_counts,
+            'max_mt_pct': float(max_mt_pct),
+            'threshold_applied': mt_filter_enabled,
+        })
+        if mt_detection['message']:
+            self.progress(-1, mt_detection['message'])
+        # Keep the source and threshold decision with the h5ad handoff so a
+        # downstream DEG result can be audited without relying on task logs.
+        adata.uns['bulk_qc_mitochondrial_detection'] = {
+            key: value for key, value in mt_detection.items() if key != 'mask'
+        }
 
         n_before = adata.n_obs
         lib_sizes = adata.obs['total_counts'].values
@@ -127,7 +239,8 @@ class BulkQCAnalysis(BaseAnalysis):
         )
 
         # 样本过滤
-        mask = (lib_sizes >= min_counts) & (n_genes_detected >= min_genes) & (mt_pct <= max_mt_pct) & (ribo_pct <= max_ribo_pct)
+        mt_mask = (mt_pct <= max_mt_pct) if mt_filter_enabled else np.ones(n_before, dtype=bool)
+        mask = (lib_sizes >= min_counts) & (n_genes_detected >= min_genes) & mt_mask & (ribo_pct <= max_ribo_pct)
         if max_gini > 0:
             mask = mask & (gini_values <= max_gini)
 
@@ -139,7 +252,7 @@ class BulkQCAnalysis(BaseAnalysis):
                 fail_reasons.append(f'library_size<{min_counts}')
             if input_measurement == 'raw_counts' and n_genes_detected[i] < min_genes:
                 fail_reasons.append(f'n_genes<{min_genes}')
-            if mt_pct[i] > max_mt_pct:
+            if mt_filter_enabled and mt_pct[i] > max_mt_pct:
                 fail_reasons.append(f'mt_pct>{max_mt_pct}')
             if ribo_pct[i] > max_ribo_pct:
                 fail_reasons.append(f'ribo_pct>{max_ribo_pct}')
@@ -233,7 +346,16 @@ class BulkQCAnalysis(BaseAnalysis):
         overview = [
             {'values': lib_sizes, 'title': quantity_label, 'ylabel': quantity_label},
             {'values': n_genes_detected, 'title': gene_metric_label, 'ylabel': gene_metric_label},
-            {'values': mt_pct, 'title': mt_metric_label, 'ylabel': 'MT expression %' if input_measurement != 'raw_counts' else 'MT%'},
+            {
+                'values': mt_pct, 'title': mt_metric_label,
+                'ylabel': 'MT expression %' if input_measurement != 'raw_counts' else 'MT%',
+                # A true all-zero MT fraction is still scientifically useful;
+                # render it rather than making the reader infer that the
+                # metric was never calculated.  The annotation carries the
+                # reason so an all-zero panel is never read as clean samples.
+                'show_if_invariant': mt_evaluable,
+                'annotation': mt_detection['figure_annotation'],
+            },
             {'values': ribo_pct, 'title': ribo_metric_label, 'ylabel': 'RPL/RPS expression %' if input_measurement != 'raw_counts' else 'RPL/RPS %'},
             {'values': gini_values, 'title': 'Gini coefficient', 'ylabel': 'Gini'},
         ]
@@ -241,7 +363,7 @@ class BulkQCAnalysis(BaseAnalysis):
         for item in overview:
             finite_values = np.asarray(item['values'], dtype=float)
             finite_values = finite_values[np.isfinite(finite_values)]
-            if finite_values.size == 0 or np.nanmax(finite_values) - np.nanmin(finite_values) <= 1e-12:
+            if (finite_values.size == 0 or np.nanmax(finite_values) - np.nanmin(finite_values) <= 1e-12) and not item.get('show_if_invariant', False):
                 invariant.append(item['title'])
         result_files.extend(_export_diagnostic(
             director.render(
@@ -579,6 +701,22 @@ class BulkQCAnalysis(BaseAnalysis):
             'genes_before': genes_before_filter,
             'genes_after': adata_filtered.n_vars,
             'genes_removed': genes_before_filter - adata_filtered.n_vars,
+            'gene_expression_filter': {
+                'applied_in_qc': min_sample_expr > 0,
+                'minimum_samples': int(min_sample_expr),
+                'minimum_value': float(min_count_threshold),
+                'value_scale': 'raw_counts' if input_measurement == 'raw_counts' else input_measurement,
+                'n_genes_removed_in_qc': int(genes_before_filter - adata_filtered.n_vars),
+                'required_before_deg': True,
+                'message': (
+                    'QC 阶段未启用低表达基因过滤（min_sample_expr=0）；'
+                    'genes_removed=0 是预期结果，不代表无需过滤。'
+                    '进入 Bulk DEG（DESeq2/edgeR/limma）前必须经过 Bulk normalization，'
+                    '其默认按 CPM≥1 且至少 3 个样本表达过滤低表达基因，并记录实际过滤数量。'
+                    if min_sample_expr == 0 else
+                    '已在 QC 阶段应用低表达基因过滤。'
+                ),
+            },
             'outlier_samples': outlier_samples if detect_outliers else [],
             'outlier_detection': outlier_detection_details,
             'filter_strategy': filter_strategy,
@@ -588,6 +726,13 @@ class BulkQCAnalysis(BaseAnalysis):
             'qc_transform_for_correlation_and_pca': qc_transform,
             'pca_preprocessing': pca_preprocessing,
             'count_qc_hard_filters_applied': input_measurement == 'raw_counts',
+            'mitochondrial_qc': {
+                key: value for key, value in mt_detection.items() if key != 'mask'
+            },
+            'median_mt_pct': (
+                round(float(np.nanmedian(adata_filtered.obs['pct_counts_mt'])), 2)
+                if mt_evaluable and adata_filtered.n_obs else None
+            ),
             'median_genes': int(np.median(adata_filtered.obs['n_genes_by_counts'])),
             'median_ribo_pct': round(float(np.median(adata_filtered.obs['pct_counts_ribo'])), 2) if 'pct_counts_ribo' in adata_filtered.obs.columns else 0,
             'median_gini': round(float(np.median(gini_filtered)), 4),
@@ -609,6 +754,15 @@ class BulkQCAnalysis(BaseAnalysis):
             )
             summary['median_expressed_genes'] = int(np.median(adata_filtered.obs['n_genes_by_counts']))
 
+        # Surface actionable QC caveats in one place so a manifest reader never
+        # has to infer them from a null threshold or an unchanged gene count.
+        qc_warnings = []
+        if mt_detection['message']:
+            qc_warnings.append(mt_detection['message'])
+        if min_sample_expr == 0:
+            qc_warnings.append(summary['gene_expression_filter']['message'])
+        summary['warnings'] = qc_warnings
+
         return {
             'output_adata': output_path,
             'result_files': result_files,
@@ -617,6 +771,94 @@ class BulkQCAnalysis(BaseAnalysis):
 
 
 # --- 辅助函数 ---
+
+
+def _normalise_annotation_column_name(column):
+    """Normalise a ``var`` column name only for known annotation aliases."""
+    return re.sub(r'[^a-z0-9]+', '_', str(column).strip().lower()).strip('_')
+
+
+def _text_series(values, index):
+    """Return a nullable-safe, stripped text Series for AnnData annotations."""
+    return pd.Series(values, index=index, dtype='string').fillna('').str.strip()
+
+
+def _annotation_columns(adata, accepted_names):
+    """Find all matching annotation columns while preserving their order."""
+    return [
+        column for column in adata.var.columns
+        if _normalise_annotation_column_name(column) in accepted_names
+    ]
+
+
+def _preferred_gene_symbols(adata):
+    """Return the best available symbol/name per gene, falling back to var_names.
+
+    This is intentionally a per-row fallback: imported matrices can have an
+    incomplete ``gene_name`` column, and a valid secondary symbol column should
+    still identify the remaining mitochondrial or ribosomal genes.
+    """
+    values = _text_series(adata.var_names, adata.var.index)
+    for column in _annotation_columns(adata, _GENE_SYMBOL_COLUMNS):
+        candidate = _text_series(adata.var[column], adata.var.index)
+        values = candidate.where(candidate.ne(''), values)
+    return values
+
+
+def _ensembl_without_version(values):
+    """Normalise Ensembl IDs without altering non-Ensembl identifiers."""
+    return values.str.replace(r'^(?:gene:)?(ENSG\d+)(?:\.\d+)?$', r'\1', regex=True).str.upper()
+
+
+def _detect_mitochondrial_genes(adata):
+    """Identify MT features from symbols, chromosome metadata, or human IDs.
+
+    The return value deliberately contains source-level counts.  A value such
+    as ``pct_counts_mt=0`` is not evidence that an Ensembl-only input was
+    handled correctly; the caller needs to know exactly how the MT mask was
+    derived and whether the threshold was allowed to act.
+    """
+    index = adata.var.index
+    mask = pd.Series(False, index=index, dtype=bool)
+    source_counts = {}
+
+    symbols = _preferred_gene_symbols(adata)
+    symbol_mask = symbols.str.upper().str.startswith('MT-')
+    if bool(symbol_mask.any()):
+        mask |= symbol_mask
+        source_counts['gene_symbol'] = int(symbol_mask.sum())
+
+    chromosome_mask = pd.Series(False, index=index, dtype=bool)
+    for column in _annotation_columns(adata, _CHROMOSOME_COLUMNS):
+        chromosome = _text_series(adata.var[column], index).str.upper().str.replace(r'\s+', '', regex=True)
+        hits = chromosome.isin(_MITOCHONDRIAL_CHROMOSOMES)
+        if bool(hits.any()):
+            chromosome_mask |= hits
+    if bool(chromosome_mask.any()):
+        mask |= chromosome_mask
+        source_counts['chromosome'] = int(chromosome_mask.sum())
+
+    ensembl_mask = pd.Series(False, index=index, dtype=bool)
+    # ``var_names`` is included even when ``gene_id`` exists: many imported
+    # h5ad files keep the raw stable ID only in the index.
+    id_sources = [_text_series(adata.var_names, index)]
+    id_sources.extend(_text_series(adata.var[column], index)
+                      for column in _annotation_columns(adata, _GENE_ID_COLUMNS))
+    for identifiers in id_sources:
+        hits = _ensembl_without_version(identifiers).isin(_HUMAN_MITOCHONDRIAL_ENSEMBL_IDS)
+        ensembl_mask |= hits
+    if bool(ensembl_mask.any()):
+        mask |= ensembl_mask
+        source_counts['human_ensembl_id'] = int(ensembl_mask.sum())
+
+    return {
+        'mask': mask.to_numpy(dtype=bool),
+        'n_mitochondrial_genes': int(mask.sum()),
+        'sources': source_counts,
+        'gene_symbol_columns': _annotation_columns(adata, _GENE_SYMBOL_COLUMNS),
+        'chromosome_columns': _annotation_columns(adata, _CHROMOSOME_COLUMNS),
+        'gene_id_columns': _annotation_columns(adata, _GENE_ID_COLUMNS),
+    }
 
 
 def _gini(values):
@@ -800,6 +1042,23 @@ def _finite_number_or_none(value):
     return numeric if np.isfinite(numeric) else None
 
 
+def _invariant_metric_note(values):
+    """Explain why a QC metric cannot yield a robust deviation threshold.
+
+    An all-zero or single-valued metric (for example MT% when the input has no
+    mitochondrial reads at all) produces ``threshold=None``.  Returning the
+    reason keeps that ``null`` auditable instead of looking like a missing
+    calculation.
+    """
+    finite = np.asarray(values, dtype=float).ravel()
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return 'no_finite_values'
+    if float(np.max(finite) - np.min(finite)) <= 1e-12:
+        return 'invariant_metric_no_threshold'
+    return ''
+
+
 def _unique_within_group_extreme(values, groups, *, direction):
     """Identify a single directional extreme inside each replicate group.
 
@@ -903,6 +1162,7 @@ def _detect_within_replicate_outliers(pca_coords, correlation_matrix, sample_nam
     pca_flag &= _unique_within_group_extreme(within_pca_distance, groups, direction='high')
     qc_metric_flags = np.zeros(n_samples, dtype=bool)
     qc_thresholds = {}
+    qc_threshold_notes = {}
     if qc_frame is not None and metric_names:
         for metric in metric_names:
             deviations = np.full(n_samples, np.nan, dtype=float)
@@ -916,6 +1176,9 @@ def _detect_within_replicate_outliers(pca_coords, correlation_matrix, sample_nam
             flags &= _unique_within_group_extreme(deviations, groups, direction='high')
             qc_metric_flags |= flags
             qc_thresholds[metric] = threshold
+            note = _invariant_metric_note(qc_frame[metric].to_numpy(dtype=float))
+            if note:
+                qc_threshold_notes[metric] = note
 
     signal_count = correlation_flag.astype(int) + pca_flag.astype(int) + qc_metric_flags.astype(int)
     outlier_flag = (peer_count >= 2) & (signal_count >= 2)
@@ -959,6 +1222,11 @@ def _detect_within_replicate_outliers(pca_coords, correlation_matrix, sample_nam
             metric: _finite_number_or_none(threshold)
             for metric, threshold in qc_thresholds.items()
         },
+        # A null threshold means "no usable spread", not "metric was never
+        # computed".  Record the reason so an invariant metric such as an
+        # all-zero MT% is not read as a platform failure.
+        'qc_metric_deviation_threshold_notes': qc_threshold_notes,
+        'invariant_qc_metrics': sorted(qc_threshold_notes),
         'warning': ('Groups with fewer than 3 retained samples are exported but not automatically '
                     'flagged because they lack two independent peers.'),
     }

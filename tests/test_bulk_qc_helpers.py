@@ -33,6 +33,178 @@ def test_gini_empty():
     assert _gini(vals) == 0.0
 
 
+def test_bulk_mt_detection_recognizes_versioned_human_ensembl_ids():
+    """Ensembl-only human counts must not bypass the MT% QC threshold."""
+    import anndata as ad
+    from modules.bulk_qc import _detect_mitochondrial_genes
+
+    adata = ad.AnnData(
+        X=np.ones((2, 3)),
+        var=pd.DataFrame(index=[
+            'ENSG00000198888.2',  # MT-ND1
+            'ENSG00000141510',    # TP53
+            'ENSG00000111640',    # GAPDH
+        ]),
+    )
+
+    result = _detect_mitochondrial_genes(adata)
+
+    assert result['mask'].tolist() == [True, False, False]
+    assert result['n_mitochondrial_genes'] == 1
+    assert result['sources'] == {'human_ensembl_id': 1}
+
+
+def test_bulk_mt_detection_recognizes_chromosome_annotation_without_symbol():
+    """chrM/MT annotation is a species-agnostic fallback when symbols are absent."""
+    import anndata as ad
+    from modules.bulk_qc import _detect_mitochondrial_genes
+
+    adata = ad.AnnData(
+        X=np.ones((2, 3)),
+        var=pd.DataFrame(
+            {'Chr': ['chrM', '1', 'MT']},
+            index=['feature_1', 'feature_2', 'feature_3'],
+        ),
+    )
+
+    result = _detect_mitochondrial_genes(adata)
+
+    assert result['mask'].tolist() == [True, False, True]
+    assert result['n_mitochondrial_genes'] == 2
+    assert result['sources'] == {'chromosome': 2}
+
+
+def test_bulk_qc_applies_mt_threshold_for_ensembl_only_input(tmp_path):
+    """A high-MT Ensembl-only sample is actually filtered, not silently kept."""
+    import anndata as ad
+    from modules.bulk_qc import BulkQCAnalysis
+
+    adata = ad.AnnData(
+        X=np.array([
+            [30, 70, 50],   # MT-ND1 = 20%; threshold is inclusive
+            [25, 75, 50],
+            [5, 100, 30],
+            [50, 50, 10],   # MT-ND1 > 20%; must fail
+        ], dtype=int),
+        obs=pd.DataFrame(index=['S1', 'S2', 'S3', 'S4']),
+        var=pd.DataFrame(index=[
+            'ENSG00000198888', 'ENSG00000141510', 'ENSG00000111640',
+        ]),
+    )
+    input_path = tmp_path / 'ensembl_only_counts.h5ad'
+    adata.write_h5ad(input_path)
+
+    result = BulkQCAnalysis(
+        str(tmp_path), {
+            'input_measurement': 'raw_counts',
+            'min_counts': 0, 'min_genes': 0,
+            'max_mt_pct': 20, 'max_ribo_pct': 100,
+            'min_sample_expr': 0, 'detect_outliers': False,
+        }, lambda *_: None,
+    ).run(str(input_path))
+
+    mitochondrial_qc = result['summary']['mitochondrial_qc']
+    assert result['summary']['samples_after'] == 3
+    assert mitochondrial_qc['status'] == 'identified'
+    assert mitochondrial_qc['threshold_applied'] is True
+    assert mitochondrial_qc['sources']['human_ensembl_id'] == 1
+    metrics = pd.read_csv(tmp_path / 'results' / 'bulk_qc_sample_metrics.csv')
+    assert metrics.loc[metrics['sample'] == 'S4', 'fail_reasons'].item() == 'mt_pct>20.0'
+
+
+def test_bulk_mt_detection_covers_release_drifted_mt_tp_id():
+    """tRNA stable IDs drift between GTF releases; the union set must cover both."""
+    import anndata as ad
+    from modules.bulk_qc import _detect_mitochondrial_genes
+
+    adata = ad.AnnData(
+        X=np.ones((2, 2)),
+        var=pd.DataFrame(index=['ENSG00000210196', 'ENSG00000141510']),
+    )
+
+    result = _detect_mitochondrial_genes(adata)
+
+    assert result['mask'].tolist() == [True, False]
+    assert result['sources'] == {'human_ensembl_id': 1}
+
+
+def test_bulk_qc_flags_identified_mt_genes_with_zero_reads(tmp_path):
+    """Correctly identified MT genes without reads must not be reported as clean 0%."""
+    import anndata as ad
+    from modules.bulk_qc import BulkQCAnalysis
+
+    adata = ad.AnnData(
+        X=np.array([
+            [0, 100, 50],
+            [0, 120, 60],
+            [0, 90, 45],
+            [0, 110, 55],
+        ], dtype=int),
+        obs=pd.DataFrame(index=['S1_1', 'S1_2', 'S2_1', 'S2_2']),
+        var=pd.DataFrame(
+            {'gene_name': ['MT-ND1', 'GAPDH', 'ACTB']},
+            index=['ENSG00000198888', 'ENSG00000111640', 'ENSG00000149257'],
+        ),
+    )
+    input_path = tmp_path / 'zero_mt_counts.h5ad'
+    adata.write_h5ad(input_path)
+
+    result = BulkQCAnalysis(
+        str(tmp_path), {
+            'input_measurement': 'raw_counts',
+            'min_counts': 0, 'min_genes': 0,
+            'max_mt_pct': 20, 'max_ribo_pct': 100,
+            'min_sample_expr': 0, 'detect_outliers': False,
+        }, lambda *_: None,
+    ).run(str(input_path))
+
+    summary = result['summary']
+    mitochondrial_qc = summary['mitochondrial_qc']
+    # The MT feature is identified, but an all-zero block cannot support MT QC.
+    assert mitochondrial_qc['status'] == 'identified_no_reads'
+    assert mitochondrial_qc['informative'] is False
+    assert mitochondrial_qc['threshold_applied'] is False
+    assert mitochondrial_qc['total_mt_counts'] == 0
+    assert mitochondrial_qc['mt_genes_with_counts'] == 0
+    assert mitochondrial_qc['n_mitochondrial_genes'] == 1
+    # 0% stays the numeric truth; it is flagged instead of presented as evidence.
+    assert summary['median_mt_pct'] == 0.0
+    assert any('MT counts 均为 0' in warning for warning in summary['warnings'])
+    # QC intentionally keeps every gene, so genes_removed=0 must be explained.
+    assert any('genes_removed=0' in warning for warning in summary['warnings'])
+    assert summary['gene_expression_filter']['n_genes_removed_in_qc'] == 0
+    assert summary['gene_expression_filter']['applied_in_qc'] is False
+
+
+def test_outlier_diagnostic_explains_invariant_qc_metric_threshold():
+    """An invariant metric yields a null threshold; the reason must be recorded."""
+    from modules.bulk_qc import _detect_within_replicate_outliers
+
+    samples = ['Ctr_1', 'Ctr_2', 'Ctr_3', 'Treat_1', 'Treat_2', 'Treat_3']
+    groups = ['Ctr'] * 3 + ['Treat'] * 3
+    rng = np.random.default_rng(0)
+    coords = rng.normal(size=(6, 4))
+    corr = np.full((6, 6), 0.99)
+    np.fill_diagonal(corr, 1.0)
+    qc_metrics = pd.DataFrame(
+        {
+            'mt_pct': [0.0] * 6,
+            'ribo_pct': [4.0, 4.2, 3.9, 5.0, 5.1, 4.9],
+        },
+        index=samples,
+    )
+
+    _, details = _detect_within_replicate_outliers(
+        coords, corr, samples, groups, qc_metrics=qc_metrics,
+    )
+
+    assert details['qc_metric_deviation_thresholds']['mt_pct'] is None
+    assert details['qc_metric_deviation_threshold_notes']['mt_pct'] == 'invariant_metric_no_threshold'
+    assert 'mt_pct' in details['invariant_qc_metrics']
+    assert details['qc_metric_deviation_thresholds']['ribo_pct'] is not None
+    assert 'ribo_pct' not in details['qc_metric_deviation_threshold_notes']
+
+
 def test_infer_groups_dash():
     """样本名含 '-' → 取前缀"""
     from modules.bulk_qc import _infer_groups

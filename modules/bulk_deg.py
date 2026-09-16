@@ -31,84 +31,94 @@ def _save_native_figure(fig, plots_dir, stem, category, label, viz_params=None, 
 
 
 VOLCANO_COLORS = {
-    'Up': '#B64342',
-    'Down': '#0F4D92',
-    'NS': '#C7CDD6',
+    'Up': '#C65A5A',
+    'Down': '#4C78A8',
+    'NS': '#D9DEE5',
 }
 
 
-def _volcano_y_limit(padj, pval_threshold=0.05, max_display=30.0):
-    """Choose a readable display ceiling without changing stored statistics."""
+def _format_volcano_contrast_title(group1, group2):
+    """Make common condition/stratum group names readable without changing IDs."""
+    aliases = {'ctr': 'Control', 'ctrl': 'Control', 'control': 'Control'}
+
+    def split_group(value):
+        text = str(value or '').strip()
+        condition, separator, stratum = text.rpartition('_')
+        if separator and condition and stratum.casefold() in {'b', 'en'}:
+            return condition, stratum
+        return text, ''
+
+    def display_condition(value):
+        text = str(value or '').strip()
+        display = aliases.get(text.casefold(), text)
+        return display.replace('NH4Cl', 'NH₄Cl')
+
+    condition1, stratum1 = split_group(group1)
+    condition2, stratum2 = split_group(group2)
+    if stratum1 and stratum1 == stratum2:
+        return f'{display_condition(condition1)} vs {display_condition(condition2)} ({stratum1})'
+    return f'{display_condition(group1)} vs {display_condition(group2)}'
+
+
+def _volcano_y_limit(padj, pval_threshold=0.05, max_display=18.0):
+    """Choose a linear, compact FDR range without changing stored statistics."""
     padj = np.asarray(padj, dtype=float)
     safe_padj = np.clip(np.nan_to_num(padj, nan=1.0, posinf=1.0, neginf=1.0),
                         np.finfo(float).tiny, 1.0)
     y = -np.log10(safe_padj)
     finite = y[np.isfinite(y)]
-    if finite.size == 0:
-        return 8.0
-    robust_ceiling = float(np.nanpercentile(finite, 99.5))
     threshold_y = -np.log10(max(float(pval_threshold), np.finfo(float).tiny))
-    # Most publication volcano plots are more legible around 0–20.  A hard
-    # ceiling prevents padj underflow (padj=0 -> ~307) from flattening the
-    # entire plot; clipped points are explicitly marked by _draw_bulk_volcano.
-    return float(min(max_display, max(8.0, threshold_y + 3.0,
-                                    np.ceil(robust_ceiling + 1.0))))
+    if finite.size == 0:
+        return float(max(4.0, threshold_y + 1.5))
+    # Do not apply a nonlinear tail transform: points above the fixed ceiling
+    # are explicitly marked with triangles by _draw_bulk_volcano.
+    if float(np.nanmax(finite)) > float(max_display):
+        return float(max_display)
+    return float(max(4.0, threshold_y + 1.5, np.ceil(np.nanmax(finite) + 0.6)))
 
 
-def _volcano_label_positions(label_rows, y_limit, x_limit):
-    """Place volcano labels on two non-overlapping, in-panel rails.
-
-    Labels are allocated independently on the up- and down-regulated sides,
-    then separated in data coordinates.  This keeps the result deterministic
-    in PNG/SVG exports and avoids an optional layout dependency moving text
-    outside the plotting area.
-    """
+def _volcano_label_positions(label_rows, y_min, y_max, x_min, x_max):
+    """Seed labels with short angled leaders before the repel pass."""
     if not label_rows:
         return []
 
-    min_y = float(y_limit) * 0.08
-    max_y = float(y_limit) * 0.94
-    min_gap = max(0.55, float(y_limit) * 0.04)
+    x_span = float(x_max) - float(x_min)
+    y_span = float(y_max) - float(y_min)
+    x_midpoint = (float(x_min) + float(x_max)) / 2.0
     positions = []
-
     for direction, side in (('Up', 1), ('Down', -1)):
         side_rows = [row for row in label_rows if row['regulation'] == direction]
-        # Start with the point's y coordinate, then stack neighbouring labels
-        # vertically.  Sorting low-to-high makes the final order stable.
-        side_rows.sort(key=lambda row: row['y_point'])
-        if not side_rows:
-            continue
-
-        y_text = []
-        previous = min_y - min_gap
-        for row in side_rows:
-            proposed = max(min_y, min(max_y, row['y_point']))
-            y_position = max(proposed, previous + min_gap)
-            y_text.append(y_position)
-            previous = y_position
-
-        # Shift a full stack down together when labels near the top would
-        # exceed the rail.  With the <=10 annotation cap, this preserves the
-        # minimum gap in normal use; the compression fallback is defensive.
-        overflow = y_text[-1] - max_y
-        if overflow > 0:
-            y_text = [y - overflow for y in y_text]
-        if y_text[0] < min_y:
-            y_text = np.linspace(min_y, max_y, len(y_text)).tolist()
-
-        rail_x = side * float(x_limit) * 0.78
-        for row, text_y in zip(side_rows, y_text):
-            positions.append({**row, 'x_text': rail_x, 'y_text': float(text_y)})
+        for rank, row in enumerate(sorted(side_rows, key=lambda item: item['y_point'])):
+            label_side = side
+            # When the point is at either displayed x edge, point the label
+            # inwards.  This works for a deliberately asymmetric user range.
+            near_left = float(row['x_point']) <= float(x_min) + x_span * 0.22
+            near_right = float(row['x_point']) >= float(x_max) - x_span * 0.22
+            if near_left:
+                label_side = 1
+            elif near_right:
+                label_side *= -1
+            elif (float(row['x_point']) - x_midpoint) * label_side < 0:
+                label_side *= -1
+            y_side = -1 if float(row['y_point']) >= float(y_min) + y_span * 0.84 else 1
+            positions.append({
+                **row,
+                'x_text': float(row['x_point']) + label_side * x_span * 0.08,
+                'y_text': float(row['y_point']) + y_side * y_span * (0.05 + 0.02 * (rank // 2)),
+                'label_side': label_side,
+                'y_side': y_side,
+            })
 
     return positions
 
 
 def _draw_bulk_volcano(ax, deg_df, pval_threshold=0.05, fc_threshold=2.0,
                        title='', top_n=10, show_legend=True, y_limit=None,
-                       x_limit=None, colors=None):
+                       x_limit=None, x_min=None, x_max=None, y_min=None,
+                       colors=None):
     """Draw a restrained, readable Bulk RNA-seq volcano panel."""
     from matplotlib.lines import Line2D
-    from modules.figure_style import NATURE_AXIS, NATURE_GRID, NATURE_TEXT
+    from modules.figure_style import NATURE_AXIS, NATURE_TEXT
 
     palette = {**VOLCANO_COLORS, **(colors or {})}
     log2fc = pd.to_numeric(
@@ -125,15 +135,34 @@ def _draw_bulk_volcano(ax, deg_df, pval_threshold=0.05, fc_threshold=2.0,
     y_raw = -np.log10(safe_padj)
     if y_limit is None:
         y_limit = _volcano_y_limit(padj, pval_threshold)
-    clipped = np.isfinite(y_raw) & (y_raw > y_limit)
-    y_display = np.minimum(y_raw, y_limit * 0.985)
+    y_limit = float(y_limit)
+    try:
+        y_min = max(0.0, float(y_min)) if y_min is not None else 0.0
+    except (TypeError, ValueError):
+        y_min = 0.0
+    if y_min >= y_limit:
+        y_min = 0.0
+    y_cap_position = y_min + (y_limit - y_min) * 0.985
+    y_clipped = np.isfinite(y_raw) & (y_raw > y_limit)
+    y_display = np.minimum(y_raw, y_cap_position)
     log2fc_threshold = np.log2(max(float(fc_threshold), np.finfo(float).tiny))
 
-    finite_x = np.abs(log2fc[np.isfinite(log2fc)])
     if x_limit is None:
-        max_abs_x = float(np.nanmax(finite_x)) if finite_x.size else log2fc_threshold * 2
-        x_limit = max(2.5, log2fc_threshold * 1.8, max_abs_x * 1.08)
-        x_limit = float(np.ceil(x_limit * 2.0) / 2.0)
+        x_limit = max(2.5, float(np.ceil((log2fc_threshold + 0.25) * 2.0) / 2.0))
+    x_limit = float(x_limit)
+    try:
+        x_min = float(x_min) if x_min is not None else -x_limit
+        x_max = float(x_max) if x_max is not None else x_limit
+    except (TypeError, ValueError):
+        x_min, x_max = -x_limit, x_limit
+    if not np.isfinite(x_min) or not np.isfinite(x_max) or x_min >= x_max:
+        x_min, x_max = -x_limit, x_limit
+    x_span = x_max - x_min
+    # Keep the historical ±2.5 display at 98.5% of its edge while extending
+    # the same relative inboard margin to asymmetric user-selected ranges.
+    x_edge_inset = x_span * 0.0075
+    x_clipped = np.isfinite(log2fc) & ((log2fc < x_min) | (log2fc > x_max))
+    x_display = np.clip(log2fc, x_min + x_edge_inset, x_max - x_edge_inset)
 
     masks = {
         'NS': regulation == 'NS',
@@ -142,34 +171,46 @@ def _draw_bulk_volcano(ax, deg_df, pval_threshold=0.05, fc_threshold=2.0,
     }
     # Draw the dense neutral cloud first; significant points remain visible.
     for label, size, alpha, zorder in (
-        ('NS', 8, 0.30, 1), ('Down', 11, 0.82, 2), ('Up', 11, 0.84, 2),
+        ('NS', 4, 0.26, 1), ('Down', 9, 0.90, 2), ('Up', 9, 0.90, 2),
     ):
-        mask = masks[label] & np.isfinite(log2fc) & np.isfinite(y_display)
+        mask = (masks[label] & np.isfinite(log2fc) & np.isfinite(y_display)
+                & ~(x_clipped | y_clipped))
         if mask.any():
-            ax.scatter(log2fc[mask], y_display[mask], s=size,
+            ax.scatter(x_display[mask], y_display[mask], s=size,
                        color=palette[label], alpha=alpha,
                        linewidths=0, rasterized=True, zorder=zorder)
 
-    # Triangles make the display-only y clipping explicit rather than silently
-    # hiding extremely small adjusted P values.
-    if clipped.any():
-        ax.scatter(log2fc[clipped], y_display[clipped], s=17,
-                   c=[palette.get(label, palette['NS'])
-                      for label in regulation[clipped]],
-                   marker='^', alpha=0.92, linewidths=0,
-                   rasterized=True, zorder=4)
+    # Triangles make both display-only truncations explicit instead of
+    # widening the panel or applying a nonlinear FDR-tail transform.
+    for label in ('NS', 'Down', 'Up'):
+        label_mask = masks[label]
+        vertical = label_mask & y_clipped
+        if vertical.any():
+            ax.scatter(x_display[vertical], y_display[vertical], s=17,
+                       color=palette[label], marker='^', alpha=0.92,
+                       linewidths=0, rasterized=True, zorder=4)
+        left = label_mask & x_clipped & ~y_clipped & (log2fc < x_min)
+        right = label_mask & x_clipped & ~y_clipped & (log2fc > x_max)
+        if left.any():
+            ax.scatter(x_display[left], y_display[left], s=17,
+                       color=palette[label], marker='<', alpha=0.92,
+                       linewidths=0, rasterized=True, zorder=4)
+        if right.any():
+            ax.scatter(x_display[right], y_display[right], s=17,
+                       color=palette[label], marker='>', alpha=0.92,
+                       linewidths=0, rasterized=True, zorder=4)
 
     ax.axhline(-np.log10(max(float(pval_threshold), np.finfo(float).tiny)),
-               color='#98A2B3', linestyle='--', linewidth=0.75, zorder=3)
-    ax.axvline(log2fc_threshold, color='#98A2B3', linestyle='--', linewidth=0.75, zorder=3)
-    ax.axvline(-log2fc_threshold, color='#98A2B3', linestyle='--', linewidth=0.75, zorder=3)
-    ax.set_xlim(-x_limit, x_limit)
-    ax.set_ylim(0, y_limit)
+               color='#D9DEE5', linestyle='--', linewidth=0.65, alpha=0.60, zorder=3)
+    ax.axvline(log2fc_threshold, color='#D9DEE5', linestyle='--', linewidth=0.65, alpha=0.60, zorder=3)
+    ax.axvline(-log2fc_threshold, color='#D9DEE5', linestyle='--', linewidth=0.65, alpha=0.60, zorder=3)
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_limit)
     ax.set_title(title, loc='left', pad=8, fontsize=10,
                  fontweight='semibold', color=NATURE_TEXT)
-    ax.set_xlabel('log2(Fold Change)', fontsize=9, color=NATURE_TEXT)
-    ax.set_ylabel('-log10(adjusted P value)', fontsize=9, color=NATURE_TEXT)
-    ax.grid(axis='y', color=NATURE_GRID, linewidth=0.5, alpha=0.65)
+    ax.set_xlabel(r'log$_2$(fold change)', fontsize=9, color=NATURE_TEXT)
+    ax.set_ylabel(r'$-\log_{10}(\mathrm{FDR})$', fontsize=9, color=NATURE_TEXT)
+    ax.grid(False)
     ax.set_axisbelow(True)
     ax.tick_params(labelsize=8, colors=NATURE_AXIS, width=0.7, length=3)
     for spine_name, spine in ax.spines.items():
@@ -182,34 +223,35 @@ def _draw_bulk_volcano(ax, deg_df, pval_threshold=0.05, fc_threshold=2.0,
         handles = [
             Line2D([], [], marker='o', linestyle='None', markersize=5,
                    markerfacecolor=palette['Up'], markeredgewidth=0,
-                   label=f"Up-regulated (n={counts['Up']})"),
+                   label=f"Up  {counts['Up']:,}"),
             Line2D([], [], marker='o', linestyle='None', markersize=5,
                    markerfacecolor=palette['Down'], markeredgewidth=0,
-                   label=f"Down-regulated (n={counts['Down']})"),
+                   label=f"Down  {counts['Down']:,}"),
             Line2D([], [], marker='o', linestyle='None', markersize=5,
                    markerfacecolor=palette['NS'], markeredgewidth=0,
-                   label=f"Not significant (n={counts['NS']})"),
-            Line2D([], [], color='#98A2B3', linestyle='--', linewidth=0.75,
-                   label=f"Criteria: FDR<{pval_threshold:.3g}, FC>{fc_threshold:.3g}"),
+                   label=f"NS  {counts['NS']:,}"),
         ]
-        if clipped.any():
-            handles.append(Line2D([], [], marker='^', linestyle='None', markersize=5,
-                                   markerfacecolor='#667085', markeredgewidth=0,
-                                   label=f'{int(clipped.sum())} points clipped at y={y_limit:g}'))
         ax.legend(handles=handles, loc='upper left', bbox_to_anchor=(1.01, 1.0),
                   frameon=False, fontsize=7.5, handlelength=1.3,
                   borderaxespad=0.0)
 
     if top_n > 0 and not deg_df.empty:
         sig = deg_df[deg_df['regulation'].isin(['Up', 'Down'])].copy()
-        # ``top_n`` also controls the Top-DEG table.  A table can comfortably
-        # contain 20 entries, whereas annotating 20 points makes a volcano plot
-        # unreadable.  Keep the plot concise without changing any output table.
-        annotation_limit = min(max(int(top_n), 0), 10)
-        half = max(1, int(np.ceil(annotation_limit / 2)))
+        readable_sig = sig[~sig['gene'].astype(str).str.match(
+            r'^(?:ENS(?:G|MUSG|DARG|RNOG)\d+|[A-Za-z]+\d{8,})$', na=False,
+        )]
+        if readable_sig.empty:
+            readable_sig = sig
+        # ``top_n`` controls the result table, not visual density.  Label a
+        # compact mix of FDR-leading genes and the largest effects so the
+        # panel does not imply that FDR rank is the only biological priority.
+        annotation_limit = min(max(int(top_n), 0), 6)
+        fdr_per_side = 2 if annotation_limit >= 4 else 1
         selected = pd.concat([
-            sig[sig['regulation'] == 'Up'].nsmallest(half, 'padj'),
-            sig[sig['regulation'] == 'Down'].nsmallest(half, 'padj'),
+            readable_sig[readable_sig['regulation'] == 'Up'].nsmallest(fdr_per_side, 'padj'),
+            readable_sig[readable_sig['regulation'] == 'Down'].nsmallest(fdr_per_side, 'padj'),
+            readable_sig.assign(_abs_fc=readable_sig['log2FC'].abs())
+            .sort_values(['_abs_fc', 'padj'], ascending=[False, True]),
         ]).drop_duplicates(subset=['gene']).head(annotation_limit)
         label_rows = []
         for _, row in selected.iterrows():
@@ -220,29 +262,35 @@ def _draw_bulk_volcano(ax, deg_df, pval_threshold=0.05, fc_threshold=2.0,
             label_rows.append({
                 'gene': str(row['gene']),
                 'regulation': str(row['regulation']),
-                'x_point': x_value,
-                'y_point': min(y_value, y_limit * 0.985),
+                'x_point': float(np.clip(x_value, x_min + x_edge_inset, x_max - x_edge_inset)),
+                'y_point': min(y_value, y_cap_position),
             })
 
-        for label in _volcano_label_positions(label_rows, y_limit, x_limit):
-            ax.annotate(
+        texts = []
+        for label in _volcano_label_positions(label_rows, y_min, y_limit, x_min, x_max):
+            texts.append(ax.annotate(
                 label['gene'], (label['x_point'], label['y_point']),
                 xytext=(label['x_text'], label['y_text']), textcoords='data',
-                fontsize=7, ha='left' if label['regulation'] == 'Up' else 'right',
-                va='center', color=NATURE_TEXT, zorder=5,
-                bbox={
-                    'boxstyle': 'round,pad=0.22,rounding_size=0.12',
-                    'facecolor': 'white', 'edgecolor': '#D0D5DD',
-                    'linewidth': 0.55, 'alpha': 0.96,
-                },
+                fontsize=7, ha='left' if label['label_side'] > 0 else 'right',
+                va='bottom' if label['y_side'] > 0 else 'top',
+                color=NATURE_TEXT, zorder=5,
                 arrowprops={
-                    'arrowstyle': '->', 'color': '#667085', 'linewidth': 0.5,
-                    'shrinkA': 2, 'shrinkB': 2,
+                    'arrowstyle': '-', 'color': '#667085', 'linewidth': 0.5,
+                    'shrinkA': 1, 'shrinkB': 1,
                 },
+            ))
+        if texts:
+            from figure_engine.templates.common import (
+                adjust_labels, ensure_angled_annotation_leaders, prune_overlapping_labels,
             )
+            adjust_labels(texts, ax, arrow_color='#667085')
+            ensure_angled_annotation_leaders(texts, y_limit)
+            prune_overlapping_labels(texts, ax)
 
-    return {'y_limit': float(y_limit), 'x_limit': float(x_limit),
-            'n_clipped': int(clipped.sum())}
+    return {'y_limit': float(y_limit), 'y_min': float(y_min),
+            'x_limit': float(max(abs(x_min), abs(x_max))),
+            'x_min': float(x_min), 'x_max': float(x_max),
+            'n_clipped': int(y_clipped.sum()), 'n_x_clipped': int(x_clipped.sum())}
 
 
 def _parse_comparisons(comp_str):
@@ -274,6 +322,77 @@ def _parse_custom_groups(cg_str):
         if name and members:
             mapping[name] = members
     return mapping
+
+
+def _json_safe(value):
+    """Convert numpy scalars/containers read back from ``h5ad`` to plain Python.
+
+    ``adata.uns`` values round-trip through HDF5 as numpy types.  Summaries are
+    written to the analysis manifest with a strict ``json.dump``, so an
+    un-coerced ``int64`` silently loses the whole manifest.
+    """
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return [_json_safe(item) for item in value.tolist()]
+    return value
+
+
+def _preserved_raw_counts(adata):
+    """Return raw counts saved by the Bulk normalization handoff, if valid."""
+    from modules.io_utils import preserved_raw_count_layer
+    return preserved_raw_count_layer(adata)
+
+
+def _pre_deseq2_gene_filter_provenance(adata):
+    """Report whether the low-expression gene filter ran before count-based DEG.
+
+    ``bulk_deg`` consumes the Bulk normalization handoff, which is documented as
+    the step that removes low-expression genes.  Without this record an
+    unchanged gene count (for example QC's ``genes_removed = 0``) can be
+    mistaken for "no filtering needed", so the decision is carried into the DEG
+    summary instead of living only in the upstream task's metadata.
+    """
+    uns = getattr(adata, 'uns', None)
+    normalization = uns.get('normalization') if hasattr(uns, 'get') else None
+    record = normalization.get('gene_expression_filter') if isinstance(normalization, dict) else None
+    n_genes = int(adata.n_vars)
+    if isinstance(record, dict):
+        applied = bool(record.get('applied'))
+        n_before = record.get('n_genes_before')
+        n_after = record.get('n_genes_after')
+        fallback = (
+            f'上游 Bulk 标准化已过滤低表达基因（{n_before} → {n_after}）。'
+            if n_before is not None and n_after is not None else
+            '上游 Bulk 标准化已过滤低表达基因。'
+        )
+        return {
+            'source': 'bulk_normalize',
+            'applied_before_deg': applied,
+            'n_genes_tested': n_genes,
+            'n_genes_removed_upstream': _json_safe(record.get('n_genes_removed')),
+            'record': _json_safe(record),
+            'message': (
+                (record.get('message') or fallback) if applied else
+                '上游 Bulk 标准化未过滤低表达基因；DESeq2/edgeR/limma 将使用全部 '
+                f'{n_genes} 个基因，建议先设置 min_expr_samples≥3 与 min_expr_value。'
+            ),
+        }
+    return {
+        'source': 'none',
+        'applied_before_deg': False,
+        'n_genes_tested': n_genes,
+        'n_genes_removed_upstream': None,
+        'record': None,
+        'message': (
+            '未检测到低表达基因过滤记录；DESeq2/edgeR/limma 将使用全部 '
+            f'{n_genes} 个基因。建议先运行 Bulk 标准化（默认 CPM≥1 且至少 3 个样本表达）。'
+        ),
+    }
 
 
 def _welch_ttest_log_expression(data, group1_samples, group2_samples, padj_method='fdr_bh'):
@@ -341,6 +460,44 @@ def _comparison_filter_diagnostics(deg_df, fc_threshold, padj_threshold):
     }
 
 
+def _build_comparison_matrix(all_deg_dfs, comparison_names):
+    """Combine contrast statistics by stable feature ID, never display name.
+
+    Gene symbols are intentionally allowed to repeat (for example aliases or
+    a reference annotation with multiple features mapped to one symbol).  An
+    outer merge on the user-facing ``gene`` label turns such repeats into a
+    Cartesian product and can consume terabytes of memory.  ``gene_id`` is
+    retained separately precisely so it remains the join key here.
+    """
+    if len(all_deg_dfs) != len(comparison_names):
+        raise ValueError('比较结果与比较名称数量不一致，无法生成合并矩阵。')
+    if not all_deg_dfs:
+        return pd.DataFrame(columns=['gene_id', 'gene', 'gene_name'])
+
+    required = {'gene_id', 'gene', 'gene_name', 'log2FC', 'padj', 'regulation'}
+    matrix = None
+    for comp_name, deg_df in zip(comparison_names, all_deg_dfs):
+        missing = required - set(deg_df.columns)
+        if missing:
+            raise ValueError(
+                '差异结果缺少合并比较所需列：' + '、'.join(sorted(missing))
+            )
+        # pyDEG deduplicates feature indices before fitting.  The defensive
+        # drop here also makes a malformed third-party result unable to turn a
+        # later outer merge into an unbounded Cartesian product.
+        frame = deg_df.drop_duplicates(subset=['gene_id'], keep='first').copy()
+        frame['gene_id'] = frame['gene_id'].astype(str)
+        if matrix is None:
+            matrix = frame[['gene_id', 'gene', 'gene_name']].copy()
+        statistics = frame[['gene_id', 'log2FC', 'padj', 'regulation']].copy()
+        statistics.columns = [
+            'gene_id', f'{comp_name}_log2FC', f'{comp_name}_padj',
+            f'{comp_name}_regulation',
+        ]
+        matrix = matrix.merge(statistics, on='gene_id', how='outer', validate='one_to_one')
+    return matrix
+
+
 def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1, group2,
                            method, fc_threshold, pval_threshold, top_n, gene_id_to_name,
                            plots_dir, results_dir, suffix='', viz_params=None,
@@ -406,11 +563,13 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
         result = dds.deg_analysis(group1_samples, group2_samples, method=ov_method, **deg_kwargs)
 
     # Extract results
-    gene_ids_list = result.index.tolist()
-    if gene_id_to_name:
-        gene_names = [gene_id_to_name.get(g, g) for g in gene_ids_list]
-    else:
-        gene_names = gene_ids_list
+    gene_ids_list = [str(gene_id) for gene_id in result.index.tolist()]
+    # ``gene`` remains the display/analysis field for backward-compatible
+    # tables and enrichment.  Export the ID and supplied symbol separately so
+    # a readable label never destroys the count feature identity.
+    gene_name_values = [gene_id_to_name.get(gene_id, '') for gene_id in gene_ids_list]
+    gene_names = [gene_name or gene_id for gene_id, gene_name in zip(
+        gene_ids_list, gene_name_values)]
     log2fc = result['log2FC'].values
     pvalues = result['pvalue'].values
     # padj：优先用结果中的校正 p 值，否则自行校正
@@ -447,6 +606,8 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
 
     deg_df = pd.DataFrame({
         'gene': gene_names,
+        'gene_id': gene_ids_list,
+        'gene_name': gene_name_values,
         'log2FC': np.round(log2fc, 4),
         'pvalue': pvalues,
         'padj': padj,
@@ -494,14 +655,22 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     director_params = dict(figure_params or {'_visualization': viz})
     label_genes = director_params.get(
         'volcano_label_genes', director_params.get('plot_genes', ()))
+    # Top-N governs the result table.  A compact, independent default keeps
+    # the 89-mm volcano panel readable when the table exports 20+ genes.
+    try:
+        volcano_label_n = int(director_params.get(
+            'volcano_label_n', min(max(int(top_n), 0), 4)))
+    except (TypeError, ValueError):
+        volcano_label_n = min(max(int(top_n), 0), 4)
+    volcano_label_n = min(max(volcano_label_n, 0), 6)
     volcano_spec = director.spec_from_params(
         'volcano', director_params,
-        title=f'Differential expression ({group1} vs {group2})',
+        title=_format_volcano_contrast_title(group1, group2),
         fc_threshold=float(np.log2(max(fc_threshold, np.finfo(float).tiny))),
         fdr_threshold=float(pval_threshold),
-        label_n=min(int(top_n), 8),
+        label_n=volcano_label_n,
         label_genes=label_genes,
-        show_legend=False,
+        show_legend=True,
     )
     # Keep the historical module contract (PNG/SVG) when no export preference
     # is supplied by a caller; an explicit static_formats/export_formats list
@@ -532,10 +701,10 @@ def _run_single_comparison(adata, counts, group1_samples, group2_samples, group1
     ma_data['mean_expression'] = avg_expr
     ma_spec = director.spec_from_params(
         'ma', director_params,
-        title=f'MA 图 ({group1} vs {group2})',
+        title=f'MA: {group1} vs {group2}',
         fc_threshold=float(np.log2(max(fc_threshold, np.finfo(float).tiny))),
         fdr_threshold=float(pval_threshold),
-        label_n=min(int(top_n), 6),
+        label_n=volcano_label_n,
         label_genes=label_genes,
         show_legend=False,
     )
@@ -619,8 +788,12 @@ def _run_lrt_test(adata, counts, groupby, method, pval_threshold, gene_id_to_nam
 
     _, qvalues, _, _ = multipletests(np.nan_to_num(pvalues, nan=1.0), method=padj_method)
 
+    gene_ids = [str(gene_id) for gene_id in gene_ids]
+    gene_name_values = [gene_id_to_name.get(gene_id, '') for gene_id in gene_ids]
     result_dict = {
-        'gene': [gene_id_to_name.get(g, g) if gene_id_to_name else g for g in gene_ids],
+        'gene': [gene_name or gene_id for gene_id, gene_name in zip(gene_ids, gene_name_values)],
+        'gene_id': gene_ids,
+        'gene_name': gene_name_values,
         'pvalue': pvalues,
         'padj': qvalues,
     }
@@ -655,16 +828,27 @@ class BulkDEGAnalysis(BaseAnalysis):
         self.progress(5, "加载数据...")
         from modules.io_utils import read_expression_matrix
         adata = read_expression_matrix(input_path)
-        from modules.io_utils import infer_expression_measurement
+        from modules.io_utils import infer_expression_measurement, validate_bulk_raw_counts
 
-        requested_groupby = str(self.params.get('groupby', 'condition') or '').strip()
+        requested_groupby = str(self.params.get('groupby', '') or '').strip()
+        # The validated Bulk-count importer always records the design in this
+        # canonical field. Keep a blank form submission usable without
+        # guessing from sample-name order, while leaving any explicit groupby
+        # choice authoritative.
+        if not requested_groupby and 'condition' in adata.obs.columns:
+            requested_groupby = 'condition'
         groupby = requested_groupby
         group1 = self.params.get('group1', '')
         group2 = self.params.get('group2', '')
         method = self.params.get('method', 't-test')
         input_measurement = infer_expression_measurement(adata, input_path)
-        if input_measurement != 'raw_counts' and method in {'deseq2', 'edger', 'limma'}:
-            raise ValueError(f'{method} 需要原始整数 counts；当前输入为 {input_measurement}。请选择 t-test/Mann-Whitney，或从原始 counts 重新分析。')
+        count_methods = {'deseq2', 'edger', 'limma'}
+        preserved_counts, preserved_layer = _preserved_raw_counts(adata)
+        if input_measurement != 'raw_counts' and method in count_methods and preserved_counts is None:
+            raise ValueError(
+                f'{method} 需要原始整数 counts；当前输入为 {input_measurement}，且未找到可用的 raw counts layer。'
+                '请选择原始 counts 输入，或从保留 raw layer 的标准化输出重新分析。'
+            )
         auto_log2_continuous = (
             input_measurement == 'continuous_expression'
             and method in {'t-test', 'mann-whitney'}
@@ -715,7 +899,13 @@ class BulkDEGAnalysis(BaseAnalysis):
                     gene_id_to_name[str(gid)] = str(gname).strip()
 
         # 构建 OmicVerse pyDEG 所需的 counts DataFrame（基因×样本）
-        counts = adata.X if not hasattr(adata.X, 'toarray') else adata.X.toarray()
+        count_source = adata.X
+        if method in count_methods and input_measurement != 'raw_counts':
+            count_source = preserved_counts
+            self.progress(-1, f'当前输入已标准化；{method} 使用保留的原始计数 layer “{preserved_layer}”。')
+        if method in count_methods:
+            validate_bulk_raw_counts(adata, matrix=count_source, context=f'{method} 差异表达')
+        counts = count_source if not hasattr(count_source, 'toarray') else count_source.toarray()
         counts = counts.astype(float)
         n_inf = int(np.isinf(counts).sum())
         if n_inf > 0:
@@ -731,6 +921,14 @@ class BulkDEGAnalysis(BaseAnalysis):
             normalization = dict(adata.uns.get('normalization', {}) or {})
             normalization.update({'is_log_transformed': True, 'method': 'log2_auto_for_deg'})
             adata.uns['normalization'] = normalization
+
+        # Low-expression filtering is what keeps DESeq2/edgeR/limma from
+        # spending its multiple-testing budget on genes that cannot be tested.
+        # Record the upstream decision (and warn when there is none) so the DEG
+        # artifact is self-contained.
+        gene_filtering = _pre_deseq2_gene_filter_provenance(adata)
+        if method in count_methods and not gene_filtering['applied_before_deg']:
+            self.progress(-1, gene_filtering['message'])
 
         # 处理自动检测的分组
         if groupby == '_auto_group_':
@@ -782,6 +980,25 @@ class BulkDEGAnalysis(BaseAnalysis):
             raise ValueError(
                 f"分组列 '{groupby}' 不是有效的分类分组列：{grouping['reason']}"
             )
+
+        # Comparisons are labels from the currently selected grouping column;
+        # they are not reusable after switching to a factorized column.  Fail
+        # before launching any statistic rather than reporting the misleading
+        # generic "all comparisons had too few samples" message.
+        if comparison_pairs and auto_comparisons == 'manual':
+            available_groups = set(adata.obs[groupby].astype(str).unique().tolist())
+            requested_groups = {
+                group for pair in comparison_pairs for group in pair
+            }
+            unknown_groups = sorted(requested_groups - available_groups)
+            if unknown_groups:
+                available_text = '、'.join(sorted(available_groups)[:12])
+                unknown_text = '、'.join(unknown_groups[:12])
+                raise ValueError(
+                    f"指定比较与分组列 '{groupby}' 不一致：未找到 {unknown_text}。"
+                    f"该列可用分组为 {available_text}。"
+                    '请改回与比较名称对应的分组列，或更新“多组比较”中的组名。'
+                )
 
         self.progress(25, "准备差异分析...")
 
@@ -878,12 +1095,12 @@ class BulkDEGAnalysis(BaseAnalysis):
                 if len(all_deg_dfs) >= 2:
                     # 构建 logFC + padj 矩阵
                     comparison_names = [f'{g1}-vs-{g2}' for g1, g2 in valid_comparisons]
-                    # 构建 logFC + padj 矩阵（按 gene 列外连接，避免索引错位）
-                    merged_matrix_df = all_deg_dfs[0][['gene']].copy()
-                    for comp_name, deg_df in zip(comparison_names, all_deg_dfs):
-                        sub = deg_df[['gene', 'log2FC', 'padj', 'regulation']].copy()
-                        sub.columns = ['gene', f'{comp_name}_log2FC', f'{comp_name}_padj', f'{comp_name}_regulation']
-                        merged_matrix_df = merged_matrix_df.merge(sub, on='gene', how='outer')
+                    # Use feature IDs, not display symbols, as a matrix key.
+                    # Symbols can repeat and an outer merge on them produces a
+                    # Cartesian product large enough to exhaust system memory.
+                    merged_matrix_df = _build_comparison_matrix(
+                        all_deg_dfs, comparison_names,
+                    )
                     merged_matrix_csv = os.path.join(results_dir, 'bulk_deg_merged_comparisons.csv')
                     merged_matrix_df.to_csv(merged_matrix_csv, index=False)
                     result_files.append({'file_path': merged_matrix_csv, 'file_type': 'csv', 'category': 'table', 'label': '多比较合并结果'})
@@ -911,8 +1128,10 @@ class BulkDEGAnalysis(BaseAnalysis):
                     for m_idx, (comp_name, deg_df) in enumerate(zip(comparison_names, all_deg_dfs)):
                         panel_spec = director_multi.spec_from_params(
                             'volcano', self.params, width='single',
-                            title=str(comp_name), fc_threshold=np.log2(max(fc_threshold, 1e-12)),
-                            fdr_threshold=pval_threshold, label_n=0, show_legend=False,
+                            title=_format_volcano_contrast_title(g1, g2),
+                            fc_threshold=np.log2(max(fc_threshold, 1e-12)),
+                            fdr_threshold=pval_threshold, label_n=0, show_legend=True,
+                            extra={'legend_counts': False},
                         )
                         from figure_engine.composer import FigurePanel
                         panels.append(FigurePanel(
@@ -922,7 +1141,7 @@ class BulkDEGAnalysis(BaseAnalysis):
                         ))
                     fig_multi = NatureFigureComposer(director_multi).compose(
                         panels, outer_spec, nrows=nrows_multi, ncols=ncols_multi,
-                        shared_legend=False,
+                        shared_legend=True,
                     )
                     export_multi, report_multi = export_registered_figure(
                         fig_multi, os.path.join(plots_dir, 'bulk_deg_volcano_multi'), outer_spec,
@@ -979,6 +1198,7 @@ class BulkDEGAnalysis(BaseAnalysis):
                 'auto_transform': 'log2(x+1)' if auto_log2_continuous else None,
                 'requested_groupby': requested_groupby,
                 'groupby': groupby,
+                'gene_filtering': gene_filtering,
             }
         else:
             # 单次比较模式
@@ -1031,6 +1251,7 @@ class BulkDEGAnalysis(BaseAnalysis):
                 'auto_transform': 'log2(x+1)' if auto_log2_continuous else None,
                 'requested_groupby': requested_groupby,
                 'groupby': groupby,
+                'gene_filtering': gene_filtering,
             }
 
         # LRT 文件：多比较模式已在 line 551 添加，单次比较模式在此添加

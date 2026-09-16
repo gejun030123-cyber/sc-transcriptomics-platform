@@ -218,9 +218,13 @@ class NatureDiagnostic:
             if values.size == 0 or not np.isfinite(values).any():
                 continue
             finite = values[np.isfinite(values)]
-            if finite.size == 0 or np.nanmax(finite) - np.nanmin(finite) <= 1e-12:
+            invariant = finite.size == 0 or np.nanmax(finite) - np.nanmin(finite) <= 1e-12
+            if invariant and not bool(item.get('show_if_invariant', False)):
                 continue
-            metrics.append((values, str(item.get('title') or ''), str(item.get('ylabel') or '')))
+            metrics.append((
+                values, str(item.get('title') or ''), str(item.get('ylabel') or ''),
+                str(item.get('annotation') or ''), invariant,
+            ))
         lib = _finite(data.get('library_size'))
         genes = _finite(data.get('detected_genes'))
         n_panels = len(metrics) + (1 if len(lib) and len(genes) else 0)
@@ -234,11 +238,21 @@ class NatureDiagnostic:
         colors = data.get('pass_colors')
         if colors is None:
             colors = [style.signal_blue] * len(sample_idx)
-        for ax, (values, title, ylabel) in zip(flat, metrics):
+        for ax, (values, title, ylabel, annotation, invariant) in zip(flat, metrics):
             ax.bar(sample_idx[:len(values)], values, color=style.signal_blue, alpha=0.88,
                    edgecolor='white', linewidth=0.2)
             ax.set_title(title, loc='left', pad=3)
             ax.set_ylabel(ylabel)
+            if invariant:
+                # Matplotlib's automatic expansion around an all-zero metric
+                # varies across versions.  A fixed non-negative range keeps a
+                # deliberately displayed 0% QC panel legible and honest.
+                current_finite = values[np.isfinite(values)]
+                value = float(current_finite[0]) if current_finite.size else 0.0
+                ax.set_ylim(0.0, max(1.0, value * 1.2))
+            if annotation:
+                ax.text(0.98, 0.94, annotation, transform=ax.transAxes,
+                        ha='right', va='top', fontsize=7, color='#667085')
             ticks = label_tick_indices(len(values), 8)
             labels = _labels(data.get('sample_labels'), len(values))
             ax.set_xticks(ticks, [_short_labels(labels, 10)[i] for i in ticks], rotation=35, ha='right')

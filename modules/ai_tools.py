@@ -742,7 +742,7 @@ def _profile_analysis_input(input_path):
     from modules.io_utils import (
         read_expression_matrix, infer_sample_group_candidates,
         rank_obs_grouping_candidates,
-        resolve_expression_measurement,
+        resolve_expression_measurement, preserved_raw_count_layer,
     )
     from modules.sc_timecourse import _time_value
 
@@ -751,9 +751,9 @@ def _profile_analysis_input(input_path):
     normalization = dict(adata.uns.get('normalization', {})) if hasattr(adata, 'uns') else {}
     measurement_type, measurement_resolution = resolve_expression_measurement(adata, input_path)
     source_measurement_type = value_profile['measurement_type']
-    if 'raw' in adata.layers:
-        source_measurement_type = _matrix_value_profile(
-            adata.layers['raw'], adata.n_obs, adata.n_vars)['measurement_type']
+    _, preserved_raw_layer_name = preserved_raw_count_layer(adata)
+    if preserved_raw_layer_name:
+        source_measurement_type = 'raw_counts'
     counts_layer_profile = (
         _matrix_value_profile(adata.layers['counts'], adata.n_obs, adata.n_vars)
         if 'counts' in adata.layers else None
@@ -844,6 +844,7 @@ def _profile_analysis_input(input_path):
             counts_layer_profile
             and counts_layer_profile['measurement_type'] == 'raw_counts'
         ),
+        'preserved_raw_layer': preserved_raw_layer_name,
     }
 
 
@@ -867,6 +868,7 @@ def _validate_method_compatibility(module_name, input_path, params):
 
     measurement = profile['measurement_type']
     source_measurement = profile.get('source_measurement_type', measurement)
+    preserved_raw_layer = str(profile.get('preserved_raw_layer', '') or '')
     normalization_method = str(profile.get('normalization', {}).get('method', '')).lower()
     compromised_normalization = (
         measurement == 'log_transformed'
@@ -901,7 +903,11 @@ def _validate_method_compatibility(module_name, input_path, params):
     if module_name == 'bulk_deg':
         if compromised_normalization:
             return f'当前中间文件用 {normalization_method} 处理了连续表达值；请从原始上传文件重新运行 log2'
-        if measurement in {'continuous_expression', 'log_transformed'} and method in count_only_deg:
+        if (
+            measurement in {'continuous_expression', 'log_transformed'}
+            and method in count_only_deg
+            and not preserved_raw_layer
+        ):
             return f'{method} 需要原始整数 counts，当前为 {measurement}'
         if measurement == 'continuous_expression' and method == 't-test':
             return '连续表达值需先运行 bulk_normalize(method=log2)，再做 Welch t-test'

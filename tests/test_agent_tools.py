@@ -408,6 +408,29 @@ class TestAnalysisConfigRecommendation:
             'bulk_deg', str(path), {'method': 'deseq2'})
         assert '原始整数 counts' in error
 
+    def test_compatibility_gate_accepts_normalized_output_with_raw_layer(self, test_project):
+        import anndata as ad
+        import numpy as np
+        import pandas as pd
+        from config import Config
+        from modules.ai_tools import _validate_method_compatibility
+
+        raw = np.asarray([[10, 2], [12, 3], [20, 5], [24, 6]], dtype=int)
+        path = os.path.join(Config.uploads_dir(test_project), 'normalized_with_raw.h5ad')
+        normalized = ad.AnnData(
+            X=np.log2(raw + 1),
+            obs=pd.DataFrame({'condition': ['Ctrl', 'Ctrl', 'Treat', 'Treat']},
+                             index=['C1', 'C2', 'T1', 'T2']),
+            var=pd.DataFrame(index=['G1', 'G2']),
+            layers={'raw': raw},
+        )
+        normalized.uns['normalization'] = {'method': 'deseq2', 'is_log_transformed': True}
+        normalized.write_h5ad(path)
+
+        assert _validate_method_compatibility(
+            'bulk_deg', path, {'method': 'deseq2'}
+        ) is None
+
     def test_run_analysis_does_not_create_incompatible_task(self, test_project):
         from pathlib import Path
         from config import Config

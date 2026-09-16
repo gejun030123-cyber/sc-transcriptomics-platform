@@ -1,6 +1,11 @@
 from modules.base import BaseAnalysis
 from modules.constants import S_GENES, G2M_GENES
-from modules.io_utils import resolve_obs_grouping, restore_scanpy_qc_percentages
+from modules.io_utils import (
+    MAX_PER_SAMPLE_FIGURE_LEVELS,
+    per_sample_figure_status,
+    resolve_obs_grouping,
+    restore_scanpy_qc_percentages,
+)
 from modules.normalize import _is_raw_count_matrix
 
 
@@ -515,6 +520,118 @@ def _scdblfinder_summary(adata, batch_key):
     )
 
 
+def _run_scdblfinder_stratified(adata, batch_key, *, min_cells=200,
+                                 random_state=1234):
+    """Run pyscdblfinder per library without forcing tiny libraries to fit.
+
+    The pyscdblfinder wrapper derives its expected doublet rate from the size
+    of *each call*.  Pooling many independent 10x libraries therefore turns a
+    collection of small, low-doublet-rate experiments into one implausibly
+    large library.  Conversely, fitting a classifier to a handful of cells is
+    not statistically meaningful.  Keep those two failure modes explicit:
+    independently call adequately sized libraries and retain, but do not
+    classify, the cells from smaller libraries.
+    """
+    import numpy as np
+    import pandas as pd
+    from pyscdblfinder import ScDblFinder
+
+    if not batch_key or batch_key not in adata.obs.columns:
+        raise ValueError("分层 scDblFinder 需要存在的 batch_key")
+
+    min_cells = max(int(min_cells), 50)
+    predicted = np.zeros(adata.n_obs, dtype=bool)
+    scores = np.full(adata.n_obs, np.nan, dtype=float)
+    evaluated = np.zeros(adata.n_obs, dtype=bool)
+    by_batch = {}
+
+    for batch, indices in adata.obs.groupby(batch_key, observed=True).groups.items():
+        positions = adata.obs_names.get_indexer(indices)
+        n_cells = int(len(positions))
+        item = {
+            'n_cells': n_cells,
+            'evaluated': False,
+            'predicted_doublets': 0,
+            'detected_doublet_rate': None,
+        }
+        if n_cells < min_cells:
+            item['status'] = 'not_evaluated_small_library'
+            item['reason'] = f'n_cells_below_{min_cells}'
+            by_batch[str(batch)] = item
+            continue
+
+        sub = adata[indices].copy()
+        try:
+            # Match the supported pyscdblfinder defaults, but infer dbr from
+            # this library rather than the concatenated study.
+            expected_rate = 0.008 * n_cells / 1000.0
+            detector = ScDblFinder(sub, random_state=random_state)
+            detector.run(
+                dbr=expected_rate,
+                dims=min(20, max(2, n_cells - 1)),
+                n_features=min(1352, sub.n_vars),
+                prop_random=0.0,
+                iter=3,
+                nrounds=0.25,
+                max_depth=4,
+                verbose=False,
+            )
+            calls = detector.adata.obs['scDblFinder_class'].eq('doublet').to_numpy()
+            batch_scores = detector.adata.obs['scDblFinder_score'].to_numpy(dtype=float)
+            predicted[positions] = calls
+            scores[positions] = batch_scores
+            evaluated[positions] = True
+            item.update({
+                'evaluated': True,
+                'status': 'completed',
+                'expected_doublet_rate': round(float(expected_rate), 6),
+                'predicted_doublets': int(calls.sum()),
+                'detected_doublet_rate': round(float(calls.mean()), 6),
+            })
+        except Exception as exc:
+            # A failed small/degenerate library must not turn every cell into
+            # a false singlet or fail a study-wide QC run.  Keep it for manual
+            # review and preserve the cells unchanged.
+            item.update({
+                'status': 'not_evaluated_model_error',
+                'reason': type(exc).__name__,
+            })
+        finally:
+            del sub
+        by_batch[str(batch)] = item
+
+    n_evaluated = int(evaluated.sum())
+    n_predicted = int(predicted[evaluated].sum())
+    n_not_evaluated = int(adata.n_obs - n_evaluated)
+    detected_rate = float(n_predicted / n_evaluated) if n_evaluated else None
+    adata.obs['predicted_doublet'] = predicted
+    adata.obs['doublet_score'] = scores
+    adata.obs['scdblfinder_doublet'] = predicted
+    adata.obs['scdblfinder_score'] = scores
+    adata.obs['scdblfinder_evaluated'] = evaluated
+
+    review = (
+        n_not_evaluated > 0
+        or detected_rate is None
+        or detected_rate > 0.20
+        or detected_rate < 0.005
+    )
+    return {
+        'available': bool(n_evaluated),
+        'method': 'scdblfinder',
+        'mode': 'per_library',
+        'batch_key': str(batch_key),
+        'min_cells_per_library': min_cells,
+        'n_cells_evaluated': n_evaluated,
+        'n_cells_not_evaluated': n_not_evaluated,
+        'predicted_doublets': n_predicted,
+        'doublet_rate': round(detected_rate, 6) if detected_rate is not None else None,
+        'detected_doublet_rate': round(detected_rate, 6) if detected_rate is not None else None,
+        'status': 'review' if review else 'pass',
+        'by_batch': by_batch,
+    }
+
+
 def _gene_detection_counts(matrix, cell_mask):
     """Count non-zero cells per gene without densifying sparse matrices."""
     import numpy as np
@@ -809,6 +926,60 @@ class QCAnalysis(BaseAnalysis):
         if requested_batch and requested_batch in adata.obs.columns and not batch_info.get('requested_valid', False):
             self.progress(-1, f"批次列已跳过：{batch_info.get('requested_reason', '不是有效分类列')}")
 
+        # Per-sample QC panels are useful for a handful of libraries and
+        # unreadable for hundreds (cycled colours, one canvas inch per level).
+        # Above the shared limit the per-sample figures are omitted and the
+        # complete table is written to CSV instead.
+        suppress_per_sample_figures, n_sample_levels = per_sample_figure_status(
+            adata, batch_key,
+        )
+        if suppress_per_sample_figures:
+            self.progress(
+                -1,
+                f"批次/样本列 '{batch_key}' 有 {n_sample_levels} 个水平，超过逐样本图上限 "
+                f"{MAX_PER_SAMPLE_FIGURE_LEVELS}；已跳过逐样本 QC 图，"
+                "完整逐样本指标见结果 CSV 与任务摘要。",
+            )
+
+        # The generic QC plots intentionally reject high-cardinality fields.
+        # A library ID is different: scDblFinder must see every independent
+        # capture separately so its size-dependent expected doublet rate is
+        # calibrated per library rather than per concatenated study.
+        scdblfinder_batch_key = None
+        scdblfinder_batch_info = {}
+        scdblfinder_min_cells = max(
+            int(self.params.get('scdblfinder_min_cells_per_library', 200)), 50,
+        )
+        if not doublets_disabled and doublets_method == 'scdblfinder':
+            scdblfinder_batch_key, scdblfinder_batch_info = resolve_obs_grouping(
+                adata, requested_batch, max_categories=200,
+                max_numeric_categories=20, require_multiple=True,
+            )
+            # ``batch`` is the historical form default, but imported studies
+            # commonly carry their actual library IDs as sample_id or Sample.
+            # Do not silently pool a multi-library study merely because that
+            # optional technical-batch column is absent.
+            if (not scdblfinder_batch_key
+                    and str(requested_batch or '').strip().lower() in {'', 'batch'}):
+                for fallback_key in ('sample_id', 'Sample', 'library_id'):
+                    candidate, candidate_info = resolve_obs_grouping(
+                        adata, fallback_key, max_categories=200,
+                        max_numeric_categories=20, require_multiple=True,
+                    )
+                    if candidate:
+                        scdblfinder_batch_key = candidate
+                        scdblfinder_batch_info = {
+                            **candidate_info,
+                            'auto_selected': True,
+                            'auto_selected_from': fallback_key,
+                        }
+                        self.progress(
+                            -1,
+                            f"scDblFinder 自动使用文库列：{fallback_key}",
+                        )
+                        break
+        scdblfinder_stratified = bool(scdblfinder_batch_key)
+
         mito_perc = float(self.params.get('mito_perc', 0.2))  # 0-1 scale, 0.2 = 20%
         nUMIs_min = int(self.params.get('nUMIs', 500))
         ngenes_min = int(self.params.get('detected_genes', 250))
@@ -890,7 +1061,8 @@ class QCAnalysis(BaseAnalysis):
             max_genes_ratio=gene_filter_max_genes_ratio,
             # Scrublet 在基础 QC 之后单独显式运行（scrublet_decoupled），
             # 因此这里不再让 ov.pp.qc 内部处理 doublet。
-            doublets=(not doublets_disabled) and not scrublet_decoupled,
+            doublets=(not doublets_disabled) and not scrublet_decoupled
+            and not scdblfinder_stratified,
             doublets_method=doublets_method,
             batch_key=batch_key,
             # Keep the full predicted_doublet mask long enough to report
@@ -903,11 +1075,16 @@ class QCAnalysis(BaseAnalysis):
         if doublets_disabled:
             effective_doublets_method = 'none'
             doublet_verification_source = 'platform_disabled'
-        elif scrublet_decoupled:
+        elif scrublet_decoupled or scdblfinder_stratified:
             # The preceding ov.pp.qc call deliberately had doublets=False;
-            # the explicit call below is the authoritative Scrublet execution.
-            effective_doublets_method = 'scrublet'
-            doublet_verification_source = 'platform_explicit_scrublet'
+            # the explicit caller below is authoritative.
+            effective_doublets_method = (
+                'scrublet' if scrublet_decoupled else 'scdblfinder'
+            )
+            doublet_verification_source = (
+                'platform_explicit_scrublet' if scrublet_decoupled
+                else 'platform_stratified_scdblfinder'
+            )
         else:
             effective_doublets_method = _effective_omicverse_doublets_method(adata)
             doublet_verification_source = 'omicverse.status_args.qc.doublets_method'
@@ -932,6 +1109,19 @@ class QCAnalysis(BaseAnalysis):
         # OmicVerse 的 *_perc 别名为 0-1 fraction，但 pct_counts_* 应按
         # Scanpy 约定使用 0-100。在额外过滤、绘图和下游分析前统一。
         restore_scanpy_qc_percentages(adata)
+        # scDblFinder needs library-wise calls for multi-library projects.
+        # This prevents its size-dependent dbr default from being calibrated
+        # against the entire concatenated study.
+        stratified_scdblfinder_summary = None
+        if scdblfinder_stratified:
+            self.progress(40, "Running scDblFinder per library...")
+            stratified_scdblfinder_summary = _run_scdblfinder_stratified(
+                adata,
+                scdblfinder_batch_key,
+                min_cells=scdblfinder_min_cells,
+            )
+            self.progress(45, "Per-library scDblFinder finished.")
+
         # Scrublet 双细胞检测：基础 QC 完成后再单独运行，参数全部显式传递。
         # batch_key 存在时 OmicVerse 内部对每个 batch 独立建模并保存
         # uns['scrublet']['batches'][batch] 下的 doublet_scores_sim /
@@ -1029,10 +1219,21 @@ class QCAnalysis(BaseAnalysis):
                 adata.obs['scdblfinder_doublet'] = doublet_labels.to_numpy()
             if 'scdblfinder_score' not in adata.obs.columns and 'doublet_score' in adata.obs.columns:
                 adata.obs['scdblfinder_score'] = adata.obs['doublet_score'].to_numpy()
-            adata.obs['scdblfinder_class'] = np.where(
-                doublet_labels.to_numpy(), 'doublet', 'singlet',
+            if 'scdblfinder_evaluated' in adata.obs.columns:
+                adata.obs['scdblfinder_class'] = np.where(
+                    ~adata.obs['scdblfinder_evaluated'].to_numpy(dtype=bool),
+                    'not_evaluated',
+                    np.where(doublet_labels.to_numpy(), 'doublet', 'singlet'),
+                )
+            else:
+                adata.obs['scdblfinder_class'] = np.where(
+                    doublet_labels.to_numpy(), 'doublet', 'singlet',
+                )
+            doublet_summary = (
+                stratified_scdblfinder_summary
+                if stratified_scdblfinder_summary is not None
+                else _scdblfinder_summary(adata, batch_key)
             )
-            doublet_summary = _scdblfinder_summary(adata, batch_key)
         else:
             doublet_summary = _caller_doublet_summary(
                 adata, batch_key, effective_doublets_method,
@@ -1384,6 +1585,29 @@ class QCAnalysis(BaseAnalysis):
                 doublet_summary=doublet_summary,
             )
             if qc_by_batch:
+                # The complete per-sample table is always written: it is the
+                # audit trail behind the figures below and the only per-sample
+                # view once a large study suppresses those figures.
+                import os
+
+                per_sample_path = os.path.join(
+                    self.project_dir, 'results', 'qc_per_sample_summary.csv',
+                )
+                os.makedirs(os.path.dirname(per_sample_path), exist_ok=True)
+                from modules.sc_figure_diagnostics import per_sample_qc_table
+
+                per_sample_frame = per_sample_qc_table(qc_by_batch)
+                if not per_sample_frame.empty:
+                    per_sample_frame = per_sample_frame.rename(
+                        columns={'sample': str(batch_key)},
+                    )
+                per_sample_frame.to_csv(per_sample_path, index=False)
+                result_files.append({
+                    'file_path': per_sample_path, 'file_type': 'csv',
+                    'category': 'table',
+                    'label': 'Per-sample QC retention and flag table',
+                })
+            if qc_by_batch and not suppress_per_sample_figures:
                 fig_qc_batch = qc_by_batch_figure(qc_by_batch)
                 if fig_qc_batch is not None:
                     result_files.extend(self.save_matplotlib_figure(
@@ -1613,6 +1837,11 @@ class QCAnalysis(BaseAnalysis):
                 'obs_field_aliases': QC_OBS_FIELD_ALIASES,
                 'requested_batch_key': str(requested_batch or ''),
                 'batch_key': batch_key,
+                'n_batch_levels': n_sample_levels,
+                'per_sample_figures_suppressed': suppress_per_sample_figures,
+                'max_per_sample_figure_levels': MAX_PER_SAMPLE_FIGURE_LEVELS,
+                'scdblfinder_batch_key': scdblfinder_batch_key,
+                'scdblfinder_batch_info': scdblfinder_batch_info,
                 'qc_by_batch': qc_by_batch,
             }
         }

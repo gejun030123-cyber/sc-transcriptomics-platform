@@ -41,6 +41,57 @@ def test_bulk_preflight_blocks_count_method_for_continuous_expression():
     assert any("原始计数" in message for message in result["blockers"])
 
 
+def test_bulk_deg_preflight_warns_when_low_expression_filter_is_absent():
+    """Count-based DEG must not silently accept an unfiltered gene set."""
+    from modules.design_preflight import build_design_preflight
+
+    result = build_design_preflight(
+        _bulk_adata(), "bulk_deg", {"groupby": "condition", "method": "deseq2"}
+    )
+
+    check = next(item for item in result["checks"] if item["name"] == "低表达基因过滤")
+    assert check["status"] == "warning"
+    assert any("低表达基因过滤" in message for message in result["warnings"])
+
+
+def test_bulk_deg_preflight_passes_after_normalization_gene_filter():
+    from modules.design_preflight import build_design_preflight
+
+    adata = _bulk_adata()
+    adata.uns["normalization"] = {"gene_expression_filter": {
+        "applied": True, "n_genes_before": 100, "n_genes_after": 40,
+    }}
+
+    result = build_design_preflight(
+        adata, "bulk_deg", {"groupby": "condition", "method": "deseq2"}
+    )
+
+    check = next(item for item in result["checks"] if item["name"] == "低表达基因过滤")
+    assert check["status"] == "pass"
+    assert "100 → 40" in check["message"]
+
+
+def test_bulk_deg_preflight_accepts_normalized_x_with_verified_raw_layer():
+    """A normalizer's log-scale X must not hide its DESeq2 raw-count layer."""
+    from modules.design_preflight import build_design_preflight
+
+    raw = np.asarray([[10, 2], [12, 3], [20, 5], [24, 6]], dtype=int)
+    adata = _bulk_adata(values=np.log2(raw + 1))
+    adata.layers['raw'] = raw
+    adata.uns['normalization'] = {'is_log_transformed': True, 'gene_expression_filter': {
+        'applied': True, 'n_genes_before': 10, 'n_genes_after': 2,
+    }}
+
+    result = build_design_preflight(
+        adata, "bulk_deg", {"groupby": "condition", "method": "deseq2"}
+    )
+
+    assert result["status"] == "ready"
+    scale_check = next(item for item in result["checks"] if item["name"] == "表达量尺度")
+    assert scale_check["status"] == "pass"
+    assert scale_check["value"]["count_layer"] == "raw"
+
+
 def test_bulk_preflight_blocks_singleton_group():
     from modules.design_preflight import build_design_preflight
 
@@ -51,6 +102,40 @@ def test_bulk_preflight_blocks_singleton_group():
 
     assert result["status"] == "blocked"
     assert any(check["name"] == "生物学重复" for check in result["checks"])
+
+
+def test_bulk_preflight_blocks_comparisons_from_another_groupby_column():
+    from modules.design_preflight import build_design_preflight
+
+    adata = _bulk_adata(groups=("Ctrl_B", "Ctrl_B", "Drug_B", "Drug_B"))
+    adata.obs["treatment"] = ["Ctrl", "Ctrl", "Drug", "Drug"]
+    result = build_design_preflight(
+        adata,
+        "bulk_deg",
+        {
+            "groupby": "treatment", "method": "t-test",
+            "comparisons": "Drug_B-vs-Ctrl_B",
+        },
+    )
+
+    assert result["status"] == "blocked"
+    assert any("不属于当前分组列" in message for message in result["blockers"])
+
+
+def test_bulk_preflight_allows_comparison_using_a_custom_group():
+    from modules.design_preflight import build_design_preflight
+
+    result = build_design_preflight(
+        _bulk_adata(groups=("Ctrl", "Ctrl", "Low", "Low", "High", "High")),
+        "bulk_deg",
+        {
+            "groupby": "condition", "method": "t-test",
+            "custom_groups": "Combined=Low+High",
+            "comparisons": "Combined-vs-Ctrl",
+        },
+    )
+
+    assert result["status"] == "ready"
 
 
 def test_proportion_preflight_marks_missing_sample_replicates_exploratory():

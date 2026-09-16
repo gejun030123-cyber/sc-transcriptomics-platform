@@ -1,13 +1,20 @@
 # 单细胞与 Bulk RNA-seq AI 分析平台
 
-这是一个基于 Flask、Scanpy、Matplotlib 和 OmicVerse 风格规范的 Web 端转录组与基因组分析平台。平台同时覆盖单细胞转录组、Bulk RNA-seq 和 WES 外显子组，支持传统按模块执行的分析流程，也支持用户通过 AI 对话触发分析、检查结果、调整参数，并围绕特定目标创建候选分支进行参数搜索。
+这是一个基于 Flask、Scanpy、Matplotlib 和 OmicVerse 风格规范的实验室内转录组与基因组分析平台。平台覆盖单细胞转录组、Bulk RNA-seq 和 WES 外显子组：既能按模块执行受控、可追溯的分析，也支持 AI 对话检查项目状态、提出参数建议和创建候选分析分支。
 
 项目当前定位不是单纯的流程封装，而是一个可交互的分析工作台：
 
 - 用户可以上传数据，在网页中按模块执行 scRNA-seq 或 Bulk RNA-seq 分析。
 - AI 助手可以读取项目状态、理解已完成步骤、调用分析工具并提出参数调整方案。
 - 对“分群不满意”“必须找到最接近某种细胞类型的分群”等需求，平台提供 marker 评分、候选分支、参数 sweep 和人工采纳机制。
-- 所有分析结果会落到项目目录下，包含 h5ad 中间文件、科研级静态图与必要的统计审计；单细胞 DEG 与富集的完整表只作为受控内部输入，不在界面导出。
+- 所有分析结果都会落到项目目录下，包含 h5ad 中间文件、科研级静态图、参数与统计审计；单细胞 DEG 与富集完整表只作为受控内部输入，不在界面导出。
+
+## 最近更新
+
+- **Bulk 原始 counts 导入**：上传“基因 × 样本”整数 counts 矩阵与显式样本信息表即可生成可用于 DESeq2 的 h5ad；可选本地 GTF/GFF 或 `gene_id,gene_name` 映射表补全基因名。TPM、FPKM、CPM、百分比和 log 表达值会在导入阶段拒绝进入 count 模型。
+- **Bulk 统计防错**：QC、标准化、PCA 和 DEG 记录表达尺度；DESeq2、edgeR 与 limma 只接受原始 counts 或已验证的 counts layer。低表达基因过滤、分组列、比较名称和生物学重复在运行前检查，避免按文件顺序猜组或跨分组列提交 contrast。
+- **科研图形工作台**：Bulk/单细胞火山图可按原始差异结果重绘，支持非破坏性的范围、主刻度、阈值、配色和基因标注调整，并导出 PNG/SVG 新版本。默认火山图使用紧凑线性坐标、弱化背景点和边缘三角形，保留极端效应与 FDR 的真实含义。
+- **单细胞 QC 与分组语义**：scDblFinder 可按文库独立运行并对过小文库标记为未评估；连续变量、单细胞唯一 ID 和技术批次不会被静默当作生物学条件。QC/注释/组成图增加更明确的样本级诊断与图例处理。
 
 ## 核心能力
 
@@ -21,7 +28,8 @@
 - 结果管理：任务结果写入数据库，支持图表查看、CSV/XLSX 表格下载和 h5ad 中间文件下载；模块写出的每个结果文件都会登记到任务结果清单。
 - 科研级图表：Scanpy/Matplotlib 原生图默认保存为 300 dpi PNG 和 SVG 矢量图，结果页优先展示 PNG，并提供 PNG/SVG 下载。
 - 静态图表：统一使用 Matplotlib/OmicVerse 风格，网页默认展示 300 dpi PNG，并提供 SVG 矢量图下载。
-- 图形工作台：从分析结果或用户上传图片创建非破坏性的样式版本，支持预览、PNG/SVG 导出和版本追踪。
+- 图形工作台：从分析结果或用户上传图片创建非破坏性的样式版本，支持预览、PNG/SVG 导出和版本追踪。具有受控源数据的 Bulk/单细胞 Volcano、MA、热图、相关性和富集图会按原始统计结果重绘；静态 PNG/SVG 只允许外观编辑，不会伪造可编辑坐标轴。
+- 火山图默认采用紧凑、线性的投稿级显示：背景点低透明度，DEG 使用克制红/蓝，FDR 与效应极端值在坐标边界以三角形表示。图形工作台可调整 X/Y 显示最小值、最大值和主刻度间隔；这些仅影响展示，不会改变 FDR、log2FC 或 DEG 分类。
 - 可复现交付：任务 manifest、项目报告、离线图表图库和 pipeline 报告会记录参数、summary、产物和复核证据。
 - 安全路径校验：API 读取和 AI 工具调用会限制在项目目录内，拒绝路径穿越和符号链接输入。
 
@@ -37,7 +45,7 @@ qc -> normalize -> hvg -> dimred -> batch_correct -> clustering
 
 | 模块 | 主要功能 | 典型输出 |
 | --- | --- | --- |
-| `qc` | 线粒体、核糖体、血红蛋白比例标记；双细胞检测（默认 scDblFinder，要求 `pyscdblfinder>=0.2.0`，缺失时停止而不回退；Scrublet 以显式参数独立运行并保留 simulated score 证据）；细胞周期评分；复杂度指标；批次自适应 QC | QC violin、counts vs genes scatter、novelty plot、cell-cycle plot、过滤前后 QC 对比、实际 caller 的 doublet score 直方图；Scrublet 额外输出 observed vs simulated doublet 分布图 |
+| `qc` | 线粒体、核糖体、血红蛋白比例标记；双细胞检测（默认 scDblFinder，要求 `pyscdblfinder>=0.2.0`，缺失时停止而不回退；按文库独立运行时，低于设定细胞数的文库保留并标记 `not_evaluated`）；Scrublet 以显式参数独立运行并保留 simulated score 证据；细胞周期评分、复杂度指标和批次自适应 QC | QC violin、counts vs genes scatter、novelty plot、cell-cycle plot、过滤前后 QC 对比、样本级保留/标记汇总、实际 caller 的 doublet score 直方图；Scrublet 额外输出 observed vs simulated doublet 分布图 |
 | `normalize` | `log1p` 或 Pearson residuals 标准化，保留 counts layer | 标准化后 h5ad、library size 图、表达值分布图 |
 | `hvg` | 高变异基因选择，支持批次感知、force include、排除 MT/CC 基因、细胞周期评分和回归 | HVG scatter、HVG rank plot、HVG 标记 |
 | `dimred` | PCA、UMAP，可选 t-SNE/MDE，支持自动 PC 选择 | PCA variance、PCA scatter、UMAP QC 着色图 |
@@ -77,12 +85,23 @@ bulk_timecourse
 bulk_deg_integration
 ```
 
+#### Bulk 原始 counts 导入与统计合同
+
+推荐从项目上传页使用“**Bulk RNA-seq 原始 counts + 样本信息导入（DESeq2）**”：
+
+1. 上传未标准化的“基因 × 样本”整数 count 矩阵（CSV/TSV/TXT/Excel）；第一列是基因 ID，其他列是样本 ID。
+2. 上传样本信息表，至少包含 `sample_id` 和 `condition`；样本 ID 必须与矩阵列名完全一致，且用于正式组间推断的每个 condition 至少需要 2 个生物学重复。
+3. 可选上传产生 counts 时使用的本地 GTF/GFF，或含 `gene_id,gene_name` 的映射表。平台只使用该本地注释映射，绝不会按物种在线猜测基因名。
+4. 导入结果先进入 `bulk_qc -> bulk_normalize -> bulk_deg`。原始 counts 才能进入 DESeq2/edgeR/limma；TPM、FPKM、CPM 与 log 表达值不会被伪装成 counts。标准化阶段默认以 CPM ≥ 1 且至少 3 个样本表达过滤低表达基因，并记录过滤前后的基因数。
+
+Bulk 分析还会在提交前检查：分组列是否真的是类别变量、手动比较是否属于所选分组列、每组是否有足够独立样本，以及所选统计方法是否与表达尺度兼容。无法满足时会阻止运行或明确标记为探索性，而不是按样本文件顺序推断对照与实验组。
+
 | 模块 | 主要功能 | 典型输出 |
 | --- | --- | --- |
-| `bulk_qc` | 文库大小、检测基因数、MT/ribo 比例、Gini 复杂度、离群样本检测、自动分组 | QC 表、样本距离图、相关性热图、PCA 异常检测 |
-| `bulk_normalize` | DESeq2 size factor、TMM、CPM、VST、rlog、log2 quantile | 标准化矩阵、文库大小对比 |
+| `bulk_qc` | 文库大小、检测基因数、MT/ribo 比例、Gini 复杂度、离群样本检测、自动分组；MT 识别优先使用基因名/染色体注释，并以人类 Ensembl MT ID 作为本地回退 | QC 表、样本距离图、相关性热图、PCA 异常检测、可审计的 MT 检出与不变指标说明 |
+| `bulk_normalize` | DESeq2 size factor、TMM、CPM、VST、rlog、log2 quantile；在 count 模型前记录低表达基因过滤 | 标准化矩阵、过滤审计、文库大小对比 |
 | `bulk_pca` | PCA、UMAP、t-SNE；按分组列着色；载荷分析 | PCA/UMAP 图、解释方差图、样本聚类 |
-| `bulk_deg` | t-test、Mann-Whitney、DESeq2、edgeR、limma；pairwise 或 LRT；多比较 | DEG CSV、火山图、MA 图、基因箱线图 |
+| `bulk_deg` | t-test、Mann-Whitney、DESeq2、edgeR、limma；pairwise 或 LRT；多比较。自动标注默认最多 4 个基因（最多 6 个） | 完整 DEG CSV、紧凑火山图、MA 图、基因箱线图 |
 | `bulk_heatmap` | Top 变异基因、DEG、表达式筛选或手动基因热图；支持 z-score/center/winsorize | 表达热图、样本相关性热图 |
 | `bulk_enrichment` | ORA/GSEA，支持 GO、KEGG、WikiPathways、Reactome 等数据库 | 富集表、barplot、dotplot、GSEA 曲线 |
 | `bulk_timecourse` | 多时间点差异检测、spline F-test、轨迹聚类 | 时间趋势图、cluster profile |
@@ -159,6 +178,7 @@ resolution 0.8 的单核细胞群太混，帮我设计几个候选参数。
 - `.loom` / `.zarr`：上传或放入项目 `uploads/` 后可导入为标准 `.h5ad`。
 - `.csv`、`.txt`、`.tsv`：表达矩阵或样本表。
 - `.xlsx`、`.xls`：Bulk 表达矩阵。
+- Bulk 原始 counts 导入：通过上传页同时提交 counts 矩阵和样本信息表；可选携带本地 GTF/GFF 或 gene ID–symbol 映射表。该入口会验证非负整数 counts、列名/`sample_id` 一一对应和 condition 重复数后再写入 h5ad。
 - `.mtx.gz` / 10x 文件组合：上传 `barcodes.tsv(.gz)`、`features.tsv(.gz)` 或 `genes.tsv(.gz)`、`matrix.mtx(.gz)` 后可转换为 `.h5ad`。
 - 多批次 10x ZIP：上传两个或更多分别包含 `filtered_feature_bc_matrix` 的 ZIP，上传页会为每个 ZIP 提供「样本 ID / 批次名称 / 条件」标记（条件如 对照组、疾病组，可自定义）；平台解压后写入 `obs["sample_id"]`、`obs["condition"]`、`obs["batch"]`，再合并为一个标准 `.h5ad`。未填写条件时 condition 留空，后续需补标后才能运行样本级推断。
 - 服务器目录批量 10x：管理员配置 `SC_BATCH_SOURCE_ROOTS` 后，可从网页递归扫描大量 10x 目录、下载并填写样本 manifest（`sample_id,matrix_dir,condition,replicate,batch`），再合并为标准 `.h5ad`。目录名不会被自动当作生物学分组。

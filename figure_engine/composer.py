@@ -108,6 +108,19 @@ class NatureFigureComposer:
                                 handle_by_label.setdefault(label, handle)
                         legend = axis.get_legend()
                         if legend is not None:
+                            # Volcano and several diagnostic templates build
+                            # their legend from explicit proxy artists.  Those
+                            # handles are not returned by
+                            # ``get_legend_handles_labels()``, so collect them
+                            # before removing each panel-local legend.
+                            legend_labels = [text.get_text() for text in legend.get_texts()]
+                            legend_handles = getattr(
+                                legend, 'legend_handles',
+                                getattr(legend, 'legendHandles', ()),
+                            )
+                            for handle, label in zip(legend_handles, legend_labels):
+                                if label and not label.startswith('_'):
+                                    handle_by_label.setdefault(label, handle)
                             legend.remove()
                     for legend in list(subfigure.legends):
                         labels = [text.get_text() for text in legend.get_texts()]

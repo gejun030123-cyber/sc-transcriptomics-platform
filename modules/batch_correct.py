@@ -1,5 +1,10 @@
 from modules.base import BaseAnalysis
-from modules.io_utils import resolve_obs_grouping, obs_grouping_info
+from modules.io_utils import (
+    MAX_PER_SAMPLE_FIGURE_LEVELS,
+    obs_grouping_info,
+    per_sample_figure_status,
+    resolve_obs_grouping,
+)
 from modules.pc_strategy import resolve_analysis_n_pcs
 from modules.sc_de_utils import _matrix_is_raw_counts
 
@@ -914,6 +919,20 @@ class BatchCorrectAnalysis(BaseAnalysis):
         if adata.obs[batch_key].nunique() < 2:
             raise ValueError(f"batch_key '{batch_key}' 只有一个取值，无法评估或执行批次整合")
 
+        # Integration still uses every batch; only the per-sample coloured
+        # figures are dropped once the batch column has more levels than the
+        # colour palette can distinguish.
+        suppress_batch_figures, n_batch_levels = per_sample_figure_status(
+            adata, batch_key,
+        )
+        if suppress_batch_figures:
+            self.progress(
+                -1,
+                f"批次/样本列 '{batch_key}' 有 {n_batch_levels} 个水平，超过逐样本图上限 "
+                f"{MAX_PER_SAMPLE_FIGURE_LEVELS}；已跳过按批次着色的 UMAP 图，"
+                "批次标签保留在输出 h5ad.obs，整合评价指标仍照常输出。",
+            )
+
         requested_n_pcs = int(self.params.get('n_pcs', 25))
         n_pcs, pc_diagnostics = resolve_analysis_n_pcs(
             adata, requested_n_pcs, representation_key='X_pca',
@@ -992,53 +1011,66 @@ class BatchCorrectAnalysis(BaseAnalysis):
         plots_dir = self.ensure_plots_dir()
         result_files = []
 
-        fig_after = umap_figure(
-            adata, batch_key,
-            title=f'UMAP after {method} integration (by {batch_key})',
-        )
-        result_files.extend(self.save_matplotlib_figure(
-            fig_after, plots_dir, f'batch_umap_{method}.png', 'umap',
-            f'UMAP after {method} (batch)', formats=('png', 'svg'), dpi=300,
-        ))
-
-        if umap_before is not None:
-            corrected_umap = adata.obsm['X_umap'].copy()
-            adata.obsm['X_umap'] = umap_before
-            fig_before = umap_figure(
-                adata, batch_key, title=f'UMAP before integration (by {batch_key})'
-            )
-            adata.obsm['X_umap'] = corrected_umap
-            result_files.extend(self.save_matplotlib_figure(
-                fig_before, plots_dir, 'batch_umap_before.png', 'umap',
-                'UMAP before integration (batch)', formats=('png', 'svg'), dpi=300,
-            ))
-
-            from modules.sc_figure_diagnostics import embedding_before_after_figure
-            fig_compare = embedding_before_after_figure(
-                umap_before, adata.obsm['X_umap'],
-                adata.obs[batch_key].astype(str).to_numpy(),
-                category_label=batch_key,
-                titles=(f'Before integration ({batch_key})', f'After {method} ({batch_key})'),
+        if not suppress_batch_figures:
+            fig_after = umap_figure(
+                adata, batch_key,
+                title=f'UMAP after {method} integration (by {batch_key})',
             )
             result_files.extend(self.save_matplotlib_figure(
-                fig_compare, plots_dir, f'batch_umap_before_after_{method}.png', 'umap',
-                f'Before/after {method} UMAP by batch', formats=('png', 'svg'), dpi=300,
+                fig_after, plots_dir, f'batch_umap_{method}.png', 'umap',
+                f'UMAP after {method} (batch)', formats=('png', 'svg'), dpi=300,
             ))
+
+            if umap_before is not None:
+                corrected_umap = adata.obsm['X_umap'].copy()
+                adata.obsm['X_umap'] = umap_before
+                fig_before = umap_figure(
+                    adata, batch_key, title=f'UMAP before integration (by {batch_key})'
+                )
+                adata.obsm['X_umap'] = corrected_umap
+                result_files.extend(self.save_matplotlib_figure(
+                    fig_before, plots_dir, 'batch_umap_before.png', 'umap',
+                    'UMAP before integration (batch)', formats=('png', 'svg'), dpi=300,
+                ))
+
+                from modules.sc_figure_diagnostics import embedding_before_after_figure
+                fig_compare = embedding_before_after_figure(
+                    umap_before, adata.obsm['X_umap'],
+                    adata.obs[batch_key].astype(str).to_numpy(),
+                    category_label=batch_key,
+                    titles=(f'Before integration ({batch_key})', f'After {method} ({batch_key})'),
+                )
+                result_files.extend(self.save_matplotlib_figure(
+                    fig_compare, plots_dir, f'batch_umap_before_after_{method}.png', 'umap',
+                    f'Before/after {method} UMAP by batch', formats=('png', 'svg'), dpi=300,
+                ))
 
         bio_label_key = self._bio_label_key(adata)
         if bio_label_key and bio_label_key != batch_key and 'X_umap' in adata.obsm:
-            from modules.native_figures import umap_panel_figure
-            fig_bio = umap_panel_figure(
-                adata, [batch_key, bio_label_key],
-                titles=[f'After {method}: {batch_key}', f'After {method}: {bio_label_key}'],
-                point_size=5, opacity=0.74, ncols=2,
-            )
-            if fig_bio is not None:
+            if suppress_batch_figures:
+                # Keep one readable post-integration embedding coloured by the
+                # biological label instead of the hundreds-of-level batch key.
+                fig_bio = umap_figure(
+                    adata, bio_label_key,
+                    title=f'UMAP after {method} integration (by {bio_label_key})',
+                )
                 result_files.extend(self.save_matplotlib_figure(
-                    fig_bio, plots_dir, f'batch_umap_after_donor_celltype_{method}.png',
-                    'umap', f'After {method} donor versus biological label',
-                    formats=('png', 'svg'), dpi=300, preserve_aspect=True,
+                    fig_bio, plots_dir, f'batch_umap_after_{method}.png', 'umap',
+                    f'After {method} ({bio_label_key})', formats=('png', 'svg'), dpi=300,
                 ))
+            else:
+                from modules.native_figures import umap_panel_figure
+                fig_bio = umap_panel_figure(
+                    adata, [batch_key, bio_label_key],
+                    titles=[f'After {method}: {batch_key}', f'After {method}: {bio_label_key}'],
+                    point_size=5, opacity=0.74, ncols=2,
+                )
+                if fig_bio is not None:
+                    result_files.extend(self.save_matplotlib_figure(
+                        fig_bio, plots_dir, f'batch_umap_after_donor_celltype_{method}.png',
+                        'umap', f'After {method} donor versus biological label',
+                        formats=('png', 'svg'), dpi=300, preserve_aspect=True,
+                    ))
 
         eval_metrics = {}
         evaluation_comparison = None
@@ -1087,6 +1119,9 @@ class BatchCorrectAnalysis(BaseAnalysis):
             'embedding_key': corrected_key,
             'requested_batch_key': requested_batch_key,
             'batch_key': batch_key,
+            'n_batch_levels': n_batch_levels,
+            'per_sample_figures_suppressed': suppress_batch_figures,
+            'max_per_sample_figure_levels': MAX_PER_SAMPLE_FIGURE_LEVELS,
             'method_info': method_info,
             'requested_n_pcs': requested_n_pcs,
             'n_pcs': n_pcs,

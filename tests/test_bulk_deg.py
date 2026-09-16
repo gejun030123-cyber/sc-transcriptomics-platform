@@ -6,10 +6,41 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
 from modules.bulk_deg import (
+    _build_comparison_matrix,
+    _format_volcano_contrast_title,
     _parse_comparisons,
     _parse_custom_groups,
     _welch_ttest_log_expression,
 )
+
+
+def test_volcano_contrast_title_formats_common_condition_strata():
+    assert _format_volcano_contrast_title('NH4Cl_B', 'Ctr_B') == 'NH₄Cl vs Control (B)'
+    assert _format_volcano_contrast_title('PEA_En', 'Ctr_En') == 'PEA vs Control (En)'
+    assert _format_volcano_contrast_title('treated', 'vehicle') == 'treated vs vehicle'
+
+
+def test_comparison_matrix_joins_repeated_gene_symbols_by_feature_id():
+    """Repeated display symbols must not create a Cartesian-product merge."""
+    import pandas as pd
+
+    first = pd.DataFrame({
+        'gene_id': ['id_1', 'id_2'], 'gene': ['DUP', 'DUP'],
+        'gene_name': ['DUP', 'DUP'], 'log2FC': [1.0, 2.0],
+        'padj': [0.01, 0.02], 'regulation': ['Up', 'Up'],
+    })
+    second = pd.DataFrame({
+        'gene_id': ['id_1', 'id_2'], 'gene': ['DUP', 'DUP'],
+        'gene_name': ['DUP', 'DUP'], 'log2FC': [-1.0, -2.0],
+        'padj': [0.03, 0.04], 'regulation': ['Down', 'Down'],
+    })
+
+    result = _build_comparison_matrix([first, second], ['A-vs-B', 'C-vs-D'])
+
+    assert result.shape[0] == 2
+    assert result['gene_id'].tolist() == ['id_1', 'id_2']
+    assert 'A-vs-B_log2FC' in result
+    assert 'C-vs-D_log2FC' in result
 
 
 class TestParseComparisons:
@@ -136,7 +167,7 @@ def test_volcano_display_ceiling_handles_padj_underflow():
     from modules.bulk_deg import _draw_bulk_volcano, _volcano_y_limit
 
     padj = np.array([0.0, 1e-80, 0.01, 0.5])
-    assert _volcano_y_limit(padj, 0.05) <= 30
+    assert _volcano_y_limit(padj, 0.05) == 18
 
     fig, ax = plt.subplots()
     info = _draw_bulk_volcano(
@@ -152,12 +183,13 @@ def test_volcano_display_ceiling_handles_padj_underflow():
         top_n=0,
     )
     assert info['n_clipped'] == 2
-    assert ax.get_ylim()[1] <= 30
+    assert ax.get_ylim()[1] == 18
+    assert 'log' in ax.get_ylabel()
     plt.close(fig)
 
 
-def test_volcano_gene_labels_use_spaced_boxes_and_arrows():
-    """Dense top genes stay readable: cap labels and separate each side."""
+def test_volcano_gene_labels_use_short_leaders_without_boxes():
+    """Dense top genes stay readable without turning into an annotation map."""
     import matplotlib.pyplot as plt
     import numpy as np
     import pandas as pd
@@ -176,16 +208,74 @@ def test_volcano_gene_labels_use_spaced_boxes_and_arrows():
     fig.canvas.draw()
     labels = [text for text in ax.texts if text.get_text().startswith(('UP', 'DOWN'))]
 
-    assert len(labels) == 10  # visual labels are capped; the Top-DEG CSV is unchanged
-    assert all(label.get_bbox_patch() is not None for label in labels)
+    assert len(labels) == 6  # visual labels are capped; the Top-DEG CSV is unchanged
+    assert all(label.get_bbox_patch() is None for label in labels)
     assert all(label.arrow_patch is not None for label in labels)
-    for alignment in ('left', 'right'):
-        y_positions = sorted(
-            label.get_position()[1] for label in labels
-            if label.get_horizontalalignment() == alignment
-        )
-        assert all(
-            second - first >= max(0.55, info['y_limit'] * 0.04) - 1e-7
-            for first, second in zip(y_positions, y_positions[1:])
-        )
+    renderer = fig.canvas.get_renderer()
+    from matplotlib.text import Text
+    boxes = [Text.get_window_extent(label, renderer) for label in labels]
+    assert not any(
+        left.overlaps(right)
+        for index, left in enumerate(boxes) for right in boxes[index + 1:]
+    )
+    plt.close(fig)
+
+
+def test_volcano_keeps_extreme_fold_changes_at_compact_x_axis_edges():
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    from modules.bulk_deg import _draw_bulk_volcano
+
+    fig, ax = plt.subplots()
+    info = _draw_bulk_volcano(
+        ax,
+        pd.DataFrame({
+            'gene': ['far_down', 'center', 'far_up'],
+            'log2FC': [-6.0, 0.0, 4.0],
+            'padj': [0.002, 0.8, 0.003],
+            'regulation': ['Down', 'NS', 'Up'],
+        }),
+        top_n=0,
+    )
+
+    points = np.vstack([
+        collection.get_offsets() for collection in ax.collections
+        if len(collection.get_offsets())
+    ])
+    assert info['x_limit'] == 2.5
+    assert info['n_x_clipped'] == 2
+    assert np.sum(np.isclose(np.abs(points[:, 0]), 2.5 * 0.985)) == 2
+    plt.close(fig)
+
+
+def test_volcano_custom_view_range_retains_clipped_edge_markers():
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    from modules.bulk_deg import _draw_bulk_volcano
+
+    fig, ax = plt.subplots()
+    info = _draw_bulk_volcano(
+        ax,
+        pd.DataFrame({
+            'gene': ['far_down', 'center', 'far_up', 'high_fdr'],
+            'log2FC': [-6.0, 0.0, 4.0, 0.5],
+            'padj': [0.002, 0.8, 0.003, 1e-12],
+            'regulation': ['Down', 'NS', 'Up', 'Up'],
+        }),
+        top_n=0, x_min=-1.5, x_max=2.0, y_min=0.0, y_limit=5.0,
+    )
+
+    points = np.vstack([
+        collection.get_offsets() for collection in ax.collections
+        if len(collection.get_offsets())
+    ])
+    assert ax.get_xlim() == (-1.5, 2.0)
+    assert ax.get_ylim() == (0.0, 5.0)
+    assert info['n_x_clipped'] == 2
+    assert info['n_clipped'] == 1
+    assert np.any(np.isclose(points[:, 0], -1.5 + 3.5 * 0.0075))
+    assert np.any(np.isclose(points[:, 0], 2.0 - 3.5 * 0.0075))
+    assert np.any(np.isclose(points[:, 1], 5.0 * 0.985))
     plt.close(fig)

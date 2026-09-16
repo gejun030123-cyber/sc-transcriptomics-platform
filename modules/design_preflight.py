@@ -14,6 +14,7 @@ from modules.io_utils import (
     infer_expression_measurement,
     infer_sample_group_candidates,
     obs_grouping_info,
+    preserved_raw_count_layer,
 )
 from modules.sc_de_utils import resolve_cell_grouping
 from modules.sc_de_utils import _matrix_is_raw_counts
@@ -174,6 +175,8 @@ def _selected_groupby(module_name, params, candidates):
         if selected:
             return selected
         if module_name == "bulk_deg":
+            if "condition" in candidates.get("columns", {}):
+                return "condition"
             # The actual Bulk DEG runner can safely materialize a name-based
             # mapping only when no obs grouping exists.  If obs already has a
             # candidate condition, require the caller to map it explicitly
@@ -221,6 +224,43 @@ def _make_contrast(group_counts, params):
         "selected": {"group1": selected_1, "group2": selected_2},
         "pairs": pairs,
     }
+
+
+def _bulk_deg_comparison_blocker(group_counts, params):
+    """Return a preflight error for manual contrast labels outside ``groupby``.
+
+    Group labels are a statistical contract.  In particular, a full condition
+    contrast cannot be submitted after the user changes ``groupby`` to one
+    factor such as treatment or compartment.
+    """
+    if _selected_value(params, "auto_comparisons", "manual") != "manual":
+        return ""
+    raw = _selected_value(params, "comparisons")
+    if not raw:
+        return ""
+    # Custom groups are materialized by the DEG runner after it has read the
+    # full obs table.  Their effective sample counts cannot be reconstructed
+    # from this compact preflight summary without risking a false block (for
+    # example High=A+B-vs-C).  Leave those to the runner's authoritative
+    # validation below rather than rejecting a valid custom contrast.
+    if _selected_value(params, "custom_groups"):
+        return ""
+    from modules.bulk_deg import _parse_comparisons
+
+    pairs = _parse_comparisons(raw)
+    if not pairs:
+        return '多组比较格式无效；请用“实验组-vs-对照组”，多个比较用分号或换行分隔。'
+    available = set(group_counts)
+    requested = {group for pair in pairs for group in pair}
+    unknown = sorted(requested - available)
+    if not unknown:
+        return ""
+    return (
+        '多组比较中的分组 ' + '、'.join(unknown[:12])
+        + ' 不属于当前分组列；可用分组为 '
+        + '、'.join(sorted(available)[:12])
+        + '。请改回对应的分组列，或更新比较名称。'
+    )
 
 
 def _sample_design_check(adata, sample_key, condition_key, min_samples=2):
@@ -363,13 +403,23 @@ def build_design_preflight(adata, module_name, params=None, input_path=""):
             recommended["celltype_key"] = candidates["celltype_candidates"][0]
 
     count_only_methods = {
-        "bulk_deg": {"deseq2", "edger"},
+        "bulk_deg": {"deseq2", "edger", "limma"},
         "bulk_normalize": {"deseq2", "tmm", "cpm", "vst", "rlog"},
     }
     method = _selected_value(params, "method")
     if method in count_only_methods.get(module_name, set()):
+        _, raw_layer_name = (
+            preserved_raw_count_layer(adata)
+            if module_name == "bulk_deg" else (None, "")
+        )
         if measurement == "raw_counts":
             checks.append(_check("表达量尺度", "pass", f"检测到原始计数，可使用 {method}。", measurement))
+        elif raw_layer_name:
+            checks.append(_check(
+                "表达量尺度", "pass",
+                f"当前 X 为 {measurement} 展示尺度；{method} 将使用已验证的原始 counts layer “{raw_layer_name}”。",
+                {"display_measurement": measurement, "count_layer": raw_layer_name},
+            ))
         else:
             checks.append(_check(
                 "表达量尺度", "blocked",
@@ -378,6 +428,38 @@ def build_design_preflight(adata, module_name, params=None, input_path=""):
             ))
     elif module_name.startswith("bulk_"):
         checks.append(_check("表达量尺度", "pass", f"检测到 {measurement}。", measurement))
+
+    # Low-expression genes inflate the multiple-testing burden and destabilise
+    # dispersion estimation, so count-based DEG expects the normalization step
+    # to have filtered them.  QC deliberately keeps every gene (its
+    # ``genes_removed = 0`` is expected), which makes an explicit check here the
+    # only place a user sees that DESeq2 is about to run on the full matrix.
+    if module_name == "bulk_deg" and method in count_only_methods["bulk_deg"]:
+        uns = getattr(adata, "uns", None)
+        normalization = uns.get("normalization") if hasattr(uns, "get") else None
+        record = (
+            normalization.get("gene_expression_filter")
+            if isinstance(normalization, dict) else None
+        )
+        if isinstance(record, dict) and record.get("applied"):
+            n_before = record.get("n_genes_before")
+            n_after = record.get("n_genes_after")
+            detail = (
+                f"（{n_before} → {n_after}）"
+                if n_before is not None and n_after is not None else ""
+            )
+            checks.append(_check(
+                "低表达基因过滤", "pass",
+                f"上游 Bulk 标准化已过滤低表达基因{detail}；{method} 只使用保留的基因。",
+                n_after,
+            ))
+        else:
+            checks.append(_check(
+                "低表达基因过滤", "warning",
+                f"进入 {method} 前未检测到低表达基因过滤记录。"
+                "建议先运行 Bulk 标准化并设置 min_expr_samples≥3、min_expr_value≥1（CPM），"
+                "否则大量低表达基因会稀释多重检验校正，降低真实差异基因的检出效能。",
+            ))
 
     contrast = {"groups": [], "selected": {"group1": "", "group2": ""}, "pairs": []}
     needs_group = module_name in {"bulk_deg", "deg", "proportion"}
@@ -429,6 +511,10 @@ def build_design_preflight(adata, module_name, params=None, input_path=""):
                     checks.append(_check("分组规模", "warning", "存在仅 1 个观测单位的分组；结果只能作为探索性证据。", counts))
                 else:
                     checks.append(_check("比较分组", "pass", "已识别可用分组及可比较的组别。", counts))
+                if module_name == "bulk_deg":
+                    comparison_blocker = _bulk_deg_comparison_blocker(counts, params)
+                    if comparison_blocker:
+                        checks.append(_check("指定比较", "blocked", comparison_blocker))
 
     if module_name == "functional_state":
         sample_key = _selected_value(params, "sample_key") or (candidates["sample_candidates"] or [""])[0]

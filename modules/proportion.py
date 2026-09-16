@@ -3,7 +3,11 @@ import json
 import re
 import numpy as np
 from modules.base import BaseAnalysis
-from modules.io_utils import resolve_obs_grouping
+from modules.io_utils import (
+    MAX_PER_SAMPLE_FIGURE_LEVELS,
+    per_sample_figure_status,
+    resolve_obs_grouping,
+)
 
 def _run_stat_test(ct_abs, test_type, n_permutations=1000):
     """对列联表运行指定统计检验，返回 (statistic, p_value)。"""
@@ -343,6 +347,21 @@ class ProportionAnalysis(BaseAnalysis):
         if comparison_key != requested_comparison_key:
             self.progress(-1, f"比较列已改用 '{comparison_key}'：{comparison_info.get('requested_reason', '')}")
 
+        # One stacked bar, heatmap row and pie per sample stops being readable
+        # long before a large cohort: hundreds of labels and a canvas metres
+        # wide.  Keep the complete count/proportion CSVs and report the
+        # comparison statistics, but omit the per-sample cell-level figures.
+        suppress_comparison_figures, n_comparison_levels = per_sample_figure_status(
+            adata, comparison_key,
+        )
+        if suppress_comparison_figures:
+            self.progress(
+                -1,
+                f"比较列 '{comparison_key}' 有 {n_comparison_levels} 个水平，超过逐样本图上限 "
+                f"{MAX_PER_SAMPLE_FIGURE_LEVELS}；已跳过逐样本比例图（堆叠柱/热图/饼图），"
+                "完整细胞数与比例表仍写入结果 CSV。",
+            )
+
         # Compute sample-level composition before removing rare cell types for
         # the cell-level table.  Filtering globally first changes every
         # sample's denominator and can manufacture condition differences when
@@ -400,48 +419,49 @@ class ProportionAnalysis(BaseAnalysis):
         os.makedirs(results_dir, exist_ok=True)
         result_files = []
 
-        fig = grouped_bar_figure(
-            ct.index.tolist(), [(str(col), ct[col].values) for col in ct.columns],
-            title='Cell Proportions by Group', x_label=comparison_key,
-            y_label='Proportion', rotation=35, stacked=True,
-        )
-        result_files.extend(self.save_matplotlib_figure(
-            fig, plots_dir, 'proportion_stacked.png', 'bar',
-            'Cell Proportions (Stacked)', formats=('png', 'svg'), dpi=300,
-        ))
-
-        if self.params.get('show_proportion_heatmap', True):
-            fig_heat = heatmap_figure(
-                ct.values, x_labels=[str(x) for x in ct.columns],
-                y_labels=[str(x) for x in ct.index], title='Cell Proportion Heatmap',
-                x_label=groupby, y_label=comparison_key, colorbar_label='Proportion',
-                vmin=0, vmax=max(1.0, float(ct.values.max()) if ct.size else 1.0),
+        if not suppress_comparison_figures:
+            fig = grouped_bar_figure(
+                ct.index.tolist(), [(str(col), ct[col].values) for col in ct.columns],
+                title='Cell Proportions by Group', x_label=comparison_key,
+                y_label='Proportion', rotation=35, stacked=True,
             )
             result_files.extend(self.save_matplotlib_figure(
-                fig_heat, plots_dir, 'proportion_heatmap.png', 'heatmap',
-                'Cell Proportion Heatmap', formats=('png', 'svg'), dpi=300,
+                fig, plots_dir, 'proportion_stacked.png', 'bar',
+                'Cell Proportions (Stacked)', formats=('png', 'svg'), dpi=300,
             ))
 
-        n_batches = len(ct.index)
-        fig2, pie_axes = plt.subplots(1, max(1, n_batches),
-                                      figsize=(5.0 * max(1, n_batches), 4.8), dpi=150,
-                                      squeeze=False)
-        for i, idx in enumerate(ct.index):
-            ax = pie_axes[0, i]
-            ax.pie(ct.loc[idx].values,
-                   labels=[str(x) for x in ct.columns],
-                   colors=[NATURE_PALETTE[j % len(NATURE_PALETTE)] for j in range(len(ct.columns))],
-                   startangle=90, counterclock=False,
-                   autopct='%1.1f%%', pctdistance=0.78,
-                   wedgeprops={'width': 0.42, 'edgecolor': 'white', 'linewidth': 0.7},
-                   textprops={'fontsize': 7})
-            ax.set_title(str(idx), loc='left', fontsize=9)
-        fig2.suptitle(f'Cell Type Distribution per {comparison_key}', x=0.05, ha='left',
-                      fontsize=11, fontweight='semibold')
-        result_files.extend(self.save_matplotlib_figure(
-            fig2, plots_dir, 'proportion_pie.png', 'pie',
-            'Cell Type Distribution', formats=('png', 'svg'), dpi=300,
-        ))
+            if self.params.get('show_proportion_heatmap', True):
+                fig_heat = heatmap_figure(
+                    ct.values, x_labels=[str(x) for x in ct.columns],
+                    y_labels=[str(x) for x in ct.index], title='Cell Proportion Heatmap',
+                    x_label=groupby, y_label=comparison_key, colorbar_label='Proportion',
+                    vmin=0, vmax=max(1.0, float(ct.values.max()) if ct.size else 1.0),
+                )
+                result_files.extend(self.save_matplotlib_figure(
+                    fig_heat, plots_dir, 'proportion_heatmap.png', 'heatmap',
+                    'Cell Proportion Heatmap', formats=('png', 'svg'), dpi=300,
+                ))
+
+            n_batches = len(ct.index)
+            fig2, pie_axes = plt.subplots(1, max(1, n_batches),
+                                          figsize=(5.0 * max(1, n_batches), 4.8), dpi=150,
+                                          squeeze=False)
+            for i, idx in enumerate(ct.index):
+                ax = pie_axes[0, i]
+                ax.pie(ct.loc[idx].values,
+                       labels=[str(x) for x in ct.columns],
+                       colors=[NATURE_PALETTE[j % len(NATURE_PALETTE)] for j in range(len(ct.columns))],
+                       startangle=90, counterclock=False,
+                       autopct='%1.1f%%', pctdistance=0.78,
+                       wedgeprops={'width': 0.42, 'edgecolor': 'white', 'linewidth': 0.7},
+                       textprops={'fontsize': 7})
+                ax.set_title(str(idx), loc='left', fontsize=9)
+            fig2.suptitle(f'Cell Type Distribution per {comparison_key}', x=0.05, ha='left',
+                          fontsize=11, fontweight='semibold')
+            result_files.extend(self.save_matplotlib_figure(
+                fig2, plots_dir, 'proportion_pie.png', 'pie',
+                'Cell Type Distribution', formats=('png', 'svg'), dpi=300,
+            ))
 
         ct_abs.to_csv(os.path.join(results_dir, 'cell_counts.csv'))
         ct.to_csv(os.path.join(results_dir, 'cell_proportions.csv'))
@@ -546,5 +566,8 @@ class ProportionAnalysis(BaseAnalysis):
                 'requested_batch_key': requested_batch_key,
                 'batch_key': comparison_key,
                 'comparison_key': comparison_key,
+                'n_comparison_levels': n_comparison_levels,
+                'per_sample_figures_suppressed': suppress_comparison_figures,
+                'max_per_sample_figure_levels': MAX_PER_SAMPLE_FIGURE_LEVELS,
             }
         }

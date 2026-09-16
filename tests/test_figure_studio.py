@@ -59,6 +59,33 @@ def test_volcano_version_reclassifies_without_recomputing_deg(test_project):
     assert 'TP53' in open(version.svg_path, encoding='utf-8').read()
 
 
+def test_volcano_axis_range_and_tick_intervals_are_display_only_controls():
+    """Figure Studio exposes a safe, precise axis ruler without touching DEG data."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    from modules.figure_studio import _apply_common_style, normalize_style
+
+    style = normalize_style({
+        'x_min': '-2.5', 'x_max': '2.5', 'x_tick_step': '0.5',
+        'y_min': '0', 'y_max': '18', 'y_tick_step': '2',
+    })
+    fig, ax = plt.subplots()
+    ax.scatter([-1.0, 1.0], [4.0, 12.0])
+    _apply_common_style(fig, ax, style)
+    fig.canvas.draw()
+
+    assert ax.get_xlim() == (-2.5, 2.5)
+    assert ax.get_ylim() == (0.0, 18.0)
+    assert np.allclose(np.diff(ax.get_xticks()), 0.5)
+    assert np.allclose(np.diff(ax.get_yticks()), 2.0)
+    invalid_style = normalize_style({'x_tick_step': '0', 'y_tick_step': 'invalid'})
+    assert invalid_style['x_tick_step'] is None
+    assert invalid_style['y_tick_step'] is None
+    assert normalize_style({'x_min': '−2.5'})['x_min'] == -2.5
+    plt.close(fig)
+
+
 def test_saved_volcano_version_keeps_data_backed_editing(test_project):
     from modules.figure_studio import list_sources, resolve_source, save_figure_version
 

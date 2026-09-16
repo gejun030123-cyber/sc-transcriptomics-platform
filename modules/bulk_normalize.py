@@ -22,7 +22,10 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         from modules.figure_style import NATURE_PALETTE, NATURE_TEXT, NATURE_GRID
 
         self.progress(5, "加载数据...")
-        from modules.io_utils import read_expression_matrix, resolve_expression_measurement, run_bulk_sample_pca
+        from modules.io_utils import (
+            read_expression_matrix, resolve_expression_measurement,
+            run_bulk_sample_pca, validate_bulk_raw_counts,
+        )
         adata = read_expression_matrix(input_path)
 
         method = str(self.params.get('method', 'deseq2')).strip().lower()
@@ -41,6 +44,8 @@ class BulkNormalizeAnalysis(BaseAnalysis):
         # description of the *output* scale.
         adata.uns['input_measurement'] = input_measurement
         adata.uns['input_measurement_provenance'] = measurement_info
+        if input_measurement == 'raw_counts':
+            validate_bulk_raw_counts(adata, context='Bulk 标准化')
         count_only_methods = {'deseq2', 'tmm', 'cpm', 'vst', 'rlog'}
         if input_measurement != 'raw_counts' and method in count_only_methods:
             raise ValueError(
@@ -192,6 +197,27 @@ class BulkNormalizeAnalysis(BaseAnalysis):
             'note': '近似实现：log2(normed + 0.5)，非 DESeq2 原始 VST/rlog' if method in ('vst', 'rlog') else '',
             'input_measurement': input_measurement,
             'input_measurement_provenance': measurement_info,
+            'gene_expression_filter': {
+                'applied': bool(min_expr_samples > 0 or max_zero_pct > 0),
+                'minimum_expression_value': float(min_expr_value),
+                'minimum_expression_samples': int(min_expr_samples),
+                'value_scale': 'CPM' if input_measurement == 'raw_counts' else input_measurement,
+                'max_zero_pct': float(max_zero_pct),
+                'n_genes_before': int(n_genes_before),
+                'n_genes_after': int(adata.n_vars),
+                'n_genes_removed': int(n_genes_before - adata.n_vars),
+                # This is the only step that reduces the gene set before
+                # DESeq2/edgeR/limma; state it in the artifact so a DEG result
+                # can be audited without re-reading the QC summary.
+                'message': (
+                    '标准化阶段已过滤低表达基因：'
+                    f'{n_genes_before} → {adata.n_vars}（移除 {n_genes_before - adata.n_vars}）；'
+                    'DESeq2/edgeR/limma 只使用保留的基因。'
+                    if (min_expr_samples > 0 or max_zero_pct > 0) else
+                    '标准化阶段未启用低表达基因过滤（min_expr_samples=0 且 max_zero_pct=0）；'
+                    '进入 DESeq2/edgeR/limma 前建议先过滤低表达基因。'
+                ),
+            },
         }
 
         self.progress(60, "生成标准化前后对比图...")
@@ -406,6 +432,7 @@ class BulkNormalizeAnalysis(BaseAnalysis):
                 'n_genes_before_filter': n_genes_before,
                 'n_genes_after_filter': adata.n_vars,
                 'genes_filtered': n_genes_before - adata.n_vars,
+                'gene_expression_filter': adata.uns['normalization']['gene_expression_filter'],
                 'median_size_factor': round(float(adata.obs['size_factor'].median()), 3) if 'size_factor' in adata.obs.columns else None,
                 'median_tmm_factor': round(float(adata.obs['tmm_factor'].median()), 3) if 'tmm_factor' in adata.obs.columns else None,
                 'is_log_transformed': adata.uns.get('normalization', {}).get('is_log_transformed', True),

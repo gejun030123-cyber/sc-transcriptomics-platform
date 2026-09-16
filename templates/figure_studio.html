@@ -111,13 +111,18 @@
 
         <div class="control-section data-only">
             <h6>坐标轴与范围</h6>
-            <div class="row g-2">
+            <p class="hint mb-2">仅调整显示范围与主刻度，不改变差异分析、FDR 或基因分类。火山图常用 X：−2.5 至 2.5、间隔 1；Y：0 至 18、间隔 2；可直接粘贴负号“−”。</p>
+            <div class="row g-2 mb-1">
                 <div class="col-6"><label for="x-label" class="form-label">X 轴标题</label><input id="x-label" class="form-control compact-input style-field" maxlength="180"></div>
                 <div class="col-6"><label for="y-label" class="form-label">Y 轴标题</label><input id="y-label" class="form-control compact-input style-field" maxlength="180"></div>
-                <div class="col-6"><label for="x-min" class="form-label">X 最小值</label><input id="x-min" type="number" step="any" class="form-control compact-input style-field"></div>
-                <div class="col-6"><label for="x-max" class="form-label">X 最大值</label><input id="x-max" type="number" step="any" class="form-control compact-input style-field"></div>
-                <div class="col-6"><label for="y-min" class="form-label">Y 最小值</label><input id="y-min" type="number" step="any" class="form-control compact-input style-field"></div>
-                <div class="col-6"><label for="y-max" class="form-label">Y 最大值</label><input id="y-max" type="number" step="any" class="form-control compact-input style-field"></div>
+            </div>
+            <div class="row g-2">
+                <div class="col-4"><label for="x-min" class="form-label">X 最小值</label><input id="x-min" inputmode="decimal" class="form-control compact-input style-field" placeholder="−2.5"></div>
+                <div class="col-4"><label for="x-max" class="form-label">X 最大值</label><input id="x-max" inputmode="decimal" class="form-control compact-input style-field" placeholder="2.5"></div>
+                <div class="col-4"><label for="x-tick-step" class="form-label">X 刻度间隔</label><input id="x-tick-step" inputmode="decimal" class="form-control compact-input style-field" placeholder="1"></div>
+                <div class="col-4"><label for="y-min" class="form-label">Y 最小值</label><input id="y-min" inputmode="decimal" class="form-control compact-input style-field" placeholder="0"></div>
+                <div class="col-4"><label for="y-max" class="form-label">Y 最大值</label><input id="y-max" inputmode="decimal" class="form-control compact-input style-field" placeholder="18"></div>
+                <div class="col-4"><label for="y-tick-step" class="form-label">Y 刻度间隔</label><input id="y-tick-step" inputmode="decimal" class="form-control compact-input style-field" placeholder="2"></div>
             </div>
         </div>
 
@@ -207,15 +212,15 @@
     const defaults = {
         title: '', x_label: '', y_label: '', font_family: 'Arial', font_size: 11,
         background: '#ffffff', grid: false, legend_position: 'upper right', legend_text: '',
-        x_min: '', x_max: '', y_min: '', y_max: '', pvalue_threshold: 0.05, fc_threshold: 1.5,
-        up_color: '#b64342', down_color: '#0f4d92', ns_color: '#c7cdd6', label_genes: '',
+        x_min: '', x_max: '', x_tick_step: '', y_min: '', y_max: '', y_tick_step: '', pvalue_threshold: 0.05, fc_threshold: 1.5,
+        up_color: '#c65a5a', down_color: '#4c78a8', ns_color: '#d9dee5', label_genes: '',
         heatmap_cmap: 'RdBu_r', heatmap_top_n: 50, heatmap_sample_labels: 'auto', heatmap_sample_scope: 'all', heatmap_selected_samples: '', heatmap_group_column: '', heatmap_selected_groups: '', row_cluster: true, col_cluster: true, annotation_column: '',
         corr_colorscale: 'Blues', enrichment_top_n: 20, enrichment_overview_top_n: 8, enrichment_database_scope: '', enrichment_pathway_selection: 'top', enrichment_target_pathways: '', enrichment_gene_label_strategy: 'all', enrichment_target_genes: '', enrichment_max_gene_labels: 30, enrichment_bp_color: '#fdbe85', enrichment_cc_color: '#7a6fa8', enrichment_mf_color: '#b8a9d1', enrichment_kegg_color: '#7bc77b', enrichment_other_color: '#9cb8d8'
     };
     const fieldMap = {
         title: 'title', x_label: 'x-label', y_label: 'y-label', font_family: 'font-family', font_size: 'font-size',
         background: 'background', grid: 'grid', legend_position: 'legend-position', legend_text: 'legend-text',
-        x_min: 'x-min', x_max: 'x-max', y_min: 'y-min', y_max: 'y-max', pvalue_threshold: 'pvalue-threshold',
+        x_min: 'x-min', x_max: 'x-max', x_tick_step: 'x-tick-step', y_min: 'y-min', y_max: 'y-max', y_tick_step: 'y-tick-step', pvalue_threshold: 'pvalue-threshold',
         fc_threshold: 'fc-threshold', up_color: 'up-color', down_color: 'down-color', ns_color: 'ns-color',
         label_genes: 'label-genes', heatmap_cmap: 'heatmap-cmap', heatmap_top_n: 'heatmap-top-n', heatmap_sample_labels: 'heatmap-sample-labels', heatmap_sample_scope: 'heatmap-sample-scope', heatmap_group_column: 'heatmap-group-column',
         row_cluster: 'row-cluster', col_cluster: 'col-cluster', annotation_column: 'annotation-column',

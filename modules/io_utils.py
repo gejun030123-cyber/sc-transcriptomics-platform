@@ -1,4 +1,5 @@
 import os
+import re
 import numpy as np
 import pandas as pd
 from config import Config
@@ -96,6 +97,52 @@ def is_technical_obs_column(column):
     }
 
 
+# ``sample_id``/``Sample``/``donor`` describe which material a cell came from,
+# not a plotting group.  A multi-sample study can legitimately contain hundreds
+# of them, so they must not be rejected by the small categorical cap used to
+# keep bar/legend figures readable.  They are still bounded by the
+# cells-per-level guard in :func:`obs_grouping_info` (one ID per cell is always
+# rejected) and by this absolute ceiling.
+MAX_IDENTIFIER_CATEGORIES = 2000
+
+_IDENTIFIER_SEGMENTS = frozenset({
+    'sample', 'donor', 'subject', 'patient', 'individual',
+    'library', 'specimen', 'batch', 'lane',
+})
+
+# Qualifiers that mark a name as an identifier rather than a grouping, so that
+# ``patient_group`` stays a comparison grouping while ``patient_id`` does not.
+_IDENTIFIER_QUALIFIERS = frozenset({
+    'id', 'ids', 'identifier', 'ident', 'name', 'code', 'barcode', 'label',
+    'source',
+})
+
+
+def is_sample_identifier_column(column):
+    """Return whether an obs field identifies samples/libraries/donors.
+
+    Such fields may hold hundreds of levels in a large study, so they are
+    validated with the cells-per-level rule instead of ``max_categories``.
+    Cell barcodes and other one-value-per-cell fields still fail that rule.
+    """
+    if is_technical_obs_column(column):
+        return True
+    normalised = _normalise_obs_column_name(column)
+    segments = [segment for segment in re.split(r'[^a-z0-9]+', normalised) if segment]
+    if not segments:
+        return False
+    if len(segments) == 1:
+        segment = segments[0]
+        return segment in _IDENTIFIER_SEGMENTS or (
+            segment.endswith('id') and segment[:-2] in _IDENTIFIER_SEGMENTS
+        )
+    # Multi-word names need an ID-like qualifier (``sample_id``, ``donor_code``)
+    # so that a biological grouping such as ``patient_group`` is not excluded.
+    return segments[-1] in _IDENTIFIER_QUALIFIERS and any(
+        segment in _IDENTIFIER_SEGMENTS for segment in segments
+    )
+
+
 def _obs_priority(column, priority_names):
     """Give preferred aliases a stable rank, including leiden_0.8-like names."""
     normalised = _normalise_obs_column_name(column)
@@ -139,18 +186,25 @@ def obs_grouping_info(adata, column, *, max_categories=50,
         result['reason'] = '分组数量不足'
         return result
 
-    if pd.api.types.is_numeric_dtype(values) and n_unique > max_numeric_categories:
-        result['reason'] = (
-            f"列 '{column}' 是连续/高基数数值列（{n_unique} 个取值），"
-            '不能作为分类分组列'
-        )
-        return result
-
     # Reject sample/cell identifiers and other almost-one-value-per-row fields;
     # for small datasets the relative limit is stricter than the absolute cap.
     n_obs = max(int(getattr(adata, 'n_obs', len(values))), 1)
     cardinality_limit = int(max_categories)
     relative_limit = max(20, int(0.2 * n_obs))
+    identifier_column = is_sample_identifier_column(column)
+    result['identifier_column'] = identifier_column
+    if identifier_column:
+        # Sample/library/donor IDs are study design, not a plotting grouping:
+        # apply the cells-per-level guard plus a generous ceiling so that a
+        # 131-sample study is usable while one-ID-per-cell barcodes still fail.
+        # Numeric-looking IDs (1..131) are still identifiers, not a QC gradient.
+        cardinality_limit = max(cardinality_limit, MAX_IDENTIFIER_CATEGORIES)
+    elif pd.api.types.is_numeric_dtype(values) and n_unique > max_numeric_categories:
+        result['reason'] = (
+            f"列 '{column}' 是连续/高基数数值列（{n_unique} 个取值），"
+            '不能作为分类分组列'
+        )
+        return result
     if n_unique > cardinality_limit or (n_unique > relative_limit and n_unique > 20):
         safe_limit = min(cardinality_limit, relative_limit) if relative_limit < cardinality_limit else cardinality_limit
         result['reason'] = (
@@ -160,6 +214,34 @@ def obs_grouping_info(adata, column, *, max_categories=50,
 
     result['valid'] = True
     return result
+
+
+# Figures that draw one colour, bar or panel per sample become unreadable long
+# before a large study runs out of samples: the shared palettes hold only 10-20
+# colours, so levels repeat, and per-donor panels scale the canvas by roughly
+# one inch per level.  Above this many identifier levels the per-sample figures
+# are omitted; every per-sample value must instead be written to the task CSV
+# or JSON output.
+MAX_PER_SAMPLE_FIGURE_LEVELS = 20
+
+
+def per_sample_figure_status(adata, column, *, max_levels=MAX_PER_SAMPLE_FIGURE_LEVELS):
+    """Return ``(suppressed, n_levels)`` for figures drawn per sample.
+
+    ``suppressed`` is True only for sample/library/donor identifier columns
+    whose level count exceeds ``max_levels``.  Ordinary groupings such as
+    ``celltype`` or ``condition`` are never suppressed, and a small study keeps
+    every per-sample panel.
+    """
+    levels = 0
+    if column and column in getattr(adata, 'obs', pd.DataFrame()).columns:
+        levels = int(adata.obs[column].nunique(dropna=False))
+    suppressed = bool(
+        column
+        and is_sample_identifier_column(column)
+        and levels > int(max_levels)
+    )
+    return suppressed, levels
 
 
 def batch_cluster_overlap(adata, cluster_key, batch_key, *, dominance_threshold=0.90):
@@ -276,7 +358,7 @@ def rank_obs_grouping_candidates(adata, module_name='', *, purpose='groupby',
     for index, column in enumerate(columns):
         if column in QC_OBS_COLUMNS:
             continue
-        if not allow_technical and is_technical_obs_column(column):
+        if not allow_technical and is_sample_identifier_column(column):
             continue
         info = obs_grouping_info(
             adata, column, max_categories=50,
@@ -338,6 +420,84 @@ def resolve_obs_grouping(adata, requested, fallbacks=(), *, max_categories=50,
 EXPRESSION_MEASUREMENT_TYPES = frozenset({
     'raw_counts', 'continuous_expression', 'log_transformed',
 })
+
+
+def _is_nonnegative_integer_matrix(matrix):
+    """Return whether a dense or sparse matrix is valid raw-count data."""
+    try:
+        from scipy import sparse as sp
+        values = matrix.data if sp.issparse(matrix) else np.asarray(matrix)
+    except ImportError:  # scipy is a project dependency; retain a safe fallback.
+        values = np.asarray(matrix)
+    values = np.asarray(values)
+    if not np.issubdtype(values.dtype, np.number):
+        return False
+    if values.size == 0:
+        return True
+    return bool(
+        np.isfinite(values).all()
+        and (values >= 0).all()
+        and np.isclose(values, np.round(values), rtol=0.0, atol=1e-8).all()
+        and float(np.max(values)) < float(np.iinfo(np.int64).max)
+    )
+
+
+def preserved_raw_count_layer(adata):
+    """Return a verified raw-count layer retained by a Bulk handoff.
+
+    Bulk normalization intentionally stores a log-scale display matrix in
+    ``X`` and the pre-filtered integer counts in ``layers['raw']``.  Every
+    caller that gates a count model must use this shared check so UI preflight,
+    AI submission, and the DEG runner agree about that contract.
+    """
+    for layer_name in ('counts', 'raw_counts', 'raw'):
+        layer = getattr(adata, 'layers', {}).get(layer_name)
+        if layer is not None and _is_nonnegative_integer_matrix(layer):
+            return layer, layer_name
+    return None, ''
+
+
+def validate_bulk_raw_counts(adata, *, matrix=None, context='Bulk 分析'):
+    """Reject non-count matrices before a count-only Bulk operation.
+
+    Raw-count import is deliberately a stricter contract than the generic
+    expression-table reader.  In particular, the latter historically filled
+    missing table entries with zero for exploratory workflows.  That is never
+    acceptable evidence for a count model, so retain its provenance and fail
+    here with an actionable route back to the validated importer.
+    """
+    legacy_import = dict(getattr(adata, 'uns', {}).get('legacy_table_import', {}) or {})
+    if legacy_import.get('generic_expression_table'):
+        missing_values = int(legacy_import.get('missing_values_replaced_with_zero', 0) or 0)
+        detail = (
+            f'该表曾将 {missing_values} 个缺失值替换为 0；' if missing_values else
+            '该表经通用表达矩阵读取器导入；'
+        )
+        raise ValueError(
+            f'{context}不能使用通用上传的 raw count 表。{detail}'
+            '请在上传页使用“Bulk RNA-seq 原始 counts”入口，同时提交 counts 矩阵和样本信息表。'
+        )
+
+    values_source = adata.X if matrix is None else matrix
+    try:
+        from scipy import sparse as sp
+        values = values_source.data if sp.issparse(values_source) else np.asarray(values_source)
+    except ImportError:  # scipy is a project dependency; keep the guard robust for minimal installs.
+        values = np.asarray(values_source)
+    values = np.asarray(values)
+    if not np.issubdtype(values.dtype, np.number):
+        raise ValueError(f'{context}需要数值型、非负整数 raw counts。')
+    if not np.isfinite(values).all():
+        raise ValueError(f'{context}的 raw counts 不能包含 NaN、inf 或 -inf。')
+    if (values < 0).any():
+        raise ValueError(f'{context}的 raw counts 不能包含负数。')
+    if not np.isclose(values, np.round(values), rtol=0.0, atol=1e-8).all():
+        raise ValueError(
+            f'{context}需要原始非负整数 counts；检测到非整数值。'
+            'TPM、FPKM、CPM 或 log 表达值不能用于计数型分析。'
+        )
+    if values.size and float(np.max(values)) >= float(np.iinfo(np.int64).max):
+        raise ValueError(f'{context}的 count 数值超出可安全处理的整数范围。')
 
 
 def resolve_expression_measurement(adata, input_path='', declared='auto'):
@@ -712,6 +872,18 @@ def read_expression_matrix(file_path):
                 break
     gene_names = df[gene_name_col].tolist() if gene_name_col else None
 
+    # Keep a chromosome annotation when a direct count table provides one.
+    # Bulk QC uses chrM/MT as a robust mitochondrial fallback for Ensembl-only
+    # matrices; it must not be discarded together with non-numeric columns.
+    chromosome_col = None
+    chromosome_candidates = ['chromosome', 'Chromosome', 'chrom', 'Chrom', 'Chr', 'chr',
+                             'seqname', 'seq_name', 'sequence_name']
+    for candidate in chromosome_candidates:
+        if candidate in non_numeric_cols:
+            chromosome_col = candidate
+            break
+    chromosome_values = df[chromosome_col].tolist() if chromosome_col else None
+
     if len(numeric_cols) < df.shape[1]:
         df = df[numeric_cols]
 
@@ -722,6 +894,13 @@ def read_expression_matrix(file_path):
     df = df.fillna(0)
 
     adata = sc.AnnData(X=df.values.T, obs=pd.DataFrame(index=df.columns), var=pd.DataFrame(index=df.index))
+    # Generic table upload remains useful for exploratory continuous-expression
+    # work.  Preserve the fact that it used the legacy missing-value fallback
+    # so count-only modules can require the dedicated raw-count importer.
+    adata.uns['legacy_table_import'] = {
+        'generic_expression_table': True,
+        'missing_values_replaced_with_zero': int(nan_count),
+    }
 
     # 清理样本名：去掉 _count/_FPKM/_TPM 后缀
     import re as _re
@@ -732,6 +911,8 @@ def read_expression_matrix(file_path):
     # 如果找到基因名列，保存到 var 中
     if gene_names is not None:
         adata.var['gene_name'] = gene_names
+    if chromosome_values is not None:
+        adata.var['chromosome'] = chromosome_values
 
     # 将 var_names 从 Ensembl ID 映射为基因名
     adata = remap_var_names(adata)

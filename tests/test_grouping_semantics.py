@@ -42,6 +42,109 @@ def test_obs_grouping_rejects_continuous_and_accepts_categories():
     assert good['n_unique'] == 2
 
 
+def test_obs_grouping_accepts_many_sample_ids_in_large_study():
+    """A 131-sample study must keep sample_id usable for batch/sample roles.
+
+    The small categorical cap exists to keep plotting groupings readable; it
+    must not disqualify a real library/donor identifier just because the study
+    contains more than 50 samples.
+    """
+    from modules.io_utils import obs_grouping_info, rank_obs_grouping_candidates
+
+    n_obs, n_samples = 2600, 131
+    adata = _adata(n_obs=n_obs, n_vars=6)
+    adata.obs['sample_id'] = pd.Categorical(
+        [f'S{index % n_samples:03d}' for index in range(n_obs)]
+    )
+    adata.obs['Sample'] = pd.Categorical(
+        [f'CAP{index % n_samples:03d}' for index in range(n_obs)]
+    )
+    adata.obs['donor'] = pd.Categorical(
+        [f'D{index % 40:02d}' for index in range(n_obs)]
+    )
+
+    info = obs_grouping_info(adata, 'sample_id', max_categories=50, require_multiple=True)
+    assert info['valid'] is True
+    assert info['n_unique'] == n_samples
+    assert info['identifier_column'] is True
+    assert obs_grouping_info(
+        adata, 'Sample', max_categories=50, require_multiple=True,
+    )['valid'] is True
+
+    # Sample identifiers stay selectable for batch/sample parameters, but must
+    # not be auto-suggested as the biological groupby.
+    assert 'sample_id' in rank_obs_grouping_candidates(adata, 'dimred', purpose='batch_key')
+    assert 'sample_id' in rank_obs_grouping_candidates(adata, 'dimred', purpose='sample_key')
+    assert 'sample_id' not in rank_obs_grouping_candidates(adata, 'deg', purpose='groupby')
+    assert 'donor' not in rank_obs_grouping_candidates(adata, 'deg', purpose='groupby')
+
+
+def test_obs_grouping_still_rejects_one_id_per_cell_and_huge_identifiers():
+    from modules.io_utils import obs_grouping_info
+
+    n_obs = 400
+    adata = _adata(n_obs=n_obs, n_vars=4)
+    # One "sample" per cell is a barcode, not a replicate design.
+    adata.obs['sample_id'] = [f'S{index}' for index in range(n_obs)]
+    one_per_cell = obs_grouping_info(adata, 'sample_id', require_multiple=True)
+    assert one_per_cell['valid'] is False
+    assert one_per_cell['identifier_column'] is True
+
+    # Identifier fields are documented but not unbounded.
+    large = _adata(n_obs=3000, n_vars=4)
+    large.obs['donor_id'] = [f'D{index}' for index in range(large.n_obs)]
+    assert obs_grouping_info(large, 'donor_id', require_multiple=True)['valid'] is False
+
+
+def test_obs_grouping_accepts_numeric_sample_ids():
+    """Numeric 1..131 IDs are sample identifiers, not a continuous QC gradient."""
+    from modules.io_utils import obs_grouping_info
+
+    n_obs, n_samples = 2620, 131
+    adata = _adata(n_obs=n_obs, n_vars=4)
+    adata.obs['sample_id'] = [index % n_samples + 1 for index in range(n_obs)]
+
+    info = obs_grouping_info(adata, 'sample_id', max_categories=50, require_multiple=True)
+    assert info['valid'] is True
+    assert info['identifier_column'] is True
+    assert info['n_unique'] == n_samples
+
+    # A continuous numeric field is still rejected.
+    assert obs_grouping_info(adata, 'continuous_qc', require_multiple=True)['valid'] is False
+
+
+def test_per_sample_figure_status_suppresses_only_large_sample_columns():
+    from modules.io_utils import (
+        MAX_PER_SAMPLE_FIGURE_LEVELS,
+        per_sample_figure_status,
+    )
+
+    n_obs = 2620
+    adata = _adata(n_obs=n_obs, n_vars=4)
+    adata.obs['sample_id'] = [f'S{index % 131:03d}' for index in range(n_obs)]
+    adata.obs['cluster'] = [f'K{index % 131:03d}' for index in range(n_obs)]
+    adata.obs['condition'] = [f'C{index % 40:02d}' for index in range(n_obs)]
+
+    assert per_sample_figure_status(adata, 'sample_id') == (True, 131)
+    # An ordinary grouping with the same cardinality is not a sample figure.
+    assert per_sample_figure_status(adata, 'cluster') == (False, 131)
+    assert per_sample_figure_status(adata, 'condition') == (False, 40)
+    assert per_sample_figure_status(adata, 'not_a_column') == (False, 0)
+    assert MAX_PER_SAMPLE_FIGURE_LEVELS == 20
+
+
+def test_per_sample_figure_status_keeps_small_studies():
+    from modules.io_utils import per_sample_figure_status
+
+    n_obs = 40
+    adata = _adata(n_obs=n_obs, n_vars=4)
+    adata.obs['sample_id'] = [f'S{index % 5}' for index in range(n_obs)]
+
+    assert per_sample_figure_status(adata, 'sample_id') == (False, 5)
+    # The caller may raise the limit for an explicitly requested wide figure.
+    assert per_sample_figure_status(adata, 'sample_id', max_levels=3) == (True, 5)
+
+
 def test_obs_grouping_candidates_are_parameter_aware():
     from modules.io_utils import rank_obs_grouping_candidates
 
@@ -105,6 +208,27 @@ def test_bulk_deg_missing_group_never_splits_samples_by_file_order(tmp_path):
         str(tmp_path), {'method': 't-test', 'groupby': 'condition'}, lambda *_: None,
     )
     with pytest.raises(ValueError, match='分组列'):
+        analysis.run(str(input_path))
+
+
+def test_bulk_deg_rejects_comparisons_from_a_different_grouping_column(tmp_path):
+    from modules.bulk_deg import BulkDEGAnalysis
+
+    adata = _adata(n_obs=6, n_vars=5)
+    adata.obs['condition'] = ['Ctrl_B'] * 3 + ['Drug_B'] * 3
+    adata.obs['treatment'] = ['Ctrl'] * 3 + ['Drug'] * 3
+    input_path = tmp_path / 'input.h5ad'
+    adata.write_h5ad(input_path)
+
+    analysis = BulkDEGAnalysis(
+        str(tmp_path),
+        {
+            'method': 't-test', 'groupby': 'treatment',
+            'comparisons': 'Drug_B-vs-Ctrl_B',
+        },
+        lambda *_: None,
+    )
+    with pytest.raises(ValueError, match='指定比较与分组列'):
         analysis.run(str(input_path))
 
 

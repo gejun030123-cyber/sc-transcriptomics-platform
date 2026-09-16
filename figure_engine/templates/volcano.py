@@ -1,5 +1,6 @@
 """NatureVolcano：固定阈值语义和受控基因标注。"""
 
+import re
 import textwrap
 
 import numpy as np
@@ -7,65 +8,54 @@ import pandas as pd
 
 from figure_engine.spec import FigureSpec
 from figure_engine.style import get_style
-from .common import adjust_labels, attach_contract, finite_numeric, prune_overlapping_labels
+from .common import (
+    adjust_labels, attach_contract, ensure_angled_annotation_leaders,
+    finite_numeric, prune_overlapping_labels,
+)
 
 
-def _compress_fdr_tail(y_raw, threshold_y):
-    """Keep an extreme FDR tail legible without flattening it at a ceiling.
+DEFAULT_VOLCANO_X_LIMIT = 2.5
+DEFAULT_VOLCANO_Y_LIMIT = 18.0
 
-    DESeq2 can legitimately report adjusted p-values far below the useful
-    display range.  A hard y-axis cap turns all of those points into one dense
-    horizontal row, which hides their relative strength and makes the Volcano
-    plot look broken.  Above a clearly marked break we therefore use a
-    monotonic log compression.  The plotted order is preserved and tick labels
-    remain in the original ``-log10(FDR)`` units.
+
+def _volcano_display_limits(y_raw, threshold_y, fc_threshold=0.0):
+    """Return publication-scale axes without changing the reported statistics.
+
+    The main cloud in a Bulk RNA-seq volcano plot is ordinarily most legible
+    within ±2.5 log2FC.  Larger observed effects remain in the figure as edge
+    triangles rather than expanding the panel or being silently discarded.
+    Likewise, the FDR axis stays linear in its displayed range and uses a
+    triangular cap above 18 instead of a nonlinear tail transformation.
     """
-    values = np.asarray(y_raw, dtype=float)
-    finite = values[np.isfinite(values)]
-    if finite.size == 0:
-        return values, None
+    # A user may deliberately choose an unusually stringent fold-change gate;
+    # keep both threshold lines visible even then, while retaining the compact
+    # ±2.5 default for normal Bulk RNA-seq contrasts.
+    x_limit = max(
+        DEFAULT_VOLCANO_X_LIMIT,
+        float(np.ceil((float(fc_threshold) + 0.25) * 2.0) / 2.0),
+    )
 
-    # Values below 1e-12 retain the ordinary, linear volcano scale.  The
-    # threshold line (normally 1.30 for FDR 0.05) is consequently never
-    # affected by compression.
-    break_y = max(12.0, float(np.ceil(float(threshold_y) + 2.0)))
-    max_y = float(np.nanmax(finite))
-    if max_y <= break_y + 1.0:
-        return values, None
-
-    scale = max(4.0, break_y * 0.5)
-    displayed = values.copy()
-    tail = displayed > break_y
-    displayed[tail] = break_y + scale * np.log1p((displayed[tail] - break_y) / scale)
-    return displayed, {"break_y": break_y, "scale": scale, "max_y": max_y}
-
-
-def _tail_tick_values(tail_info):
-    """Return sparse, truthful tick locations for a compressed FDR tail."""
-    break_y = float(tail_info["break_y"])
-    scale = float(tail_info["scale"])
-    max_y = float(tail_info["max_y"])
-
-    # Four linear-range ticks leave enough space for three sparse tail ticks
-    # on a single-column figure.  The tail ticks have familiar 10^x values,
-    # not arbitrary display coordinates.
-    raw_ticks = list(np.linspace(0.0, break_y, num=4))
-    candidates = np.asarray((15, 20, 30, 50, 75, 100, 150, 200, 300), dtype=float)
-    candidates = candidates[(candidates > break_y) & (candidates <= max_y)]
-    if len(candidates) > 3:
-        candidates = candidates[np.linspace(0, len(candidates) - 1, num=3, dtype=int)]
-    raw_ticks.extend(candidates.tolist())
-    raw_ticks = np.asarray(list(dict.fromkeys(float(value) for value in raw_ticks)))
-    displayed = raw_ticks.copy()
-    tail = displayed > break_y
-    displayed[tail] = break_y + scale * np.log1p((displayed[tail] - break_y) / scale)
-    labels = [f"{value:g}" for value in raw_ticks]
-    return displayed, labels
+    finite_y = np.asarray(y_raw, dtype=float)
+    finite_y = finite_y[np.isfinite(finite_y)]
+    if finite_y.size == 0:
+        y_limit = max(4.0, float(threshold_y) + 1.5)
+    elif float(np.nanmax(finite_y)) > DEFAULT_VOLCANO_Y_LIMIT:
+        y_limit = DEFAULT_VOLCANO_Y_LIMIT
+    else:
+        y_limit = max(
+            4.0,
+            float(threshold_y) + 1.5,
+            float(np.ceil(float(np.nanmax(finite_y)) + 0.6)),
+        )
+    return float(x_limit), float(y_limit)
 
 
 def _wrap_title(value, default, width):
     """Wrap a title while preserving an intentional scientific context line."""
-    text = str(value or default).replace('_', ' ')
+    text = str(value or default).translate(str.maketrans('₀₁₂₃₄₅₆₇₈₉', '0123456789'))
+    # Common treatment spelling benefits from a real chemical subscript while
+    # retaining the grouping suffix literally (for example ``NH4Cl_B``).
+    text = re.sub(r'(?<![A-Za-z0-9])NH4Cl(?![A-Za-z0-9])', r'NH$_4$Cl', text)
     lines = [line.strip() for line in text.splitlines() if line.strip()] or [default]
     return '\n'.join(
         textwrap.fill(line, width=width, break_long_words=False)
@@ -86,18 +76,114 @@ def _select_labels(frame, spec, regulation):
     if remaining and spec.label_strategy != 'none':
         significant = frame[regulation.isin(['Up', 'Down'])].copy()
         significant['_abs_fc'] = significant['_log2fc'].abs()
-        significant = significant.sort_values(['_fdr', '_abs_fc'], ascending=[True, False])
-        per_side = max(1, int(np.ceil(remaining / 2)))
-        candidates = pd.concat([
-            significant[regulation.loc[significant.index] == 'Up'].head(per_side),
-            significant[regulation.loc[significant.index] == 'Down'].head(per_side),
-        ]).sort_values(['_fdr', '_abs_fc'], ascending=[True, False])
-        for index in candidates.index:
-            if index not in selected:
-                selected.append(index)
+        # Feature IDs are retained in the results table, but a bare Ensembl
+        # identifier is seldom an informative publication label.  Explicitly
+        # requested identifiers above are still honoured.
+        readable = significant[~significant['_gene'].str.match(
+            r'^(?:ENS(?:G|MUSG|DARG|RNOG)\d+|[A-Za-z]+\d{8,})$', na=False,
+        )]
+        if readable.empty:
+            readable = significant
+
+        # FDR alone would repeatedly label a very narrow set of effects.  Keep
+        # the strongest statistical evidence from each direction, then use the
+        # remaining capacity for the largest effects.  Explicitly requested
+        # genes above always remain first-priority labels.
+        # With the four-label platform default, show two genes per direction.
+        # At six or more labels, reserve the additional slots for the largest
+        # observed effects after that balanced FDR-first core.
+        fdr_per_side = 2 if remaining >= 4 else 1
+        fdr_candidates = pd.concat([
+            readable[regulation.loc[readable.index] == 'Up']
+            .sort_values(['_fdr', '_abs_fc'], ascending=[True, False]).head(fdr_per_side),
+            readable[regulation.loc[readable.index] == 'Down']
+            .sort_values(['_fdr', '_abs_fc'], ascending=[True, False]).head(fdr_per_side),
+        ])
+        effect_candidates = readable.sort_values(
+            ['_abs_fc', '_fdr'], ascending=[False, True],
+        )
+        for candidates in (fdr_candidates, effect_candidates):
+            for index in candidates.index:
+                if index not in selected:
+                    selected.append(index)
+                if len(selected) >= int(spec.label_n):
+                    break
             if len(selected) >= int(spec.label_n):
                 break
     return selected
+
+
+def _label_offsets(label_rows, y_limit, x_limit):
+    """Start labels with short angled leaders; ``adjustText`` handles overlap."""
+    if not label_rows:
+        return []
+    placed = []
+    for side in (-1, 1):
+        rows = [row for row in label_rows if row['side'] == side]
+        for rank, row in enumerate(sorted(rows, key=lambda item: item['y_point'])):
+            # Labels near an x/y edge point inwards so their initial short
+            # leader stays on-canvas.  The small rank offset breaks exact ties
+            # before the final repel pass, without becoming a horizontal rail.
+            x_side = side
+            if abs(float(row['x_point'])) >= float(x_limit) * 0.78:
+                x_side *= -1
+            y_side = -1 if float(row['y_point']) >= float(y_limit) * 0.84 else 1
+            placed.append({
+                **row,
+                # Data-coordinate starts let adjustText enforce the axes
+                # boundary correctly; Annotation + offset-points positions do
+                # not share its movement transform reliably.
+                'x_text': float(row['x_point']) + x_side * float(x_limit) * 0.08,
+                'y_text': float(row['y_point']) + y_side * float(y_limit) * (0.05 + 0.02 * (rank // 2)),
+                'label_side': x_side,
+                'y_side': y_side,
+            })
+    return placed
+
+
+def _place_legend_in_clearest_corner(ax, fig, legend, x_values, y_values, labels):
+    """Choose the least occupied corner for a compact in-panel legend.
+
+    Bulk contrasts can put their strongest signal on either side of the
+    volcano.  A fixed corner either covers that signal or, worse, covers a
+    label rail.  Evaluate the four conventional corners against the rendered
+    point cloud and label boxes so the legend remains informative but does not
+    compete with the data.
+    """
+    finite = np.isfinite(x_values) & np.isfinite(y_values)
+    points = ax.transData.transform(np.column_stack((x_values[finite], y_values[finite])))
+    candidates = ('upper left', 'upper right', 'lower right', 'lower left')
+    best_location = candidates[0]
+    best_score = None
+    for location in candidates:
+        try:
+            legend.set_loc(location)
+        except AttributeError:  # Matplotlib < 3.8 compatibility
+            legend._loc = location
+        fig.canvas.draw()
+        legend_box = legend.get_window_extent(fig.canvas.get_renderer())
+        point_hits = int(sum(legend_box.contains(x, y) for x, y in points))
+        label_hits = 0
+        for label in labels:
+            patch = label.get_bbox_patch() if hasattr(label, 'get_bbox_patch') else None
+            if patch is not None and patch.get_visible():
+                label_box = patch.get_window_extent(fig.canvas.get_renderer())
+            else:
+                from matplotlib.text import Text
+                label_box = Text.get_window_extent(label, fig.canvas.get_renderer())
+            label_hits += int(legend_box.overlaps(label_box))
+        # A readable selected gene is more valuable than an unlabelled
+        # background point, so it carries a stronger placement penalty.
+        score = point_hits + 20 * label_hits
+        if best_score is None or score < best_score:
+            best_location, best_score = location, score
+    try:
+        legend.set_loc(best_location)
+    except AttributeError:  # Matplotlib < 3.8 compatibility
+        legend._loc = best_location
+    # FigureValidator can distinguish this measured in-panel placement from a
+    # fixed legend that may silently cover data.
+    legend._nature_data_aware_placement = True
 
 
 class NatureVolcano:
@@ -130,25 +216,22 @@ class NatureVolcano:
                    & (frame['_log2fc'] >= spec.fc_threshold)] = 'Up'
         regulation[(frame['_fdr'] < spec.fdr_threshold)
                    & (frame['_log2fc'] <= -spec.fc_threshold)] = 'Down'
+        x_raw = frame['_log2fc'].to_numpy(dtype=float)
         y_raw = -np.log10(frame['_fdr'].to_numpy(dtype=float))
         threshold_y = -np.log10(spec.fdr_threshold)
-        y_display, tail_info = _compress_fdr_tail(y_raw, threshold_y)
-        y_limit = max(4.0, threshold_y + 1.5, float(np.ceil(np.nanmax(y_display) + 0.6)))
-        x_abs = np.abs(frame['_log2fc'].to_numpy(dtype=float))
-        # Use the full observed range so extreme-fold-change points are drawn at
-        # their true positions instead of being clipped to a vertical strip on
-        # both axes edges (the “两边又跑出画面” volcano artifact).  This mirrors
-        # the bulk DEG volcano contract.
-        finite_x = x_abs[np.isfinite(x_abs)]
-        max_abs_x = float(np.nanmax(finite_x)) if finite_x.size else 0.0
-        x_limit = max(spec.fc_threshold * 1.8, max_abs_x * 1.08, 2.5)
-        x_limit = float(np.ceil(x_limit * 2) / 2)
-        x_display = np.clip(frame['_log2fc'].to_numpy(dtype=float), -x_limit * 0.99, x_limit * 0.99)
+        x_limit, y_limit = _volcano_display_limits(y_raw, threshold_y, spec.fc_threshold)
+        x_clipped = np.abs(x_raw) > x_limit
+        y_clipped = y_raw > y_limit
+        x_display = np.clip(x_raw, -x_limit * 0.985, x_limit * 0.985)
+        y_display = np.minimum(y_raw, y_limit * 0.985)
 
         warnings = []
         if len(frame) > 100000:
             warnings.append('Volcano 点数超过 100,000；SVG 中的数据层将栅格化以控制文件体积。')
-        max_labels = 8 if spec.width == 'single' else 12
+        # Six automatic labels (three per direction) remain readable in an
+        # 89-mm Bulk RNA-seq panel.  More labels belong in the full DEG table
+        # or can be selected deliberately in Figure Studio.
+        max_labels = 6 if spec.width == 'single' else 10
         if spec.label_n > max_labels:
             warnings.append(f'{spec.width} 画布最多建议标注 {max_labels} 个基因；已自动限制。')
             label_spec = spec.with_updates(label_n=max_labels)
@@ -162,34 +245,53 @@ class NatureVolcano:
                 fig = container
                 ax = container.subplots()
             for label, point_size, alpha, zorder in (
-                ('NS', 5.5 if spec.width == 'single' else 7.0, 0.38, 1),
-                ('Down', 8.0 if spec.width == 'single' else 10.0, 0.82, 2),
-                ('Up', 8.0 if spec.width == 'single' else 10.0, 0.82, 2),
+                ('NS', 3.5 if spec.width == 'single' else 4.5, 0.26, 1),
+                ('Down', 9.0 if spec.width == 'single' else 11.0, 0.90, 2),
+                ('Up', 9.0 if spec.width == 'single' else 11.0, 0.90, 2),
             ):
-                mask = regulation.to_numpy() == label
+                mask = (regulation.to_numpy() == label) & ~(x_clipped | y_clipped)
                 if mask.any():
                     ax.scatter(
                         x_display[mask], y_display[mask],
                         s=point_size, color=style.deg_palette[label],
                         alpha=alpha, linewidths=0, rasterized=True, zorder=zorder,
                     )
-            threshold_color = style.neutral_dark
+            # Edge triangles preserve the direction of truncated points while
+            # leaving the compact central cloud readable.
+            for label in ('NS', 'Down', 'Up'):
+                label_mask = regulation.to_numpy() == label
+                vertical = label_mask & y_clipped
+                if vertical.any():
+                    ax.scatter(
+                        x_display[vertical], y_display[vertical], s=17,
+                        marker='^', color=style.deg_palette[label], alpha=0.92,
+                        linewidths=0, rasterized=True, zorder=4,
+                    )
+                left = label_mask & x_clipped & ~y_clipped & (x_raw < 0)
+                right = label_mask & x_clipped & ~y_clipped & (x_raw > 0)
+                if left.any():
+                    ax.scatter(
+                        x_display[left], y_display[left], s=17,
+                        marker='<', color=style.deg_palette[label], alpha=0.92,
+                        linewidths=0, rasterized=True, zorder=4,
+                    )
+                if right.any():
+                    ax.scatter(
+                        x_display[right], y_display[right], s=17,
+                        marker='>', color=style.deg_palette[label], alpha=0.92,
+                        linewidths=0, rasterized=True, zorder=4,
+                    )
+            threshold_color = style.subtle
             ax.axhline(threshold_y, color=threshold_color, linestyle=(0, (3, 2)),
-                       linewidth=0.55, zorder=0)
+                       linewidth=0.55, alpha=0.72, zorder=0)
             ax.axvline(spec.fc_threshold, color=threshold_color, linestyle=(0, (3, 2)),
-                       linewidth=0.55, zorder=0)
+                       linewidth=0.55, alpha=0.72, zorder=0)
             ax.axvline(-spec.fc_threshold, color=threshold_color, linestyle=(0, (3, 2)),
-                       linewidth=0.55, zorder=0)
+                       linewidth=0.55, alpha=0.72, zorder=0)
             ax.set_xlim(-x_limit, x_limit)
             ax.set_ylim(0, y_limit)
             ax.set_xlabel(r'log$_2$(fold change)')
-            ax.set_ylabel(
-                r'$-\log_{10}$(FDR) · compressed tail'
-                if tail_info else r'$-\log_{10}$(FDR)'
-            )
-            if tail_info:
-                tick_locations, tick_labels = _tail_tick_values(tail_info)
-                ax.set_yticks(tick_locations, tick_labels)
+            ax.set_ylabel(r'$-\log_{10}(\mathrm{FDR})$')
             title_width = 38 if spec.width == 'single' else 72
             wrapped_title = _wrap_title(
                 spec.title, 'Differential expression', title_width,
@@ -201,21 +303,32 @@ class NatureVolcano:
             style.apply_axis(ax, profile)
 
             counts = {label: int((regulation == label).sum()) for label in ('Up', 'Down', 'NS')}
-            selected = _select_labels(frame, label_spec, regulation)
-            texts = []
+            selected = _select_labels(frame, label_spec, regulation)[:max_labels]
+            label_rows = []
             for index in selected:
                 row_position = frame.index.get_loc(index)
                 x_value = x_display[row_position]
-                y_value = min(y_display[row_position], y_limit * 0.88)
-                texts.append(ax.text(
-                    x_value, y_value, frame.at[index, '_gene'],
-                    ha='left' if x_value >= 0 else 'right', va='bottom',
+                label_rows.append({
+                    'gene': frame.at[index, '_gene'],
+                    'x_point': float(x_value),
+                    'y_point': min(float(y_display[row_position]), y_limit * 0.88),
+                    'side': 1 if x_value >= 0 else -1,
+                })
+            texts = []
+            for label in _label_offsets(label_rows, y_limit, x_limit):
+                texts.append(ax.annotate(
+                    label['gene'],
+                    xy=(label['x_point'], label['y_point']),
+                    xytext=(label['x_text'], label['y_text']), textcoords='data',
+                    ha='left' if label['label_side'] > 0 else 'right',
+                    va='bottom' if label['y_side'] > 0 else 'top',
                     fontsize=profile.tick_font_pt, color=style.text,
-                    bbox={'boxstyle': 'round,pad=0.12', 'facecolor': 'white',
-                          'edgecolor': style.subtle, 'linewidth': 0.35, 'alpha': 0.92},
+                    arrowprops={'arrowstyle': '-', 'color': style.neutral_dark,
+                                'linewidth': 0.45, 'shrinkA': 1, 'shrinkB': 1},
                     zorder=5,
                 ))
             adjust_labels(texts, ax, arrow_color=style.neutral_dark)
+            ensure_angled_annotation_leaders(texts, y_limit)
             hidden_labels = prune_overlapping_labels(texts, ax)
             semantic_warnings = []
             if hidden_labels:
@@ -224,17 +337,23 @@ class NatureVolcano:
                 )
 
             if spec.show_legend:
+                show_legend_counts = bool(spec.extra.get('legend_counts', True))
                 handles = [
                     Line2D([], [], linestyle='None', marker='o', markersize=3.8,
                            markerfacecolor=style.deg_palette[label], markeredgewidth=0,
-                           label=f'{label} (n={counts[label]})')
-                    for label in ('Up', 'Down', 'NS')
+                           label=(f'{label}  {counts[label]:,}'
+                                  if show_legend_counts else label))
+                    for label in ('Down', 'NS', 'Up')
                 ]
-                ax.legend(handles=handles, loc='lower right', frameon=False,
-                          handletextpad=0.35, borderaxespad=0.2)
+                legend = ax.legend(
+                    handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.18),
+                    frameon=False, ncol=3, handletextpad=0.30,
+                    columnspacing=0.85, borderaxespad=0.0,
+                )
             title_lines = wrapped_title.count('\n') + 1
             top = max(0.76, 0.90 - 0.055 * (title_lines - 1))
-            fig.subplots_adjust(left=0.19, right=0.97, bottom=0.17, top=top)
+            fig.subplots_adjust(left=0.19, right=0.97,
+                                bottom=0.27 if spec.show_legend else 0.17, top=top)
 
         if container is not None:
             return container
@@ -243,8 +362,8 @@ class NatureVolcano:
             semantic_warnings=warnings + semantic_warnings,
             encodings={
                 'color': 'DEG direction',
-                'y': ('-log10(FDR), monotonic tail compression' if tail_info
-                      else '-log10(FDR)'),
+                'x': 'log2(fold change); edge triangles mark values beyond displayed range',
+                'y': '-log10(FDR); top triangles mark values above displayed range',
             },
             validation_texts=texts,
         )

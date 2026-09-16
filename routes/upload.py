@@ -1,4 +1,5 @@
 import os
+import uuid
 from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify, send_file
 from werkzeug.utils import secure_filename
 from models import Project
@@ -14,6 +15,25 @@ ALLOWED_EXT = {
     # accept project-uploaded pickle/Oracle/Links files for deserialization.
     '.parquet', '.pq',
 }
+
+
+def _unique_upload_path(directory, stem, suffix):
+    """Allocate an import artifact name without trusting a user-supplied path."""
+    os.makedirs(directory, exist_ok=True)
+    safe_stem = secure_filename(stem) or 'bulk_counts'
+    token = uuid.uuid4().hex[:10]
+    return os.path.join(directory, f'{safe_stem}_{token}{suffix}')
+
+
+def _upload_suffix(filename):
+    """Keep compound annotation suffixes such as ``.gtf.gz`` intact."""
+    name = str(filename or '')
+    stem, suffix = os.path.splitext(name)
+    if suffix.lower() == '.gz':
+        _, annotation_suffix = os.path.splitext(stem)
+        if annotation_suffix.lower() in {'.gtf', '.gff', '.gff3'}:
+            return annotation_suffix.lower() + '.gz'
+    return suffix.lower()
 
 # 10x 文件名匹配模式
 _10X_FILE_PATTERNS = {
@@ -150,6 +170,83 @@ def upload(pid):
         flash(f'文件 "{fname}" 上传成功', 'success')
         return redirect(url_for('projects.detail', pid=pid))
     return render_template('upload.html', project=p)
+
+
+@upload_bp.route('/<pid>/upload/import-bulk-counts', methods=['POST'])
+def import_bulk_counts(pid):
+    """Import a raw count matrix and explicit sample metadata as one h5ad input."""
+    project = Project.get_by_id(pid)
+    if not project:
+        return jsonify({'error': '项目未找到'}), 404
+
+    count_file = request.files.get('count_matrix')
+    metadata_file = request.files.get('sample_metadata')
+    annotation_file = request.files.get('gene_annotation')
+    if not count_file or not count_file.filename:
+        return jsonify({'error': '请选择原始 counts 矩阵。'}), 400
+    if not metadata_file or not metadata_file.filename:
+        return jsonify({'error': '请选择样本信息表。'}), 400
+
+    count_name = secure_filename(count_file.filename)
+    metadata_name = secure_filename(metadata_file.filename)
+    annotation_name = secure_filename(annotation_file.filename) if annotation_file and annotation_file.filename else ''
+    if not count_name or not metadata_name or (annotation_file and annotation_file.filename and not annotation_name):
+        return jsonify({'error': '文件名不合法。'}), 400
+
+    from modules.bulk_import import (
+        build_bulk_counts_adata, gene_annotation_extension_allowed,
+        tabular_extension_allowed,
+    )
+    if not tabular_extension_allowed(count_name) or not tabular_extension_allowed(metadata_name):
+        return jsonify({'error': 'counts 矩阵和样本信息表仅支持 CSV、TSV、TXT 或 Excel。'}), 400
+    if annotation_name and not gene_annotation_extension_allowed(annotation_name):
+        return jsonify({
+            'error': '基因注释仅支持 CSV、TSV、TXT、Excel、GTF/GFF（可为 .gz）。'
+        }), 400
+
+    uploads_dir = Config.uploads_dir(pid)
+    source_dir = os.path.join(uploads_dir, 'bulk_count_imports')
+    os.makedirs(source_dir, exist_ok=True)
+    count_path = _unique_upload_path(
+        source_dir, os.path.splitext(count_name)[0], os.path.splitext(count_name)[1].lower(),
+    )
+    metadata_path = _unique_upload_path(
+        source_dir, os.path.splitext(metadata_name)[0], _upload_suffix(metadata_name),
+    )
+    count_file.save(count_path)
+    metadata_file.save(metadata_path)
+    annotation_path = None
+    if annotation_name:
+        annotation_path = _unique_upload_path(
+            source_dir, os.path.splitext(annotation_name)[0], _upload_suffix(annotation_name),
+        )
+        annotation_file.save(annotation_path)
+
+    try:
+        adata = build_bulk_counts_adata(count_path, metadata_path, annotation_path)
+        output_path = _unique_upload_path(
+            uploads_dir, f'bulk_raw_counts_{os.path.splitext(count_name)[0]}', '.h5ad',
+        )
+        adata.write_h5ad(output_path)
+    except (OSError, ValueError) as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    project.status = 'data_ready'
+    project.save()
+    import_info = dict(adata.uns.get('bulk_import', {}) or {})
+    return jsonify({
+        'ok': True,
+        'output_file': os.path.basename(output_path),
+        'n_samples': int(adata.n_obs),
+        'n_genes': int(adata.n_vars),
+        'n_gene_names': int(import_info.get('n_gene_names', 0)),
+        'gene_name_source': import_info.get('gene_name_source', 'none'),
+        'conditions': import_info.get('condition_sizes', {}),
+        # The importer establishes a valid count/design contract, but it does
+        # not replace QC or low-expression filtering.  Start the guided Bulk
+        # chain at QC so an uploaded raw table cannot jump straight to DEG.
+        'next_url': url_for('analysis.analyze', pid=pid, module_name='bulk_qc'),
+    }), 201
 
 
 @upload_bp.route('/<pid>/upload/check-10x')

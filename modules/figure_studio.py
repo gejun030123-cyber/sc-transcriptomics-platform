@@ -45,7 +45,9 @@ def _number(value, default=None, lower=None, upper=None):
     if value in (None, ''):
         return default
     try:
-        number = float(value)
+        # Figure Studio's examples use a typographic minus (−).  Accept it
+        # when a user copies an example directly into a numeric control.
+        number = float(str(value).strip().replace('−', '-').replace('－', '-'))
     except (TypeError, ValueError):
         return default
     if not np.isfinite(number):
@@ -54,6 +56,14 @@ def _number(value, default=None, lower=None, upper=None):
         number = max(lower, number)
     if upper is not None:
         number = min(upper, number)
+    return number
+
+
+def _positive_number(value, upper=10000):
+    """Parse an optional positive display interval without coercing zero."""
+    number = _number(value)
+    if number is None or number <= 0 or number > upper:
+        return None
     return number
 
 
@@ -77,13 +87,15 @@ def normalize_style(payload):
         'legend_text': _clean_text(payload.get('legend_text'), 300),
         'x_min': _number(payload.get('x_min')),
         'x_max': _number(payload.get('x_max')),
+        'x_tick_step': _positive_number(payload.get('x_tick_step')),
         'y_min': _number(payload.get('y_min')),
         'y_max': _number(payload.get('y_max')),
+        'y_tick_step': _positive_number(payload.get('y_tick_step')),
         'pvalue_threshold': _number(payload.get('pvalue_threshold'), 0.05, 1e-300, 1.0),
         'fc_threshold': _number(payload.get('fc_threshold'), 1.5, 1e-6, 1e6),
-        'up_color': _color(payload.get('up_color'), '#B64342'),
-        'down_color': _color(payload.get('down_color'), '#0F4D92'),
-        'ns_color': _color(payload.get('ns_color'), '#C7CDD6'),
+        'up_color': _color(payload.get('up_color'), '#C65A5A'),
+        'down_color': _color(payload.get('down_color'), '#4C78A8'),
+        'ns_color': _color(payload.get('ns_color'), '#D9DEE5'),
         'label_genes': _clean_text(payload.get('label_genes'), 500),
         'heatmap_cmap': str(payload.get('heatmap_cmap') or 'RdBu_r'),
         'heatmap_top_n': int(_number(payload.get('heatmap_top_n'), 50, 5, 200)),
@@ -655,6 +667,7 @@ def list_sources(project_id):
 
 def _apply_common_style(fig, ax, style):
     from modules.figure_style import NATURE_AXIS, NATURE_GRID, NATURE_TEXT, _font_for_text
+    from matplotlib.ticker import MultipleLocator
 
     fig.patch.set_facecolor(style['background'])
     ax.set_facecolor(style['background'])
@@ -672,6 +685,21 @@ def _apply_common_style(fig, ax, style):
         bottom, top = ax.get_ylim()
         ax.set_ylim(style['y_min'] if style['y_min'] is not None else bottom,
                     style['y_max'] if style['y_max'] is not None else top)
+    def _safe_major_step(requested, limits):
+        """Honor a requested interval without generating an unbounded tick set."""
+        span = abs(float(limits[1]) - float(limits[0]))
+        # A dense ruler is no longer legible in Figure Studio and can turn an
+        # accidental 0.01 input on a wide range into thousands of tick artists.
+        return max(float(requested), span / 40.0) if span > 0 else float(requested)
+
+    if style['x_tick_step'] is not None:
+        ax.xaxis.set_major_locator(MultipleLocator(
+            base=_safe_major_step(style['x_tick_step'], ax.get_xlim()),
+        ))
+    if style['y_tick_step'] is not None:
+        ax.yaxis.set_major_locator(MultipleLocator(
+            base=_safe_major_step(style['y_tick_step'], ax.get_ylim()),
+        ))
     if style['grid']:
         ax.grid(True, color=NATURE_GRID, linewidth=0.65, alpha=0.8)
     else:
@@ -704,21 +732,55 @@ def _apply_common_style(fig, ax, style):
     return fig
 
 
-def _annotate_selected_genes(ax, deg_df, style):
+def _annotate_selected_genes(ax, deg_df, style, display_limits=None):
+    """Add a few manual labels with short, repel-adjusted leader lines."""
     labels = [item.strip() for item in re.split(r'[,;\n]+', style['label_genes']) if item.strip()]
     if not labels:
         return
     lookup = deg_df.set_index('gene')
+    limits = display_limits or {}
+    x_limit = limits.get('x_limit')
+    y_limit = limits.get('y_limit')
+    x_min = limits.get('x_min', -float(x_limit) if x_limit else None)
+    x_max = limits.get('x_max', float(x_limit) if x_limit else None)
+    y_min = limits.get('y_min', 0.0)
+    x_span = (float(x_max) - float(x_min)) if x_min is not None and x_max is not None else None
+    y_span = (float(y_limit) - float(y_min)) if y_limit is not None else None
+    texts = []
     for gene in labels[:10]:
         if gene not in lookup.index:
             continue
         row = lookup.loc[gene]
-        x = float(row['log2FC'])
-        y = float(-np.log10(max(float(row['padj']), np.finfo(float).tiny)))
-        ax.annotate(str(gene), xy=(x, y), xytext=(8, 8), textcoords='offset points',
-                    fontsize=max(7, style['font_size'] - 2), color='#111827',
-                    bbox={'boxstyle': 'round,pad=0.18', 'facecolor': 'white', 'edgecolor': '#98A2B3', 'linewidth': 0.55},
-                    arrowprops={'arrowstyle': '-', 'color': '#667085', 'linewidth': 0.55})
+        raw_x = float(row['log2FC'])
+        raw_y = float(-np.log10(max(float(row['padj']), np.finfo(float).tiny)))
+        x = (float(np.clip(raw_x, float(x_min) + x_span * 0.015,
+                           float(x_max) - x_span * 0.015))
+             if x_span else raw_x)
+        y_cap = float(y_min) + y_span * 0.985 if y_span else None
+        y = min(raw_y, y_cap) if y_cap is not None else raw_y
+        label_side = 1 if x >= ((float(x_min) + float(x_max)) / 2.0 if x_span else 0) else -1
+        if x_span and x <= float(x_min) + x_span * 0.22:
+            label_side = 1
+        elif x_span and x >= float(x_max) - x_span * 0.22:
+            label_side = -1
+        y_side = -1 if y_span and y >= float(y_min) + y_span * 0.84 else 1
+        x_text = x + label_side * (x_span * 0.08 if x_span else 0.15)
+        y_text = y + y_side * (y_span * 0.05 if y_span else 0.3)
+        texts.append(ax.annotate(
+            str(gene), xy=(x, y), xytext=(x_text, y_text),
+            textcoords='data', fontsize=max(7, style['font_size'] - 2),
+            color='#111827', ha='left' if label_side > 0 else 'right',
+            va='bottom' if y_side > 0 else 'top',
+            arrowprops={'arrowstyle': '-', 'color': '#667085', 'linewidth': 0.55,
+                        'shrinkA': 1, 'shrinkB': 1},
+        ))
+    if texts:
+        from figure_engine.templates.common import (
+            adjust_labels, ensure_angled_annotation_leaders, prune_overlapping_labels,
+        )
+        adjust_labels(texts, ax, arrow_color='#667085')
+        ensure_angled_annotation_leaders(texts, float(y_limit or ax.get_ylim()[1]))
+        prune_overlapping_labels(texts, ax)
 
 
 def _render_bulk_volcano(data_path, style, label):
@@ -740,13 +802,21 @@ def _render_bulk_volcano(data_path, style, label):
         ['Up', 'Down'], default='NS',
     )
     fig, ax = plt.subplots(figsize=(8.2, 5.8), dpi=150)
-    _draw_bulk_volcano(
+    # Apply custom view bounds while drawing, not afterwards.  This preserves
+    # clipped-edge triangles and keeps automatic/manual labels inside the
+    # selected range instead of allowing points to disappear beyond it.
+    requested_y_max = (
+        style['y_max'] if style['y_max'] is not None and style['y_max'] > 0 else None
+    )
+    display_limits = _draw_bulk_volcano(
         ax, deg_df, pval_threshold=style['pvalue_threshold'],
         fc_threshold=style['fc_threshold'], title=style['title'] or label,
         top_n=0 if style['label_genes'] else 8, show_legend=True,
+        x_min=style['x_min'], x_max=style['x_max'], y_min=style['y_min'],
+        y_limit=requested_y_max,
         colors={'Up': style['up_color'], 'Down': style['down_color'], 'NS': style['ns_color']},
     )
-    _annotate_selected_genes(ax, deg_df, style)
+    _annotate_selected_genes(ax, deg_df, style, display_limits)
     _apply_common_style(fig, ax, style)
     return fig, 'data_redraw'
 

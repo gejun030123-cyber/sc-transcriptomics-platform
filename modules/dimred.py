@@ -2,7 +2,11 @@ import logging
 import re
 
 from modules.base import BaseAnalysis
-from modules.io_utils import resolve_obs_grouping
+from modules.io_utils import (
+    MAX_PER_SAMPLE_FIGURE_LEVELS,
+    per_sample_figure_status,
+    resolve_obs_grouping,
+)
 from modules.pc_strategy import DEFAULT_FINAL_N_PCS
 
 
@@ -184,6 +188,21 @@ class DimredAnalysis(BaseAnalysis):
                     -1,
                     f"批次列已跳过：{batch_info.get('requested_reason', '不是有效分类列')}",
                 )
+        # A study with hundreds of libraries has no readable "one colour per
+        # sample" embedding: the palette only holds ~20 colours.  Keep the
+        # batch column for provenance and every per-cell coordinate in the
+        # output AnnData, but omit the per-sample coloured embeddings.
+        suppress_batch_coloring, n_batch_levels = per_sample_figure_status(
+            adata, batch_key,
+        )
+        if suppress_batch_coloring:
+            self.progress(
+                -1,
+                f"批次/样本列 '{batch_key}' 有 {n_batch_levels} 个水平，超过逐样本图上限 "
+                f"{MAX_PER_SAMPLE_FIGURE_LEVELS}；已跳过按样本着色的 UMAP/PCA 图，"
+                "批次标签保留在输出 h5ad.obs 中。",
+            )
+        batch_color_key = None if suppress_batch_coloring else batch_key
         requested_max_pcs = int(self.params.get('n_comps', DEFAULT_FINAL_N_PCS))
         if requested_max_pcs < 2:
             raise ValueError('最大候选 PC 数必须至少为 2')
@@ -392,7 +411,7 @@ class DimredAnalysis(BaseAnalysis):
         result_files = []
 
         embedding_color_keys = _embedding_color_keys(
-            batch_key, 'total_counts', 'n_genes_by_counts', 'pct_counts_mt',
+            batch_color_key, 'total_counts', 'n_genes_by_counts', 'pct_counts_mt',
             'phase', 'doublet_score', 'leiden',
         )
         for color_key in embedding_color_keys:
@@ -414,7 +433,7 @@ class DimredAnalysis(BaseAnalysis):
         # PCA scatter for early detection of outliers and batch/sample structure
         if self.params.get('show_pca_scatter', True) and 'X_pca' in adata.obsm:
             color_key = next((
-                key for key in [batch_key, 'phase', 'n_genes_by_counts', 'total_counts']
+                key for key in [batch_color_key, 'phase', 'n_genes_by_counts', 'total_counts']
                 if key and key in adata.obs.columns
             ), None)
             pca_variance = np.asarray(adata.uns.get('pca', {}).get('variance_ratio', []), dtype=float)
@@ -431,7 +450,7 @@ class DimredAnalysis(BaseAnalysis):
 
         # t-SNE plot
         if enable_tsne and 'X_tsne' in adata.obsm:
-            tsne_color_keys = _embedding_color_keys(batch_key, 'leiden')
+            tsne_color_keys = _embedding_color_keys(batch_color_key, 'leiden')
             for color_key in tsne_color_keys:
                 if color_key in adata.obs.columns:
                     fig = self.build_publication_embedding(
@@ -482,8 +501,8 @@ class DimredAnalysis(BaseAnalysis):
         # quality gradient.
         if self.params.get('show_pca_scatter', True) and 'X_pca' in adata.obsm:
             pca_views = []
-            if batch_key and batch_key in adata.obs.columns:
-                pca_views.append((batch_key, f'PCA by {batch_key}', 'dimred_pca_by_donor.png'))
+            if batch_color_key and batch_color_key in adata.obs.columns:
+                pca_views.append((batch_color_key, f'PCA by {batch_color_key}', 'dimred_pca_by_donor.png'))
             qc_key = next((key for key in ('total_counts', 'n_genes_by_counts', 'pct_counts_mt', 'phase')
                            if key in adata.obs.columns), None)
             if qc_key:
@@ -578,6 +597,9 @@ class DimredAnalysis(BaseAnalysis):
                 'scaled_layer_dropped_from_output': bool(scaled_layer_dropped),
                 'requested_batch_key': requested_batch_key,
                 'batch_key': batch_key,
+                'n_batch_levels': n_batch_levels,
+                'per_sample_figures_suppressed': suppress_batch_coloring,
+                'max_per_sample_figure_levels': MAX_PER_SAMPLE_FIGURE_LEVELS,
                 'batch_mixing': batch_mixing,
                 'analytical_qc': analytical_qc,
             }

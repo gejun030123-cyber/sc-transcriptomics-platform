@@ -172,6 +172,31 @@ def summarize_qc_by_batch(
     return rows
 
 
+def per_sample_qc_table(summary):
+    """Flatten a per-sample QC summary into a CSV-ready table.
+
+    ``summarize_qc_by_batch`` nests the per-1,000 flag rates and raw flagged
+    counts.  Expanding them into prefixed columns keeps the complete
+    per-sample audit trail available even when a large study suppresses the
+    per-sample figures.  The sample column is named ``sample`` so the caller
+    can rename it to the actual obs column.
+    """
+    rows = []
+    for sample, payload in (summary or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        row = {
+            key: value for key, value in payload.items()
+            if not isinstance(value, dict)
+        }
+        for reason, value in (payload.get('flags_per_1000') or {}).items():
+            row[f'flags_per_1000_{reason}'] = value
+        for reason, value in (payload.get('flagged_cells') or {}).items():
+            row[f'flagged_cells_{reason}'] = value
+        rows.append({'sample': sample, **row})
+    return pd.DataFrame(rows)
+
+
 def qc_by_batch_figure(summary, title='QC retention and non-exclusive flags by donor'):
     """Draw retention/removal and per-1,000 QC flags in two panels."""
     import matplotlib.pyplot as plt

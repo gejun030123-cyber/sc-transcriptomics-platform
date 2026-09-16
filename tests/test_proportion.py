@@ -133,3 +133,77 @@ def test_sample_level_composition_refuses_technical_batch_as_condition_without_c
     assert result['available'] is False
     assert result['inference_ready'] is False
     assert any('技术 batch' in warning for warning in result['warnings'])
+
+
+def test_proportion_omits_per_sample_figures_for_large_sample_column(tmp_path):
+    """A 25-sample comparison column must not draw 25 pies/bars/heatmap rows."""
+    from modules.proportion import ProportionAnalysis
+
+    rows = []
+    for sample in range(25):
+        condition = 'Ctrl' if sample < 13 else 'Treat'
+        for celltype, repeats in (('T', 3), ('B', 2)):
+            rows.extend([(f'S{sample:02d}', condition, celltype)] * repeats)
+    obs = pd.DataFrame(rows, columns=['sample_id', 'condition', 'celltype'])
+    obs.index = [f'cell_{index}' for index in range(len(obs))]
+    adata = ad.AnnData(
+        X=np.ones((len(obs), 2)), obs=obs,
+        var=pd.DataFrame(index=['g1', 'g2']),
+    )
+    input_path = tmp_path / 'proportion_input.h5ad'
+    adata.write_h5ad(input_path)
+
+    analysis = ProportionAnalysis(
+        str(tmp_path),
+        {
+            'groupby': 'celltype', 'batch_key': 'sample_id', 'condition_key': '',
+            'analysis_unit': 'cell', 'min_cells_per_group': 1,
+        },
+        lambda *_: None,
+    )
+    result = analysis.run(str(input_path))
+
+    labels = [os.path.basename(item['file_path']) for item in result['result_files']]
+    assert result['summary']['comparison_key'] == 'sample_id'
+    assert result['summary']['n_comparison_levels'] == 25
+    assert result['summary']['per_sample_figures_suppressed'] is True
+    assert not any(label.startswith('proportion_stacked') for label in labels)
+    assert not any(label.startswith('proportion_heatmap') for label in labels)
+    assert not any(label.startswith('proportion_pie') for label in labels)
+    # The complete per-sample tables remain the deliverable.
+    assert 'cell_counts.csv' in labels
+    assert 'cell_proportions.csv' in labels
+
+
+def test_proportion_keeps_per_sample_figures_for_small_studies(tmp_path):
+    """Below the display limit the familiar per-sample figures stay."""
+    from modules.proportion import ProportionAnalysis
+
+    rows = []
+    for sample in range(4):
+        condition = 'Ctrl' if sample < 2 else 'Treat'
+        for celltype, repeats in (('T', 3), ('B', 2)):
+            rows.extend([(f'S{sample}', condition, celltype)] * repeats)
+    obs = pd.DataFrame(rows, columns=['sample_id', 'condition', 'celltype'])
+    obs.index = [f'cell_{index}' for index in range(len(obs))]
+    adata = ad.AnnData(
+        X=np.ones((len(obs), 2)), obs=obs,
+        var=pd.DataFrame(index=['g1', 'g2']),
+    )
+    input_path = tmp_path / 'proportion_small_input.h5ad'
+    adata.write_h5ad(input_path)
+
+    analysis = ProportionAnalysis(
+        str(tmp_path),
+        {
+            'groupby': 'celltype', 'batch_key': 'sample_id', 'condition_key': '',
+            'analysis_unit': 'cell', 'min_cells_per_group': 1,
+        },
+        lambda *_: None,
+    )
+    result = analysis.run(str(input_path))
+
+    labels = [os.path.basename(item['file_path']) for item in result['result_files']]
+    assert result['summary']['per_sample_figures_suppressed'] is False
+    assert any(label.startswith('proportion_stacked') for label in labels)
+    assert any(label.startswith('proportion_pie') for label in labels)

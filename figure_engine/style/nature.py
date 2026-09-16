@@ -43,12 +43,12 @@ class NatureStyle:
     signal_blue = '#4C78A8'
     signal_teal = '#4C9099'
     signal_violet = '#7A6FA8'
-    signal_red = '#B65C5C'
+    signal_red = '#C65A5A'
     signal_orange = '#D08A5B'
 
     deg_palette = {
-        'NS': '#D8DCE2',
-        'Up': '#B65C5C',
+        'NS': '#D9DEE5',
+        'Up': '#C65A5A',
         'Down': '#4C78A8',
     }
     categorical_palette = (

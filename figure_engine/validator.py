@@ -215,7 +215,17 @@ class FigureValidator:
             if id(text) in clipped_tick_texts:
                 continue
             try:
-                box = text.get_window_extent(renderer=renderer)
+                # A labelled annotation's full extent contains the leader
+                # line.  Audit the label box itself so crossing leaders do
+                # not create a false overlap/out-of-bounds report.
+                patch = text.get_bbox_patch() if hasattr(text, 'get_bbox_patch') else None
+                if patch is not None and patch.get_visible():
+                    box = patch.get_window_extent(renderer=renderer)
+                else:
+                    # Avoid treating a short annotation leader as part of the
+                    # label box when auditing unboxed volcano labels.
+                    from matplotlib.text import Text
+                    box = Text.get_window_extent(text, renderer=renderer)
             except Exception:
                 continue
             if box.width <= 0 or box.height <= 0:
@@ -273,6 +283,7 @@ class FigureValidator:
                 # valid dotplot fail QA even though the Count key was clearly
                 # separated from the plotting panel.
                 if (legend.axes is ax and not getattr(ax, '_nature_auxiliary', False)
+                        and not getattr(legend, '_nature_data_aware_placement', False)
                         and _bbox_overlap(legend_box, ax.get_window_extent(renderer), 30.0)):
                     legend_overlaps.append(ax.get_title() or ax.get_xlabel() or 'axis')
         if legend_overlaps:

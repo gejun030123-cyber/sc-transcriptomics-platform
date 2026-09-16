@@ -33,6 +33,38 @@ def test_qc_summary_retention_and_flags_are_non_exclusive():
     assert summary['B']['flagged_cells']['doublet'] == 1
 
 
+def test_per_sample_qc_table_flattens_nested_flags_for_csv_export():
+    """The complete per-sample table must survive figure suppression."""
+    from modules.sc_figure_diagnostics import per_sample_qc_table
+
+    summary = {
+        'S1': {
+            'n_before': 100, 'n_after': 90, 'n_removed': 10,
+            'pct_removed': 10.0,
+            'flags_per_1000': {'low_genes': 20.0, 'high_mt': 5.0},
+            'flagged_cells': {'low_genes': 2, 'high_mt': 1},
+            'doublet_rate': 0.03,
+        },
+        'S2': {
+            'n_before': 50, 'n_after': 48, 'n_removed': 2,
+            'pct_removed': 4.0,
+            'flags_per_1000': {'low_genes': 0.0, 'high_mt': 40.0},
+            'flagged_cells': {'low_genes': 0, 'high_mt': 2},
+            'doublet_rate': None,
+        },
+    }
+
+    table = per_sample_qc_table(summary)
+
+    assert list(table['sample']) == ['S1', 'S2']
+    assert table.loc[0, 'n_before'] == 100
+    assert table.loc[0, 'flags_per_1000_low_genes'] == 20.0
+    assert table.loc[1, 'flagged_cells_high_mt'] == 2
+    assert 'flags_per_1000' not in table.columns
+    # Empty input still yields a well-formed frame for the caller to rename.
+    assert per_sample_qc_table({}).empty
+
+
 def test_donor_qc_figures_keep_footer_and_thresholds_clear_of_labels():
     """Long donor labels must not collide with review text or thresholds."""
     import matplotlib.pyplot as plt

@@ -31,6 +31,39 @@
             <div id="upload-result" class="mt-3 d-none" aria-live="assertive">
                 <div class="alert alert-success mb-0" id="upload-msg"></div>
             </div>
+            <div class="card border-info-subtle p-3 mt-3" id="bulk-count-import-card">
+                <h6 class="mb-1">Bulk RNA-seq 原始 counts + 样本信息导入（DESeq2）</h6>
+                <p class="small text-muted mb-2">
+                    上传一个“基因 × 样本”的未标准化整数 count 矩阵，以及一个样本信息表。矩阵第一列为基因 ID，后续列为样本 ID；
+                    信息表必须含 <code>sample_id</code> 和 <code>condition</code> 两列，且每个 condition 至少 2 个生物学重复。
+                    TPM、FPKM、CPM、百分比或 log 表达值会被拒绝，避免误用于 DESeq2。
+                </p>
+                <div class="row g-2">
+                    <div class="col-md-6">
+                        <label for="bulk-count-matrix" class="form-label small">原始 counts 矩阵</label>
+                        <input type="file" id="bulk-count-matrix" class="form-control form-control-sm" accept=".csv,.tsv,.txt,.xlsx,.xls">
+                    </div>
+                    <div class="col-md-6">
+                        <label for="bulk-sample-metadata" class="form-label small">样本信息表</label>
+                        <input type="file" id="bulk-sample-metadata" class="form-control form-control-sm" accept=".csv,.tsv,.txt,.xlsx,.xls">
+                    </div>
+                </div>
+                <div class="mt-2">
+                    <label for="bulk-gene-annotation" class="form-label small mb-1">基因注释（可选，但 featureCounts 只有 Geneid 时建议上传）</label>
+                    <input type="file" id="bulk-gene-annotation" class="form-control form-control-sm" accept=".csv,.tsv,.txt,.xlsx,.xls,.gtf,.gff,.gff3,.gz">
+                    <div class="form-text">
+                        可上传计数时所用的 GTF/GFF（含 <code>gene_id</code> 与 <code>gene_name</code>），或含
+                        <code>gene_id,gene_name</code> 两列的映射表。只用本地文件映射，不会按物种在线猜测。
+                    </div>
+                </div>
+                <div class="small text-muted mt-2">
+                    示例信息表：<code>sample_id,condition,batch</code>；样本 ID 必须与矩阵列名完全一致。导出的 DEG 表会同时保留 <code>gene_id</code> 和 <code>gene_name</code>。
+                </div>
+                <button type="button" class="btn btn-info btn-sm w-100 mt-2" id="btn-import-bulk-counts" onclick="startBulkCountImport()">
+                    验证并生成 DESeq2 输入 h5ad
+                </button>
+                <div id="bulk-count-import-msg" class="small mt-2" aria-live="polite"></div>
+            </div>
             <div class="card border-primary-subtle p-3 mt-3">
                 <h6 class="mb-1">多个 10x ZIP 合并导入</h6>
                 <p class="small text-muted mb-2">
@@ -188,6 +221,53 @@ function showUploadResult(level, message) {
     alert.className = `alert alert-${level} mb-0`;
     alert.textContent = message;
     requestAnimationFrame(() => resultDiv.scrollIntoView({behavior: 'smooth', block: 'nearest'}));
+}
+
+function startBulkCountImport() {
+    const countInput = document.getElementById('bulk-count-matrix');
+    const metadataInput = document.getElementById('bulk-sample-metadata');
+    const annotationInput = document.getElementById('bulk-gene-annotation');
+    const countFile = countInput.files && countInput.files[0];
+    const metadataFile = metadataInput.files && metadataInput.files[0];
+    const annotationFile = annotationInput.files && annotationInput.files[0];
+    const btn = document.getElementById('btn-import-bulk-counts');
+    const msg = document.getElementById('bulk-count-import-msg');
+    if (!countFile || !metadataFile) {
+        msg.className = 'small mt-2 text-danger';
+        msg.textContent = '请选择 counts 矩阵和样本信息表。';
+        return;
+    }
+    const formData = new FormData();
+    formData.append('count_matrix', countFile);
+    formData.append('sample_metadata', metadataFile);
+    if (annotationFile) formData.append('gene_annotation', annotationFile);
+    btn.disabled = true;
+    btn.textContent = '正在验证并生成…';
+    msg.className = 'small mt-2 text-muted';
+    msg.textContent = '正在检查原始整数 counts、样本 ID 和生物学重复…';
+    fetch('/projects/{{ project.id }}/upload/import-bulk-counts', {method: 'POST', body: formData})
+        .then(async response => {
+            const data = await response.json();
+            if (!response.ok || data.error) throw new Error(data.error || `服务器返回 HTTP ${response.status}`);
+            return data;
+        })
+        .then(data => {
+            const conditions = Object.entries(data.conditions || {})
+                .map(([name, count]) => `${name}: ${count}`).join('；');
+            const geneNames = data.n_gene_names
+                ? `；已匹配 ${data.n_gene_names}/${data.n_genes} 个基因名`
+                : '；未提供可匹配的基因名（结果将显示原始 gene_id）';
+            msg.className = 'small mt-2 text-success';
+            msg.innerHTML = `导入完成：${data.n_samples} 个样本、${data.n_genes} 个基因（${conditions}${geneNames}）。` +
+                `<a class="ms-1" href="${data.next_url}">进入 Bulk 质控（随后标准化和差异表达）</a>`;
+            btn.textContent = '验证并生成 DESeq2 输入 h5ad';
+        })
+        .catch(error => {
+            msg.className = 'small mt-2 text-danger';
+            msg.textContent = '导入失败：' + error.message;
+            btn.textContent = '验证并生成 DESeq2 输入 h5ad';
+        })
+        .finally(() => { btn.disabled = false; });
 }
 
 zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });

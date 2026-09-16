@@ -26,6 +26,7 @@ genesets/
 # Generated analysis outputs
 /bulk_reference_output*
 artifacts/
+analysis_runs/
 
 # Generated root-level validation and handoff reports
 *_RESULTS_*.md

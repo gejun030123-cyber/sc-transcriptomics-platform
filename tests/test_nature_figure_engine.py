@@ -98,7 +98,28 @@ def test_nature_volcano_applies_thresholds_and_controlled_gene_labels():
     plt.close(figure)
 
 
-def test_nature_volcano_compresses_extreme_fdr_tail_without_ceiling_pileup():
+def test_nature_volcano_auto_labels_balance_directions_and_skip_bare_feature_ids():
+    from figure_engine import NatureFigureDirector
+    from figure_engine.templates.volcano import _select_labels
+
+    frame = pd.DataFrame({
+        'gene': ['NFKBIA', 'BHLHE40', 'ENSG00000261600', 'IFI44L', 'MX1', 'ENSMUSG000001'],
+        'log2FC': [1.0, 0.8, 2.2, -0.9, -0.7, -2.0],
+        'padj': [1e-12, 1e-8, 1e-15, 1e-14, 1e-9, 1e-16],
+    })
+    frame['_gene'] = frame['gene']
+    frame['_log2fc'] = frame['log2FC']
+    frame['_fdr'] = frame['padj']
+    regulation = pd.Series(['Up', 'Up', 'Up', 'Down', 'Down', 'Down'])
+
+    selected = _select_labels(
+        frame, NatureFigureDirector().create_spec('volcano', label_n=4), regulation,
+    )
+
+    assert frame.loc[selected, 'gene'].tolist() == ['NFKBIA', 'BHLHE40', 'IFI44L', 'MX1']
+
+
+def test_nature_volcano_caps_extreme_fdr_tail_with_top_triangles():
     import matplotlib.pyplot as plt
 
     from figure_engine import NatureFigureDirector
@@ -119,12 +140,13 @@ def test_nature_volcano_compresses_extreme_fdr_tail_without_ceiling_pileup():
     ])
     points = points[np.argsort(points[:, 0])]
 
-    # Very small FDR values remain ordered on the y-axis rather than being
-    # clipped to one horizontal line at the top of the panel.
-    assert np.all(np.diff(points[-3:, 1]) > 0.5)
-    assert axis.get_ylim()[1] - points[:, 1].max() >= 0.5
-    assert 'compressed tail' in axis.get_ylabel()
-    assert 'monotonic tail compression' in figure._nature_encodings['y']
+    cap = axis.get_ylim()[1] * 0.985
+    # The display remains in raw −log10(FDR) units; extreme FDR values are
+    # retained as top-edge triangles instead of a nonlinear tail transform.
+    assert axis.get_ylim()[1] == 18
+    assert np.sum(np.isclose(points[:, 1], cap)) == 3
+    assert 'compressed tail' not in axis.get_ylabel()
+    assert figure._nature_encodings['y'].startswith('-log10(FDR); top triangles')
     plt.close(figure)
 
 
@@ -160,24 +182,110 @@ def test_nature_volcano_keeps_extreme_points_and_labels_inside_axes():
     renderer = figure.canvas.get_renderer()
     axes_box = axis.get_window_extent(renderer)
 
-    # The x-axis spans the full observed fold-change range, so extreme points
-    # are drawn at their true positions rather than piling up on both axes edges.
+    # The x-axis stays compact, and extreme effects remain visibly encoded at
+    # both edges rather than stretching the sparse central cloud.
     points = np.vstack([
         collection.get_offsets()
         for collection in axis.collections
         if len(collection.get_offsets())
     ])
-    assert points[:, 0].min() > axis.get_xlim()[0] + 1e-6
-    assert points[:, 0].max() < axis.get_xlim()[1] - 1e-6
+    assert axis.get_xlim() == (-2.5, 2.5)
+    assert np.sum(np.isclose(np.abs(points[:, 0]), 2.5 * 0.985)) >= 60
 
     # Gene labels must stay inside the plotting area on both sides (1 px
     # tolerance for renderer rounding).
+    from matplotlib.text import Text
     for text in [item for item in axis.texts if item.get_visible()]:
-        box = text.get_window_extent(renderer)
+        box = Text.get_window_extent(text, renderer)
         assert box.x0 >= axes_box.x0 - 1
         assert box.x1 <= axes_box.x1 + 1
         assert box.y0 >= axes_box.y0 - 1
         assert box.y1 <= axes_box.y1 + 1
+    plt.close(figure)
+
+
+def test_nature_volcano_separates_dense_labels_with_leader_lines_and_legend():
+    import matplotlib.pyplot as plt
+
+    from figure_engine import NatureFigureDirector
+
+    frame = pd.DataFrame({
+        'gene': ['UP_A', 'UP_B', 'UP_C', 'DOWN_A', 'DOWN_B', 'DOWN_C'],
+        'log2FC': [1.05, 1.08, 1.12, -1.05, -1.08, -1.12],
+        'padj': [1e-12, 2e-12, 3e-12, 1e-12, 2e-12, 3e-12],
+    })
+    figure = NatureFigureDirector().render(
+        NatureFigureDirector().create_spec(
+            'volcano', fc_threshold=1.0, label_n=6, show_legend=True,
+        ), frame,
+    )
+    axis = figure.axes[0]
+    figure.canvas.draw()
+    renderer = figure.canvas.get_renderer()
+    axes_box = axis.get_window_extent(renderer)
+    from matplotlib.text import Text
+    labels = [
+        text for text in axis.texts
+        if text.get_visible() and text.get_text().startswith(('UP_', 'DOWN_'))
+    ]
+
+    # A very dense cluster can safely retain four to six of the requested
+    # labels after the final collision guard.  The full list remains in CSV.
+    assert 4 <= len(labels) <= 6
+    assert all(label.arrow_patch is not None for label in labels)
+    for index, label in enumerate(labels):
+        assert label.get_bbox_patch() is None
+        box = Text.get_window_extent(label, renderer)
+        assert box.x0 >= axes_box.x0 - 1
+        assert box.x1 <= axes_box.x1 + 1
+        assert box.y0 >= axes_box.y0 - 1
+        assert box.y1 <= axes_box.y1 + 1
+        assert not any(
+                box.overlaps(Text.get_window_extent(other, renderer))
+            for other in labels[index + 1:]
+        )
+    assert axis.get_legend() is not None
+    assert axis.get_legend().get_title().get_text() == ''
+    assert {text.get_text() for text in axis.get_legend().get_texts()} == {
+        'Up  3', 'Down  3', 'NS  0',
+    }
+    plt.close(figure)
+
+
+def test_multi_volcano_promotes_proxy_legends_to_one_shared_key():
+    import matplotlib.pyplot as plt
+
+    from figure_engine import NatureFigureComposer, NatureFigureDirector
+    from figure_engine.composer import FigurePanel
+
+    frame = pd.DataFrame({
+        'gene': ['UP', 'DOWN', 'NS'],
+        'log2FC': [1.5, -1.5, 0.1],
+        'padj': [0.001, 0.002, 0.8],
+    })
+    director = NatureFigureDirector()
+    outer_spec = director.create_spec('diagnostic', width='double').with_updates(
+        plot_type='composite', height_mm=82.0,
+    )
+    panel_spec = director.create_spec(
+        'volcano', width='single', label_n=0, show_legend=True,
+        extra={'legend_counts': False},
+    )
+    panels = [
+        FigurePanel(plot_type='volcano', data=frame, spec=panel_spec,
+                    label='a', row=0, column=0),
+        FigurePanel(plot_type='volcano', data=frame, spec=panel_spec,
+                    label='b', row=0, column=1),
+    ]
+    figure = NatureFigureComposer(director).compose(
+        panels, outer_spec, nrows=1, ncols=2, shared_legend=True,
+    )
+
+    assert len(figure.legends) == 1
+    assert {text.get_text() for text in figure.legends[0].get_texts()} == {
+        'Up', 'Down', 'NS',
+    }
+    assert all(axis.get_legend() is None for axis in figure.axes)
     plt.close(figure)
 
 

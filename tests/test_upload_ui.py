@@ -58,6 +58,12 @@ def test_upload_page_has_feedback_for_each_file_selector(test_project):
     assert "X-Requested-With" in html
     assert "已选择 manifest" in html
     assert "id=\"btn-choose-files\"" in html
+    assert "bulk-count-import-card" in html
+    assert "import-bulk-counts" in html
+    assert "sample_metadata" in html
+    assert "bulk-gene-annotation" in html
+    assert "gene_annotation" in html
+    assert "GTF/GFF" in html
     assert "scrollIntoView" in html
     assert html.index('id="upload-progress"') < html.index("多个 10x ZIP 合并导入")
     assert html.index('id="upload-result"') < html.index("多个 10x ZIP 合并导入")
