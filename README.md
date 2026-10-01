@@ -11,6 +11,7 @@
 
 ## 最近更新
 
+- **个人账号与项目隔离**：每位研究人员使用独立账号登录；项目、任务、结果文件、对话记录、个人 AI 设置和项目内资源按项目归属隔离。管理员可在服务器本地创建账号、认领历史项目，并为服务器数据目录逐人授权。
 - **Bulk 原始 counts 导入**：上传“基因 × 样本”整数 counts 矩阵与显式样本信息表即可生成可用于 DESeq2 的 h5ad；可选本地 GTF/GFF 或 `gene_id,gene_name` 映射表补全基因名。TPM、FPKM、CPM、百分比和 log 表达值会在导入阶段拒绝进入 count 模型。
 - **Bulk 统计防错**：QC、标准化、PCA 和 DEG 记录表达尺度；DESeq2、edgeR 与 limma 只接受原始 counts 或已验证的 counts layer。低表达基因过滤、分组列、比较名称和生物学重复在运行前检查，避免按文件顺序猜组或跨分组列提交 contrast。
 - **科研图形工作台**：Bulk/单细胞火山图可按原始差异结果重绘，支持非破坏性的范围、主刻度、阈值、配色和基因标注调整，并导出 PNG/SVG 新版本。默认火山图使用紧凑线性坐标、弱化背景点和边缘三角形，保留极端效应与 FDR 的真实含义。
@@ -20,6 +21,7 @@
 
 ### Web 分析工作台
 
+- 个人账号：登录后只显示本人项目；项目页面、API、任务状态和下载均检查项目归属。管理员也不会自动获得其他用户项目的访问权。
 - 项目管理：创建项目、上传数据、查看项目状态和历史任务；主线任务完成后项目状态会自动同步为 `completed`，存在运行中任务时为 `processing`，全部失败时为 `failed`。
 - AI 主工作台：项目内 `/projects/<pid>/workspace` 页面聚合单细胞、Bulk RNA、WES 分析入口、最近任务和数据文件，并预留 Bulk ATAC-seq 工作流。
 - 异步任务：分析任务通过后台 worker 执行，前端可查看进度、日志和失败信息。
@@ -119,8 +121,8 @@ Bulk 分析还会在提交前检查：分组列是否真的是类别变量、手
 
 - 三类合法输入入口：FASTQ（含 SRA 本地 `fasterq-dump` 转换）、已处理 BAM/CRAM、已调用 VCF。
 - 执行后端为固定版本 nf-core/sarek + Nextflow local executor；平台负责启动、查询、取消、`-resume` 和产物收集，Web 端不提供任意命令执行。
-- 参考资源必须登记并通过 checksum 校验；`WES_REQUIRE_VALIDATED_REFERENCES` 默认开启，未验证的 reference bundle 无法进入生产运行。上传的 capture BED 一律登记为 `test_only`，需管理员审核后才能用于生产分析。
-- 服务器 WES 数据通过 `WES_SOURCE_ROOTS` 白名单只读接入，拒绝符号链接；FASTQ、BAM、CRAM 和全量 VCF 不会发送给外部 AI。
+- 参考资源必须登记并通过 checksum 校验；`WES_REQUIRE_VALIDATED_REFERENCES` 默认开启，未验证的 reference bundle 无法进入生产运行。项目上传的 capture BED 归属当前项目，一律登记为 `test_only`，需管理员审核后才能用于生产分析。
+- 服务器 WES 数据须同时位于 `WES_SOURCE_ROOTS` 全局白名单和当前账号获授权的源目录内，只读接入并拒绝符号链接；FASTQ、BAM、CRAM 和全量 VCF 不会发送给外部 AI。
 - 项目内提供 WES 面板（`/projects/<pid>/wes`）：样本与 manifest 登记、capture kit 管理、运行状态、SRA 转换任务和产物安全下载。
 - 首期边界：不做 CNV、SV、MSI、TMB、突变特征、ACMG 自动分级和大队列 joint genotyping；胚系与 somatic 使用独立 workflow contract，变异结果不混表、不共用过滤结论。详见 [WES 分析方案](docs/WES_ANALYSIS_PLAN.md) 与 [P2/P3 Runbook](docs/WES_P2_P3_RUNBOOK.md)。
 
@@ -181,7 +183,7 @@ resolution 0.8 的单核细胞群太混，帮我设计几个候选参数。
 - Bulk 原始 counts 导入：通过上传页同时提交 counts 矩阵和样本信息表；可选携带本地 GTF/GFF 或 gene ID–symbol 映射表。该入口会验证非负整数 counts、列名/`sample_id` 一一对应和 condition 重复数后再写入 h5ad。
 - `.mtx.gz` / 10x 文件组合：上传 `barcodes.tsv(.gz)`、`features.tsv(.gz)` 或 `genes.tsv(.gz)`、`matrix.mtx(.gz)` 后可转换为 `.h5ad`。
 - 多批次 10x ZIP：上传两个或更多分别包含 `filtered_feature_bc_matrix` 的 ZIP，上传页会为每个 ZIP 提供「样本 ID / 批次名称 / 条件」标记（条件如 对照组、疾病组，可自定义）；平台解压后写入 `obs["sample_id"]`、`obs["condition"]`、`obs["batch"]`，再合并为一个标准 `.h5ad`。未填写条件时 condition 留空，后续需补标后才能运行样本级推断。
-- 服务器目录批量 10x：管理员配置 `SC_BATCH_SOURCE_ROOTS` 后，可从网页递归扫描大量 10x 目录、下载并填写样本 manifest（`sample_id,matrix_dir,condition,replicate,batch`），再合并为标准 `.h5ad`。目录名不会被自动当作生物学分组。
+- 服务器目录批量 10x：管理员配置 `SC_BATCH_SOURCE_ROOTS` 并为当前账号授权源目录后，可从网页递归扫描大量 10x 目录、下载并填写样本 manifest（`sample_id,matrix_dir,condition,replicate,batch`），再合并为标准 `.h5ad`。目录名不会被自动当作生物学分组。
 
 单细胞 DEG 按统计单位分开：`deg` 只用于 cluster marker；`sc_cell_deg` 用于同一样本不同簇、不同样本同一簇或条件间的细胞级探索性比较；具有独立生物学重复的正式条件结论使用 `sc_pseudobulk_deg`。细胞级 log2FC 始终由原始 `counts` 重建 log1p 表达，Pearson residual 不直接用于 fold change。富集页面必须选择一个已完成的 DEG 任务，系统读取其受控内部结果并核对 AnnData 版本，不按目录中“最新 CSV”猜测来源。默认交付图和 JSON 统计审计；完整 DEG/富集表只供内部下游使用，不在界面导出。详细设计与延期项见 [人类单细胞 DEG 与富集规划](docs/sc-deg-enrichment-plan.md)。
 
@@ -211,14 +213,14 @@ data/projects/<project_id>/
 
 ### 从 GitHub 克隆后的可运行范围
 
-可以从 GitHub 克隆后直接启动 Web 应用、创建项目，并运行不依赖外部参考的常规
-scRNA-seq / Bulk RNA-seq 流程；`data/`、SQLite 数据库、缓存和项目目录都会在首次
-运行时创建。仓库**不会**也不应包含研究数据、密钥、CellTypist 模型、通路库、WES
+可以从 GitHub 克隆后安装依赖、创建管理员账号并启动 Web 应用；登录后可创建项目，
+运行不依赖外部参考的常规 scRNA-seq / Bulk RNA-seq 流程。`data/`、SQLite 数据库、缓存和
+项目目录会在首次运行时创建。仓库**不会**也不应包含研究数据、密钥、CellTypist 模型、通路库、WES
 参考或容器镜像。因此，“启动应用”和“启用所有可选分析能力”是两件不同的事：
 
 | 能力 | 克隆 + `requirements.txt` | 额外需要 |
 | --- | --- | --- |
-| Web、项目管理、常规单细胞/Bulk 分析、PNG/SVG、Excel 输入/输出 | 可以 | 用户自行上传的表达数据；不附带示例人类数据 |
+| Web、项目管理、常规单细胞/Bulk 分析、PNG/SVG、Excel 输入/输出 | 可以 | 先在服务器创建账号并登录；用户自行上传表达数据，不附带示例人类数据 |
 | Bulk `bulk_enrichment` | 首次运行可联网下载 Enrichr 基因集 | 无外网时，管理员须预置 `genesets/<library>.txt` 或 `data/go_gene_sets/<library>.gmt` |
 | `sc_cell_go` 的离线 ORA/GSEA | 可以（内置 GO BP/CC/MF、Reactome 与 WikiPathways Human 快照） | KEGG 未随库分发；需由具备相应授权的管理员提供本地 GMT/TXT。自定义库可在项目内上传或设置 `SC_CELL_GO_GENE_SET_DIR` |
 | `functional_state` 标准 Hallmark/Reactome/GO 与 CollecTRI TF activity | 可以（内置受版本与 SHA-256 约束的公开快照） | 可设置 `FUNCTIONAL_STATE_RESOURCE_DIR` 以使用管理员审核的替代/更新资源 |
@@ -246,7 +248,7 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
-# 可选：只有在需要覆盖默认路径、访问控制或 AI/WES 配置时才创建 .env
+# 可选：需要覆盖默认路径、AI/WES 配置或源目录白名单时创建 .env
 cp .env.example .env
 
 # 初始化检查：会创建空的本地 data/ 与 instance/，不需要参考数据
@@ -256,11 +258,52 @@ create_app()
 print('应用初始化成功')
 PY
 
+# 首次部署：密码会在终端安全提示输入（至少 12 字符）
+python manage_users.py create admin --admin
 python app.py
 ```
 
 默认访问地址为 `http://localhost:5000`。`SECRET_KEY` 未设置时会在
-`instance/.secret_key` 自动生成。首次启动后在服务器上运行 `python manage_users.py create 管理员用户名 --admin --claim-existing` 创建账号并认领历史项目；如无历史项目，可省略 `--claim-existing`；若先创建了管理员，之后仍可运行 `python manage_users.py claim-existing 管理员用户名` 认领无主项目。再运行 `python manage_users.py create 用户名` 添加研究人员。任何账号如需读取服务器上的大型数据目录，先在 `.env` 设置 `SC_BATCH_SOURCE_ROOTS` / `WES_SOURCE_ROOTS`，再用 `python manage_users.py grant-source-root 用户名 sc|wes /受控目录` 授权；授权变动会要求用户重新登录。账号密码通过终端提示输入，不进入命令行历史。认领操作会在数据库旁创建 SQLite 备份；上线前仍需按实验室策略备份整个项目数据目录。跨网访问仍需 HTTPS / VPN 等受控入口；HTTPS 反向代理部署时设置 `PLATFORM_SESSION_COOKIE_SECURE=true`，并按可信代理层数设置 `TRUSTED_PROXY_HOPS`。
+`instance/.secret_key` 自动生成。首次部署需先在服务器创建管理员账号；平台不提供网页自助注册。
+登录后每位用户只访问自己创建的项目及其任务、文件和对话。管理员可管理全局资源与公开预设，
+但不会自动看到其他用户的项目。旧的共享访问密码 `PLATFORM_ACCESS_PASSWORD` 不再用于登录。
+
+### 用户管理与历史项目认领
+
+账号操作只在应用服务器终端执行，密码由交互提示输入，不会作为命令行参数保存到 shell 历史：
+
+```bash
+python manage_users.py create researcher
+python manage_users.py reset-password researcher
+python manage_users.py disable researcher
+python manage_users.py enable researcher
+```
+
+从旧版本升级时，**先备份 SQLite 数据库和整个项目数据目录**，然后部署新代码。旧项目在认领前
+没有归属，网页无法访问。首次创建管理员时可以一次性认领全部无主项目：
+
+```bash
+python manage_users.py create admin --admin --claim-existing
+```
+
+如果管理员账号已经建立，可执行 `python manage_users.py claim-existing admin`。认领命令会在
+数据库旁另建 `.before-user-ownership.bak` SQLite 备份；该操作会把全部无主项目交给指定
+管理员，也会把旧版平台 AI 设置转入该账号。请在执行前核对历史项目的实际归属。已经有管理员时，
+`create --claim-existing` 不适用。
+
+读取服务器上的 10x 或 WES 数据需要**全局白名单和账号授权**同时满足。先在 `.env` 设置
+`SC_BATCH_SOURCE_ROOTS` / `WES_SOURCE_ROOTS`，再按需要授予其中的目录；管理员账号也需授权。
+授权目录必须是现有的非符号链接目录，且位于对应白名单内：
+
+```bash
+python manage_users.py grant-source-root researcher sc /srv/sc-input/researcher
+python manage_users.py grant-source-root researcher wes /srv/wes-input/researcher
+python manage_users.py revoke-source-root researcher sc /srv/sc-input/researcher
+```
+
+将示例路径替换为服务器上实际存在且已列入白名单的目录。重置密码、启用或停用账号、变更目录授权后，该账号须重新登录。上线前应按实验室策略安排
+数据库与项目数据备份和保留；跨网访问使用 HTTPS / VPN 等受控入口。HTTPS 反向代理部署时
+设置 `PLATFORM_SESSION_COOKIE_SECURE=true`，并按可信代理层数设置 `TRUSTED_PROXY_HOPS`。
 
 `requirements.txt` 已包括以下 Python 包；安装成功不等于其所需的本地参考也已具备：
 
@@ -332,8 +375,8 @@ manifest 中保留 KEGG release、获取日期、许可证/订阅依据和 SHA-2
   都已登记和 checksum 验证。它们不能通过 `pip` 或本仓库获得；完整清单与登记步骤见
   [WES P2/P3 Runbook](docs/WES_P2_P3_RUNBOOK.md)。
 
-启动后可在网页的依赖状态页查看模块可用性；设置了 `AI_API_TOKEN` 时，访问
-`/api/system/dependencies` 需要携带相应 Bearer token。每个模块会分别报告 `missing`
+登录后可在网页的依赖状态页查看模块可用性；设置了 `AI_API_TOKEN` 时，访问
+`/api/system/dependencies` 还需要携带相应 Bearer token。每个模块会分别报告 `missing`
 （无法运行）与 `optional_missing`（只影响增强能力）。
 
 频繁开发时，可在服务器 `.env` 中临时开启自动重载：
@@ -392,12 +435,12 @@ AI_API_TOKEN=""
 
 说明：
 
-- 启动后可直接打开 `/settings/ai`（首页和 AI 主工作台均有入口）更换协议、API 地址、API Key 和模型；保存后立即生效，无需重启。API Key 只在服务端保存，页面仅显示脱敏值。
-- “测试连接”会使用当前表单参数发起一次轻量服务检查，不会保存配置；确认成功后再点击“保存并应用”。“恢复环境变量默认值”会删除平台页面保存的覆盖项。
+- 登录后可打开 `/settings/ai`（首页和 AI 主工作台均有入口）为当前账号更换协议、API 地址、API Key 和模型；保存后立即生效，无需重启。API Key 只在服务端保存，页面仅显示脱敏值。
+- “测试连接”会使用当前表单参数发起一次轻量服务检查，不会保存配置；确认成功后再点击“保存并应用”。“恢复环境变量默认值”只会删除当前账号保存的覆盖项；环境变量是所有账号共用的默认值。
 - `AI_API_KEY` 为空时，`/api/chat` 会返回未配置错误。
 - `AI_API_URL` 中包含 `anthropic` 或 `claude` 时走 Anthropic Messages 格式，否则走 OpenAI compatible Chat Completions 格式。
 - Anthropic-compatible 调用使用内置 HTTP 客户端，不强依赖本地安装 `anthropic` SDK。
-- `AI_API_TOKEN` 为空时跳过本地 API token 认证；设置后需要请求头 `Authorization: Bearer <token>`。
+- `AI_API_TOKEN` 是额外的 API Bearer token；为空时只跳过这层校验，登录仍是必需的。设置后调用受保护的 AI 接口还需请求头 `Authorization: Bearer <token>`。
 - 写操作工具不会直接执行，会先返回 `proposed_tools`，前端确认后再调用 `/api/chat/approve`。
 - AI 查询任务结果时，若存在 PNG/JPG/SVG 等图片，`/api/chat` 会返回 `attachments`；AI 主工作台和项目详情页会直接显示缩略图，可点击查看原图或下载。
 
@@ -431,7 +474,7 @@ AI_API_TOKEN=""
 
 ### WES 网页流程
 
-1. 管理员在服务器 `.env` 中配置 `WES_SOURCE_ROOTS` 及参考资源路径，需要真正启动运行时开启 `WES_EXECUTOR_ENABLED`。
+1. 管理员在服务器 `.env` 中配置 `WES_SOURCE_ROOTS` 及参考资源路径，并用 `manage_users.py grant-source-root` 授予当前账号相应源目录；需要真正启动运行时开启 `WES_EXECUTOR_ENABLED`。
 2. 打开项目详情页的 WES 面板，按入口类型登记样本 manifest（FASTQ / BAM / CRAM / VCF）。
 3. 选择 workflow（胚系 / tumor-normal / 受限 tumor-only）和已验证的参考 bundle、capture kit，完成运行前预检。
 4. 启动 Nextflow 运行；平台跟踪状态、PID、日志和退出码，支持取消与 `-resume`。
@@ -448,15 +491,15 @@ AI_API_TOKEN=""
 
 ## REST API 摘要
 
-常用接口：
+常用接口均要求登录；项目相关接口还会检查当前账号的项目归属。修改数据的请求须通过同源检查。
 
 | 接口 | 方法 | 说明 |
 | --- | --- | --- |
 | `/api/chat` | `POST` | AI 对话入口 |
 | `/settings/ai` | `GET` | AI API 设置页面 |
-| `/api/settings/ai` | `GET/POST` | 查看或保存 AI API 配置（Key 脱敏返回） |
+| `/api/settings/ai` | `GET/POST` | 查看或保存当前账号的 AI API 配置（Key 脱敏返回） |
 | `/api/settings/ai/test` | `POST` | 测试未保存的 AI API 参数 |
-| `/api/settings/ai/reset` | `POST` | 恢复环境变量默认 AI 配置 |
+| `/api/settings/ai/reset` | `POST` | 删除当前账号的覆盖项，恢复环境变量默认 AI 配置 |
 | `/api/chat/approve` | `POST` | 执行用户确认后的 AI 工具 |
 | `/api/chat/history/<pid>` | `GET` | 获取项目聊天历史 |
 | `/api/tasks/<task_id>/status` | `GET` | 查看分析任务状态 |
@@ -538,7 +581,8 @@ python -m pytest tests/test_semantic.py tests/test_semantic_full.py -q
 app.py                      # Flask 应用入口和 blueprint 注册
 config.py                   # 路径、AI、并发、资源配置
 database.py                 # SQLite schema 初始化和迁移
-models.py                   # Project、Task、ResultFile、Agent、Branch 等模型
+models.py                   # User、Project、Task、ResultFile、Agent、Branch 等模型
+manage_users.py             # 本地账号管理与历史项目认领
 worker.py                   # 异步分析任务执行器
 
 routes/
@@ -554,7 +598,7 @@ routes/
   figure_studio.py          # 图形工作台页面、预览、上传和版本下载
   workspace.py              # AI 主工作台页面
   wes.py                    # 项目 WES 面板与安全产物下载
-  auth.py                   # Bearer token 鉴权装饰器
+  auth.py                   # 登录会话、项目归属与可选 Bearer token 校验
 
 modules/
   __init__.py               # MODULE_REGISTRY、PIPELINE_ORDER、PIPELINE_DEPS
@@ -565,7 +609,7 @@ modules/
   inspect_utils.py          # AnnData 检查工具
   expression_parser.py      # Bulk 多比较表达式解析
   ai_adapter.py             # Anthropic/OpenAI compatible AI 适配器
-  ai_config.py              # 环境变量与平台页面配置的运行时合并
+  ai_config.py              # 环境变量默认值与个人 AI 设置的运行时合并
   ai_tools.py               # AI 工具执行后端
   agent_orchestrator.py     # 目标驱动 Agent 编排
   agent_jobs.py             # 参数 sweep 异步 job
@@ -650,13 +694,15 @@ git ls-files --others --exclude-standard
 | `MAX_WORKERS` | `2` | 后台分析任务并发数 |
 | `MIN_FREE_RAM_GB` | `4` | 资源保护阈值 |
 | `CUDA_DEVICES` | `0,1` | GPU 设备配置 |
-| `SC_BATCH_SOURCE_ROOTS` | 空（关闭） | 可供网页只读批量导入的服务器数据根目录；Linux 多个根用 `:` 分隔，例如 `/home/oelab/data/GJ:/mnt/sc_data` |
+| `SC_BATCH_SOURCE_ROOTS` | 空（关闭） | 服务器数据目录全局白名单；Linux 多个根用 `:` 分隔，账号还需单独授权 |
 | `PLATFORM_ACCESS_SESSION_HOURS` | `12` | 个人账号会话有效期；共享访问密码已停用 |
+| `PLATFORM_SESSION_COOKIE_SECURE` | `false` | HTTPS 部署时设为 `true`，仅通过安全连接发送会话 cookie |
+| `TRUSTED_PROXY_HOPS` | `0` | 可信反向代理层数；直连时保持 `0` |
 | `AI_API_KEY` | 空 | AI API key |
 | `AI_API_URL` | 默认兼容 Anthropic 的 URL | AI API endpoint；DeepSeek 可用 `https://api.deepseek.com/anthropic` |
 | `AI_MODEL` | `mimo-v2.5-pro` | AI 模型名；DeepSeek 常用 `deepseek-chat` |
-| `AI_API_TOKEN` | 空 | 本地 API Bearer token |
-| `WES_SOURCE_ROOTS` | 空（关闭） | WES 服务器只读数据根目录白名单，多个根用 `:` 分隔 |
+| `AI_API_TOKEN` | 空 | 额外的本地 API Bearer token；不代替账号登录 |
+| `WES_SOURCE_ROOTS` | 空（关闭） | WES 服务器只读数据根目录全局白名单，多个根用 `:` 分隔；账号还需单独授权 |
 | `WES_EXECUTOR_ENABLED` | 关闭 | 是否允许启动 Nextflow WES 运行；关闭时仍可准备和审阅 run |
 | `WES_NEXTFLOW_GENOME` | `GATK.GRCh38` | Sarek/iGenomes 参考键；配套资源路径见 `WES_NEXTFLOW_*` 变量 |
 | `CELLORACLE_PYTHON` | 本机开发路径（必须覆盖） | virtual_ko 使用的独立 CellOracle Python 3.9/3.10 解释器路径；新部署不可依赖该默认绝对路径 |
