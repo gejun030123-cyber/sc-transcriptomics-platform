@@ -55,6 +55,7 @@ def create_app():
 
     init_db()
 
+    from routes.accounts import accounts_bp
     from routes.main import main_bp
     from routes.analysis import analysis_bp
     from routes.projects import projects_bp
@@ -68,6 +69,7 @@ def create_app():
     from routes.ai_settings import ai_settings_bp
     from routes.wes import wes_bp
 
+    app.register_blueprint(accounts_bp)
     app.register_blueprint(main_bp)
     app.register_blueprint(analysis_bp, url_prefix='/projects')
     app.register_blueprint(projects_bp, url_prefix='/projects')

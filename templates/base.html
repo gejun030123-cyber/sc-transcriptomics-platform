@@ -26,11 +26,14 @@
                     <a class="nav-link {% if request.path == '/projects' %}active{% endif %}" href="/projects">研究项目</a>
                     <a class="nav-link {% if request.path == '/projects/new' %}active{% endif %}" href="/projects/new">新建项目</a>
                     <a class="nav-link {% if request.path.startswith('/settings/ai') %}active{% endif %}" href="/settings/ai">AI 设置</a>
+                    {% if signed_in_user and signed_in_user.is_admin %}
+                    <a class="nav-link {% if request.path == '/admin/users' %}active{% endif %}" href="{{ url_for('accounts.users') }}">用户管理</a>
+                    {% endif %}
                 </div>
                 <div class="system-status" id="system-status">
                     <span id="sys-info">读取系统状态…</span>
                     {% if config.AUTH_REQUIRED %}
-                    <span class="nav-link">{{ signed_in_user.username if signed_in_user else "" }}</span>
+                    <a class="nav-link" href="{{ url_for('accounts.profile') }}">{{ signed_in_user.username if signed_in_user else "" }} · 账号设置</a>
                     <form method="post" action="{{ url_for('platform_logout') }}" class="d-inline">
                         <button type="submit" class="nav-link btn btn-link">退出</button>
                     </form>

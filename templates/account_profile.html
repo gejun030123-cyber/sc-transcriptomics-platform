@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block title %}账号设置{% endblock %}
+{% block content %}
+<div class="container py-5" style="max-width: 540px">
+    <h1 class="h3 mb-3">账号设置</h1>
+    <p class="text-muted">用户名：<strong>{{ user.username }}</strong>。更新邮箱后可用用户名或邮箱登录。</p>
+    {% if error %}<div class="alert alert-danger" role="alert">{{ error }}</div>{% endif %}
+    <form method="post" autocomplete="off" class="card shadow-sm"><div class="card-body">
+        <label class="form-label" for="email">邮箱</label>
+        <input class="form-control mb-3" id="email" name="email" type="email" maxlength="254" value="{{ user.email or '' }}" required>
+        <label class="form-label" for="current_password">当前密码</label>
+        <input class="form-control mb-3" id="current_password" name="current_password" type="password" autocomplete="current-password" required>
+        <button class="btn btn-primary" type="submit">保存邮箱</button>
+        <a class="btn btn-link" href="{{ url_for('accounts.change_password') }}">修改密码</a>
+    </div></form>
+</div>
+{% endblock %}

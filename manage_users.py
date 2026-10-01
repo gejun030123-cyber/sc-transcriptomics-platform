@@ -17,6 +17,7 @@ def main():
     sub = parser.add_subparsers(dest='action', required=True)
     create = sub.add_parser('create')
     create.add_argument('username')
+    create.add_argument('--email', help='账号邮箱；首次创建管理员可暂不填写')
     create.add_argument('--admin', action='store_true')
     create.add_argument('--claim-existing', action='store_true', help='首次建管理员时认领所有历史项目')
     reset = sub.add_parser('reset-password')
@@ -36,6 +37,8 @@ def main():
     if args.action == 'create':
         if args.claim_existing and not args.admin:
             parser.error('--claim-existing 只能用于管理员账号')
+        if not args.admin and not args.email:
+            parser.error('普通账号必须提供 --email')
         password = getpass.getpass('密码（至少 12 字符）：')
         if password != getpass.getpass('再次输入密码：'):
             parser.error('两次密码不一致')
@@ -67,7 +70,10 @@ def main():
                 source.close()
                 target.close()
             backup.chmod(0o600)
-        user = User.create(args.username, password, is_admin=args.admin)
+        try:
+            user = User.create(args.username, password, is_admin=args.admin, email=args.email)
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            parser.error(str(exc))
         if args.claim_existing:
             conn = get_conn()
             try:

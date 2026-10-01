@@ -27,6 +27,7 @@ def init_db():
             password_hash TEXT NOT NULL,
             is_admin INTEGER NOT NULL DEFAULT 0,
             is_active INTEGER NOT NULL DEFAULT 1,
+            email TEXT,
             session_version INTEGER NOT NULL DEFAULT 0,
             sc_source_roots_json TEXT NOT NULL DEFAULT '[]',
             wes_source_roots_json TEXT NOT NULL DEFAULT '[]',
@@ -113,9 +114,16 @@ def init_db():
         );
     """)
     user_columns = {row['name'] for row in db.execute('PRAGMA table_info(users)')}
-    for column in ('sc_source_roots_json', 'wes_source_roots_json'):
+    user_upgrades = {
+        'sc_source_roots_json': "TEXT NOT NULL DEFAULT '[]'",
+        'wes_source_roots_json': "TEXT NOT NULL DEFAULT '[]'",
+        'email': 'TEXT',
+    }
+    for column, definition in user_upgrades.items():
         if column not in user_columns:
-            db.execute(f"ALTER TABLE users ADD COLUMN {column} TEXT NOT NULL DEFAULT '[]'")
+            db.execute(f'ALTER TABLE users ADD COLUMN {column} {definition}')
+    db.execute("DROP INDEX IF EXISTS idx_users_email_nocase")
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_exact ON users(email) WHERE email IS NOT NULL")
     project_columns = {row['name'] for row in db.execute('PRAGMA table_info(projects)')}
     if 'owner_user_id' not in project_columns:
         db.execute('ALTER TABLE projects ADD COLUMN owner_user_id TEXT REFERENCES users(id)')

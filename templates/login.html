@@ -23,15 +23,17 @@
         <div class="eyebrow">Research intelligence</div>
         <h1>oelab agent</h1>
         <p>请使用个人账号进入研究工作空间。</p>
+        {% if request.args.get("changed") == "1" %}<div class="error" role="status">密码已更新，请重新登录。</div>{% endif %}
         {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
         <form method="post" autocomplete="off">
             <input type="hidden" name="next" value="{{ next_path }}">
-            <label for="username">用户名</label>
+            <label for="username">用户名或邮箱</label>
             <input id="username" name="username" autocomplete="username" required autofocus>
             <label for="password">密码</label>
             <input id="password" name="password" type="password" autocomplete="current-password" required>
             <button type="submit">进入平台</button>
         </form>
+        <p style="text-align:center;margin-bottom:0"><a href="{{ url_for('accounts.register') }}">注册新账号</a></p>
     </main>
 </body>
 </html>

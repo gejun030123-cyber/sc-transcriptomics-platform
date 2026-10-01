@@ -12,9 +12,10 @@ def gen_id():
 class User:
     def __init__(self, id=None, username='', password_hash='', is_admin=0,
                  is_active=1, session_version=0, sc_source_roots_json='[]',
-                 wes_source_roots_json='[]', created_at=None):
+                 wes_source_roots_json='[]', created_at=None, email=None, **_legacy_fields):
         self.id = id or gen_id()
         self.username = username
+        self.email = email
         self.password_hash = password_hash
         self.is_admin = bool(is_admin)
         self.is_active = bool(is_active)
@@ -23,19 +24,35 @@ class User:
         self.wes_source_roots_json = wes_source_roots_json
         self.created_at = created_at
 
+    @staticmethod
+    def normalize_email(email):
+        email = str(email or '').strip()
+        if (len(email) > 254 or not email.isascii() or email.count('@') != 1
+                or any(c.isspace() for c in email)):
+            raise ValueError('请输入有效邮箱地址')
+        local, domain = email.split('@')
+        if (not local or not domain or '.' not in domain or domain.startswith('.')
+                or domain.endswith('.') or '..' in domain or any(c in email for c in '<>"')):
+            raise ValueError('请输入有效邮箱地址')
+        return email
+
     @classmethod
-    def create(cls, username, password, *, is_admin=False):
+    def create(cls, username, password, *, is_admin=False, email=None):
         username = str(username or '').strip()
         if not username or len(username) > 64 or not all(c.isalnum() or c in '._-' for c in username):
             raise ValueError('用户名只能包含字母、数字、点、下划线和短横线，最多 64 字符')
-        if len(password) < 12:
-            raise ValueError('密码至少需要 12 个字符')
-        user = cls(username=username, password_hash=generate_password_hash(password),
-                   is_admin=int(is_admin))
+        if len(password) < 12 or len(password) > 1024:
+            raise ValueError('密码需为 12 至 1024 字符')
+        email = cls.normalize_email(email) if email else None
+        user = cls(username=username, email=email,
+                   password_hash=generate_password_hash(password), is_admin=int(is_admin))
         conn = get_conn()
         try:
-            conn.execute('INSERT INTO users (id, username, password_hash, is_admin, is_active, session_version) VALUES (?, ?, ?, ?, 1, 0)',
-                         (user.id, user.username, user.password_hash, int(user.is_admin)))
+            if conn.execute('SELECT 1 FROM users WHERE username=? COLLATE NOCASE', (username,)).fetchone():
+                raise ValueError('用户名已被使用，请换一个')
+            conn.execute('INSERT INTO users (id, username, email, password_hash, is_admin, is_active, session_version) '
+                         'VALUES (?, ?, ?, ?, ?, 1, 0)',
+                         (user.id, user.username, user.email, user.password_hash, int(user.is_admin)))
             conn.commit()
         finally:
             conn.close()
@@ -54,7 +71,17 @@ class User:
     def get_by_username(cls, username):
         conn = get_conn()
         try:
-            row = conn.execute('SELECT * FROM users WHERE username=?', (username,)).fetchone()
+            row = conn.execute('SELECT * FROM users WHERE username=? COLLATE NOCASE', (username,)).fetchone()
+        finally:
+            conn.close()
+        return cls(**dict(row)) if row else None
+
+    @classmethod
+    def get_by_login(cls, identifier):
+        conn = get_conn()
+        try:
+            row = conn.execute('SELECT * FROM users WHERE username=? COLLATE NOCASE OR email=? COLLATE BINARY LIMIT 1',
+                               (identifier, identifier)).fetchone()
         finally:
             conn.close()
         return cls(**dict(row)) if row else None

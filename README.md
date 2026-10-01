@@ -11,7 +11,7 @@
 
 ## 最近更新
 
-- **个人账号与项目隔离**：每位研究人员使用独立账号登录；项目、任务、结果文件、对话记录、个人 AI 设置和项目内资源按项目归属隔离。管理员可在服务器本地创建账号、认领历史项目，并为服务器数据目录逐人授权。
+- **邮箱注册与项目隔离**：研究人员在登录页填写用户名、唯一邮箱和密码即可注册，无需管理员审核，支持用户名或邮箱登录；项目、任务、结果文件、对话记录、个人 AI 设置和项目内资源按项目归属隔离。管理员可在网页管理普通账号，也可在服务器认领历史项目、为数据目录逐人授权。
 - **Bulk 原始 counts 导入**：上传“基因 × 样本”整数 counts 矩阵与显式样本信息表即可生成可用于 DESeq2 的 h5ad；可选本地 GTF/GFF 或 `gene_id,gene_name` 映射表补全基因名。TPM、FPKM、CPM、百分比和 log 表达值会在导入阶段拒绝进入 count 模型。
 - **Bulk 统计防错**：QC、标准化、PCA 和 DEG 记录表达尺度；DESeq2、edgeR 与 limma 只接受原始 counts 或已验证的 counts layer。低表达基因过滤、分组列、比较名称和生物学重复在运行前检查，避免按文件顺序猜组或跨分组列提交 contrast。
 - **科研图形工作台**：Bulk/单细胞火山图可按原始差异结果重绘，支持非破坏性的范围、主刻度、阈值、配色和基因标注调整，并导出 PNG/SVG 新版本。默认火山图使用紧凑线性坐标、弱化背景点和边缘三角形，保留极端效应与 FDR 的真实含义。
@@ -21,7 +21,7 @@
 
 ### Web 分析工作台
 
-- 个人账号：登录后只显示本人项目；项目页面、API、任务状态和下载均检查项目归属。管理员也不会自动获得其他用户项目的访问权。
+- 个人账号：注册后可立即登录，在账号设置页可补充或修改邮箱、修改密码；登录后只显示本人项目；项目页面、API、任务状态和下载均检查项目归属。管理员也不会自动获得其他用户项目的访问权。
 - 项目管理：创建项目、上传数据、查看项目状态和历史任务；主线任务完成后项目状态会自动同步为 `completed`，存在运行中任务时为 `processing`，全部失败时为 `failed`。
 - AI 主工作台：项目内 `/projects/<pid>/workspace` 页面聚合单细胞、Bulk RNA、WES 分析入口、最近任务和数据文件，并预留 Bulk ATAC-seq 工作流。
 - 异步任务：分析任务通过后台 worker 执行，前端可查看进度、日志和失败信息。
@@ -213,14 +213,15 @@ data/projects/<project_id>/
 
 ### 从 GitHub 克隆后的可运行范围
 
-可以从 GitHub 克隆后安装依赖、创建管理员账号并启动 Web 应用；登录后可创建项目，
+可以从 GitHub 克隆后安装依赖、创建首位管理员并启动 Web 应用；其余用户可在登录页注册，
+登录后可创建项目，
 运行不依赖外部参考的常规 scRNA-seq / Bulk RNA-seq 流程。`data/`、SQLite 数据库、缓存和
 项目目录会在首次运行时创建。仓库**不会**也不应包含研究数据、密钥、CellTypist 模型、通路库、WES
 参考或容器镜像。因此，“启动应用”和“启用所有可选分析能力”是两件不同的事：
 
 | 能力 | 克隆 + `requirements.txt` | 额外需要 |
 | --- | --- | --- |
-| Web、项目管理、常规单细胞/Bulk 分析、PNG/SVG、Excel 输入/输出 | 可以 | 先在服务器创建账号并登录；用户自行上传表达数据，不附带示例人类数据 |
+| Web、项目管理、常规单细胞/Bulk 分析、PNG/SVG、Excel 输入/输出 | 可以 | 首位管理员由服务器创建；其他用户在网页填写邮箱注册并登录。用户自行上传表达数据，不附带示例人类数据 |
 | Bulk `bulk_enrichment` | 首次运行可联网下载 Enrichr 基因集 | 无外网时，管理员须预置 `genesets/<library>.txt` 或 `data/go_gene_sets/<library>.gmt` |
 | `sc_cell_go` 的离线 ORA/GSEA | 可以（内置 GO BP/CC/MF、Reactome 与 WikiPathways Human 快照） | KEGG 未随库分发；需由具备相应授权的管理员提供本地 GMT/TXT。自定义库可在项目内上传或设置 `SC_CELL_GO_GENE_SET_DIR` |
 | `functional_state` 标准 Hallmark/Reactome/GO 与 CollecTRI TF activity | 可以（内置受版本与 SHA-256 约束的公开快照） | 可设置 `FUNCTIONAL_STATE_RESOURCE_DIR` 以使用管理员审核的替代/更新资源 |
@@ -264,16 +265,21 @@ python app.py
 ```
 
 默认访问地址为 `http://localhost:5000`。`SECRET_KEY` 未设置时会在
-`instance/.secret_key` 自动生成。首次部署需先在服务器创建管理员账号；平台不提供网页自助注册。
-登录后每位用户只访问自己创建的项目及其任务、文件和对话。管理员可管理全局资源与公开预设，
-但不会自动看到其他用户的项目。旧的共享访问密码 `PLATFORM_ACCESS_PASSWORD` 不再用于登录。
+`instance/.secret_key` 自动生成。首次部署需在服务器创建首位管理员账号。之后研究人员可在
+登录页选择「注册新账号」，填写用户名、邮箱和密码后立即登录，无需手机号或管理员审核。
+邮箱用于登录和联系，大小写会影响登录和唯一性判断，请按注册时的写法输入；当前只检查格式与唯一性，
+**不会发送验证邮件**。已有账号可在「账号设置」
+中补填邮箱、修改密码。登录后每位用户只访问自己创建的项目及其任务、文件和对话。管理员可
+在「用户管理」页直接创建普通账号、停用或启用账号、重置密码，也可管理全局资源与公开预设；
+管理员不会自动看到其他用户的项目。旧的共享访问密码 `PLATFORM_ACCESS_PASSWORD` 不再用于登录。
 
 ### 用户管理与历史项目认领
 
-账号操作只在应用服务器终端执行，密码由交互提示输入，不会作为命令行参数保存到 shell 历史：
+网页注册和普通账号管理入口分别为 `/register` 与 `/admin/users`。服务器终端仍可用于首位管理员
+初始化和应急管理；密码由交互提示输入，不会作为命令行参数保存到 shell 历史：
 
 ```bash
-python manage_users.py create researcher
+python manage_users.py create researcher --email researcher@lab.example
 python manage_users.py reset-password researcher
 python manage_users.py disable researcher
 python manage_users.py enable researcher
@@ -293,6 +299,7 @@ python manage_users.py create admin --admin --claim-existing
 
 读取服务器上的 10x 或 WES 数据需要**全局白名单和账号授权**同时满足。先在 `.env` 设置
 `SC_BATCH_SOURCE_ROOTS` / `WES_SOURCE_ROOTS`，再按需要授予其中的目录；管理员账号也需授权。
+网页注册不会自动授予服务器数据目录权限。
 授权目录必须是现有的非符号链接目录，且位于对应白名单内：
 
 ```bash
@@ -599,6 +606,7 @@ routes/
   workspace.py              # AI 主工作台页面
   wes.py                    # 项目 WES 面板与安全产物下载
   auth.py                   # 登录会话、项目归属与可选 Bearer token 校验
+  accounts.py               # 邮箱注册、账号设置和管理员用户管理
 
 modules/
   __init__.py               # MODULE_REGISTRY、PIPELINE_ORDER、PIPELINE_DEPS

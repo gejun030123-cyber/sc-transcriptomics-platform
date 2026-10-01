@@ -99,9 +99,9 @@ def register_platform_access_gate(app):
         if request.method == 'POST':
             if not _same_origin_write():
                 abort(403)
-            username = request.form.get('username', '').strip()
+            identifier = request.form.get('username', '').strip()
             password = request.form.get('password', '')
-            key = (request.remote_addr or '', username.casefold())
+            key = (request.remote_addr or '', identifier.casefold())
             now = time.monotonic()
             with _login_lock:
                 recent = [stamp for stamp in _login_failures.get(key, ()) if now - stamp < 900]
@@ -109,7 +109,7 @@ def register_platform_access_gate(app):
                 limited = len(recent) >= 5
             if limited:
                 return render_template('login.html', error='尝试次数过多，请 15 分钟后重试。', next_path=next_path), 429
-            user = User.get_by_username(username)
+            user = User.get_by_login(identifier)
             if user and user.is_active and user.check_password(password):
                 with _login_lock:
                     _login_failures.pop(key, None)
@@ -138,7 +138,7 @@ def register_platform_access_gate(app):
             return None
         if request.endpoint == 'static':
             return None
-        if request.endpoint == 'platform_login':
+        if request.endpoint in {'platform_login', 'accounts.register'}:
             return None
         uid = session.get('user_id')
         user = User.get_by_id(uid) if uid else None
