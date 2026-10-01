@@ -43,7 +43,7 @@ tempfile.tempdir = _test_tmp_root
 
 # 环境变量：确保裸环境测试可复现
 os.environ.setdefault('NUMBA_DISABLE_JIT', '1')
-# Test clients must not inherit a developer's deployment access gate or an
+# Test clients must not inherit a developer's legacy shared password or an
 # enabled WES executor from the shell/.env.  Individual tests explicitly
 # monkeypatch these values when they exercise either gate.
 os.environ['PLATFORM_ACCESS_PASSWORD'] = ''
@@ -57,6 +57,7 @@ if _project_root not in sys.path:
 
 import pytest
 from database import init_db, get_conn
+from config import Config
 
 
 @pytest.fixture
@@ -99,3 +100,9 @@ def test_project(tmp_path, monkeypatch):
 
     yield pid
     # tmp_path 会在测试结束后自动清理，无需手动删除文件
+
+
+@pytest.fixture(autouse=True)
+def legacy_route_test_auth(monkeypatch):
+    """Older route tests exercise analysis behavior; auth tests opt in explicitly."""
+    monkeypatch.setattr(Config, 'AUTH_REQUIRED', False)

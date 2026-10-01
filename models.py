@@ -2,16 +2,72 @@ import uuid
 import json
 from datetime import datetime, timezone
 from database import get_conn
+from werkzeug.security import generate_password_hash, check_password_hash
 
 
 def gen_id():
     return str(uuid.uuid4())[:12]
 
 
+class User:
+    def __init__(self, id=None, username='', password_hash='', is_admin=0,
+                 is_active=1, session_version=0, sc_source_roots_json='[]',
+                 wes_source_roots_json='[]', created_at=None):
+        self.id = id or gen_id()
+        self.username = username
+        self.password_hash = password_hash
+        self.is_admin = bool(is_admin)
+        self.is_active = bool(is_active)
+        self.session_version = session_version
+        self.sc_source_roots_json = sc_source_roots_json
+        self.wes_source_roots_json = wes_source_roots_json
+        self.created_at = created_at
+
+    @classmethod
+    def create(cls, username, password, *, is_admin=False):
+        username = str(username or '').strip()
+        if not username or len(username) > 64 or not all(c.isalnum() or c in '._-' for c in username):
+            raise ValueError('用户名只能包含字母、数字、点、下划线和短横线，最多 64 字符')
+        if len(password) < 12:
+            raise ValueError('密码至少需要 12 个字符')
+        user = cls(username=username, password_hash=generate_password_hash(password),
+                   is_admin=int(is_admin))
+        conn = get_conn()
+        try:
+            conn.execute('INSERT INTO users (id, username, password_hash, is_admin, is_active, session_version) VALUES (?, ?, ?, ?, 1, 0)',
+                         (user.id, user.username, user.password_hash, int(user.is_admin)))
+            conn.commit()
+        finally:
+            conn.close()
+        return user
+
+    @classmethod
+    def get_by_id(cls, user_id):
+        conn = get_conn()
+        try:
+            row = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+        finally:
+            conn.close()
+        return cls(**dict(row)) if row else None
+
+    @classmethod
+    def get_by_username(cls, username):
+        conn = get_conn()
+        try:
+            row = conn.execute('SELECT * FROM users WHERE username=?', (username,)).fetchone()
+        finally:
+            conn.close()
+        return cls(**dict(row)) if row else None
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+
+
 class Project:
-    def __init__(self, id=None, name='', description='', created_at=None, updated_at=None, status='empty', metadata_json='{}'):
+    def __init__(self, id=None, name='', description='', created_at=None, updated_at=None, status='empty', metadata_json='{}', owner_user_id=None):
         self.id = id or gen_id()
         self.name = name
+        self.owner_user_id = owner_user_id
         self.description = description
         self.created_at = created_at or datetime.now(timezone.utc).isoformat()
         self.updated_at = updated_at or datetime.now(timezone.utc).isoformat()
@@ -22,12 +78,12 @@ class Project:
         conn = get_conn()
         try:
             conn.execute(
-                "INSERT INTO projects (id, name, description, created_at, updated_at, status, metadata_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description, "
+                "INSERT INTO projects (id, name, owner_user_id, description, created_at, updated_at, status, metadata_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET name=excluded.name, owner_user_id=excluded.owner_user_id, description=excluded.description, "
                 "created_at=excluded.created_at, updated_at=excluded.updated_at, "
                 "status=excluded.status, metadata_json=excluded.metadata_json",
-                (self.id, self.name, self.description, self.created_at, self.updated_at, self.status, self.metadata_json)
+                (self.id, self.name, self.owner_user_id, self.description, self.created_at, self.updated_at, self.status, self.metadata_json)
             )
             conn.commit()
         finally:
@@ -43,7 +99,7 @@ class Project:
 
     def to_dict(self):
         return {
-            'id': self.id, 'name': self.name, 'description': self.description,
+            'id': self.id, 'name': self.name, 'description': self.description, 'owner_user_id': self.owner_user_id,
             'created_at': self.created_at, 'updated_at': self.updated_at,
             'status': self.status, 'metadata_json': self.metadata_json
         }
@@ -60,10 +116,13 @@ class Project:
         return None
 
     @classmethod
-    def get_all(cls):
+    def get_all(cls, owner_user_id=None):
         conn = get_conn()
         try:
-            rows = conn.execute("SELECT * FROM projects ORDER BY created_at DESC").fetchall()
+            if owner_user_id:
+                rows = conn.execute("SELECT * FROM projects WHERE owner_user_id=? ORDER BY created_at DESC", (owner_user_id,)).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM projects ORDER BY created_at DESC").fetchall()
         finally:
             conn.close()
         return [cls(**dict(r)) for r in rows]

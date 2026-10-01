@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from flask import Blueprint, jsonify, request, send_file
 from models import AnalysisTask, Project, ResultFile
 from config import Config
+from routes.auth import current_user
 from modules.workflows.capture_uploads import store_capture_bed_upload
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,16 @@ def _validate_file_path(file_path):
         data_dir = os.path.realpath(Config.DATA_DIR)
     except (OSError, ValueError):
         return False
-    return real_path.startswith(data_dir + os.sep) or real_path == data_dir
+    if not (real_path.startswith(data_dir + os.sep) or real_path == data_dir):
+        return False
+    user = current_user()
+    if user:
+        for project in Project.get_all(owner_user_id=user.id):
+            valid, _ = Config._validate_path(file_path, project.id)
+            if valid:
+                return True
+        return False
+    return True
 
 
 def _validate_project_file_path(file_path, project_id):
@@ -163,10 +173,20 @@ def _load_accessible_preset(preset_id, project_id=''):
             preset['_scope'] = 'project'
             return preset
     _ensure_bundled_presets()
+    user = current_user()
+    if user and not user.is_admin and preset_id not in _bundled_preset_ids():
+        return None
     preset = _load_preset(os.path.join(_get_global_presets_dir(), f'{preset_id}.json'))
     if preset:
         preset['_scope'] = 'global'
     return preset
+
+
+def _bundled_preset_ids():
+    if not os.path.isdir(BUNDLED_PRESETS_DIR):
+        return set()
+    return {os.path.splitext(name)[0] for name in os.listdir(BUNDLED_PRESETS_DIR)
+            if name.endswith('.json')}
 
 
 def _list_presets_in_dir(directory, scope):
@@ -837,7 +857,12 @@ def list_presets():
     filter_type = request.args.get('type', '')
     presets = []
     _ensure_bundled_presets()
-    presets.extend(_list_presets_in_dir(_get_global_presets_dir(), 'global'))
+    global_presets = _list_presets_in_dir(_get_global_presets_dir(), 'global')
+    user = current_user()
+    if user and not user.is_admin:
+        bundled_ids = _bundled_preset_ids()
+        global_presets = [preset for preset in global_presets if preset['_id'] in bundled_ids]
+    presets.extend(global_presets)
     if project_id:
         proj_dir = _get_project_presets_dir(project_id)
         presets.extend(_list_presets_in_dir(proj_dir, 'project'))
@@ -923,6 +948,8 @@ def save_preset():
     scope = data.get('scope', 'project')
     project_id = data.get('project_id', '')
     if scope == 'global':
+        if current_user() and not current_user().is_admin:
+            return jsonify({'error': '只有管理员可以保存公共预设'}), 403
         target_dir = _get_global_presets_dir()
     else:
         if not project_id:
@@ -947,6 +974,8 @@ def delete_preset(preset_id):
         if os.path.isfile(fpath):
             os.remove(fpath)
             return jsonify({'message': '预设已删除'})
+    if current_user() and not current_user().is_admin:
+        return jsonify({'error': '只有管理员可以删除公共预设'}), 403
     fpath = os.path.join(_get_global_presets_dir(), f'{preset_id}.json')
     if os.path.isfile(fpath):
         os.remove(fpath)
@@ -1653,7 +1682,7 @@ def wes_preflight(pid):
         project_dir=Config.project_dir(pid),
         workflow_key=workflow_key,
         require_files=bool(payload.get('check_files', True)),
-        source_roots=Config.wes_source_roots(),
+        source_roots=Config.wes_request_source_roots(pid),
         content_checks=bool(payload.get('check_content', False)),
         full_fastq_integrity=bool(payload.get('full_fastq_integrity', False)),
     )

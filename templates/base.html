@@ -29,8 +29,11 @@
                 </div>
                 <div class="system-status" id="system-status">
                     <span id="sys-info">读取系统状态…</span>
-                    {% if config.PLATFORM_ACCESS_PASSWORD %}
-                    <a class="nav-link" href="{{ url_for('platform_logout') }}">退出</a>
+                    {% if config.AUTH_REQUIRED %}
+                    <span class="nav-link">{{ signed_in_user.username if signed_in_user else "" }}</span>
+                    <form method="post" action="{{ url_for('platform_logout') }}" class="d-inline">
+                        <button type="submit" class="nav-link btn btn-link">退出</button>
+                    </form>
                     {% endif %}
                 </div>
             </div>

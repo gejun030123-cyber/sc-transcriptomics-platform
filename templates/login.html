@@ -22,12 +22,14 @@
     <main class="card">
         <div class="eyebrow">Research intelligence</div>
         <h1>oelab agent</h1>
-        <p>请输入实验室访问密码以进入研究工作空间。</p>
+        <p>请使用个人账号进入研究工作空间。</p>
         {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
         <form method="post" autocomplete="off">
             <input type="hidden" name="next" value="{{ next_path }}">
-            <label for="password">访问密码</label>
-            <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+            <label for="username">用户名</label>
+            <input id="username" name="username" autocomplete="username" required autofocus>
+            <label for="password">密码</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" required>
             <button type="submit">进入平台</button>
         </form>
     </main>

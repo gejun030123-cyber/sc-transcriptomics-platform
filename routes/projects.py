@@ -3,6 +3,7 @@ import shutil
 from flask import Blueprint, render_template, request, redirect, url_for, flash
 from models import Project, AnalysisTask, ResultFile
 from config import Config
+from routes.auth import current_user
 from modules.schemas import MODULE_DISPLAY_MAP, STATUS_MAP
 
 projects_bp = Blueprint('projects', __name__)
@@ -14,7 +15,7 @@ def new():
         if not name:
             flash('请输入项目名称', 'danger')
             return redirect(url_for('projects.new'))
-        p = Project(name=name, description=request.form.get('description', ''))
+        p = Project(name=name, description=request.form.get('description', ''), owner_user_id=current_user().id if current_user() else None)
         proj_dir = Config.project_dir(p.id)
         for sub in ['uploads', 'intermediate', 'results', 'plots']:
             os.makedirs(os.path.join(proj_dir, sub), exist_ok=True)

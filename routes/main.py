@@ -2,6 +2,7 @@ import psutil
 import shutil
 from flask import Blueprint, redirect, render_template, url_for
 from models import Project
+from routes.auth import current_user
 from config import Config
 
 main_bp = Blueprint('main', __name__)
@@ -15,7 +16,7 @@ def index():
     project workspace by default; a no-project state keeps the same agent
     shell and guides the researcher to create that context first.
     """
-    projects = Project.get_all()
+    projects = Project.get_all(owner_user_id=current_user().id if current_user() else None)
     if projects:
         return redirect(url_for('workspace.index', pid=projects[0].id))
     return render_template('workspace_onboarding.html')
@@ -24,7 +25,7 @@ def index():
 @main_bp.route('/projects')
 def project_dashboard():
     """Project management remains available without competing with the AI home."""
-    projects = Project.get_all()
+    projects = Project.get_all(owner_user_id=current_user().id if current_user() else None)
     disk = shutil.disk_usage(Config.DATA_DIR)
     mem = psutil.virtual_memory()
     return render_template('index.html', projects=projects,

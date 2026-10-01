@@ -56,6 +56,22 @@ def store_capture_bed_upload(*, project_id, file_storage, capture_kit_id,
     if not safe_name or not lower_name.endswith(_ALLOWED_SUFFIXES):
         raise ValueError("只允许上传 .bed 或 .bed.gz 文件")
 
+    # A user-provided kit ID must not collide with another project's private
+    # catalog entry, including entries hidden by the request-scoped read filter.
+    from database import get_conn
+    conn = get_conn()
+    try:
+        collisions = conn.execute(
+            "SELECT metadata_json FROM reference_assets WHERE bundle_version GLOB ?",
+            (f'capture:{kit_id}:*',),
+        ).fetchall()
+    finally:
+        conn.close()
+    for row in collisions:
+        import json
+        owner = json.loads(row['metadata_json'] or '{}').get('uploaded_by_project')
+        if owner != project_id:
+            raise ValueError('capture_kit_id 已被公共资源或其他项目使用，请更换 ID')
     existing = get_capture_kit_profile(kit_id)
     if existing and str(existing.get("version") or "") != kit_version:
         raise ValueError("capture_kit_id 已存在但版本不同，请为新版本使用新的稳定 ID")

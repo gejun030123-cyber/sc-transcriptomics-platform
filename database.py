@@ -21,9 +21,22 @@ def get_conn():
 def init_db():
     db = get_conn()
     db.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            session_version INTEGER NOT NULL DEFAULT 0,
+            sc_source_roots_json TEXT NOT NULL DEFAULT '[]',
+            wes_source_roots_json TEXT NOT NULL DEFAULT '[]',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
+            owner_user_id TEXT REFERENCES users(id),
             description TEXT DEFAULT '',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -90,7 +103,23 @@ def init_db():
             value TEXT DEFAULT '',
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS user_ai_settings (
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            key TEXT NOT NULL,
+            value TEXT DEFAULT '',
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, key)
+        );
     """)
+    user_columns = {row['name'] for row in db.execute('PRAGMA table_info(users)')}
+    for column in ('sc_source_roots_json', 'wes_source_roots_json'):
+        if column not in user_columns:
+            db.execute(f"ALTER TABLE users ADD COLUMN {column} TEXT NOT NULL DEFAULT '[]'")
+    project_columns = {row['name'] for row in db.execute('PRAGMA table_info(projects)')}
+    if 'owner_user_id' not in project_columns:
+        db.execute('ALTER TABLE projects ADD COLUMN owner_user_id TEXT REFERENCES users(id)')
+    db.execute('CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_user_id)')
     db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_project ON analysis_tasks(project_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON analysis_tasks(status)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_result_files_task ON result_files(task_id)")

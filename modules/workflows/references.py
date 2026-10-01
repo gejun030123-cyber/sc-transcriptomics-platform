@@ -131,13 +131,36 @@ def _decode(row):
     return data
 
 
+def _visible_to_request(asset):
+    if not asset:
+        return False
+    owner_pid = (asset.get('metadata') or {}).get('uploaded_by_project')
+    if not owner_pid:
+        return True
+    try:
+        from flask import has_request_context, request
+        if not has_request_context():
+            return True
+        from routes.auth import current_user, project_is_owned
+        user = current_user()
+        if not user:
+            return True  # Existing non-authenticated unit tests.
+        requested_pid = (request.view_args or {}).get('pid')
+        if not requested_pid and request.endpoint in {'chat.chat_endpoint', 'chat.approve_tool'}:
+            requested_pid = (request.get_json(silent=True) or {}).get('project_id')
+        return bool(requested_pid == owner_pid and project_is_owned(owner_pid))
+    except RuntimeError:
+        return False
+
+
 def get_reference_asset(asset_id: str):
     conn = get_conn()
     try:
         row = conn.execute("SELECT * FROM reference_assets WHERE id=?", (asset_id,)).fetchone()
     finally:
         conn.close()
-    return _decode(row)
+    asset = _decode(row)
+    return asset if _visible_to_request(asset) else None
 
 
 def list_reference_assets(*, assembly: str = "", bundle_version: str = "",
@@ -162,7 +185,7 @@ def list_reference_assets(*, assembly: str = "", bundle_version: str = "",
         rows = conn.execute(query, tuple(params)).fetchall()
     finally:
         conn.close()
-    return [_decode(row) for row in rows]
+    return [asset for row in rows if _visible_to_request(asset := _decode(row))]
 
 
 def set_reference_asset_status(asset_id: str, status: str) -> Dict[str, Any]:

@@ -28,17 +28,35 @@ def _defaults() -> Dict[str, str]:
     }
 
 
-def _read_saved() -> Dict[str, str]:
+def _request_user_id():
+    try:
+        from flask import has_request_context
+        from routes.auth import current_user
+        if has_request_context():
+            user = current_user()
+            return user.id if user else None
+    except RuntimeError:
+        pass
+    return None
+
+
+def _read_saved(user_id=None) -> Dict[str, str]:
     """Read saved settings, returning an empty mapping when DB is unavailable."""
     try:
         from database import get_conn
 
         conn = get_conn()
         try:
-            rows = conn.execute(
-                "SELECT key, value FROM platform_settings WHERE key IN (?, ?, ?, ?)",
-                tuple(SETTING_KEYS.values()),
-            ).fetchall()
+            if user_id:
+                rows = conn.execute(
+                    "SELECT key, value FROM user_ai_settings WHERE user_id=? AND key IN (?, ?, ?, ?)",
+                    (user_id, *SETTING_KEYS.values()),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT key, value FROM platform_settings WHERE key IN (?, ?, ?, ?)",
+                    tuple(SETTING_KEYS.values()),
+                ).fetchall()
         finally:
             conn.close()
         reverse = {value: key for key, value in SETTING_KEYS.items()}
@@ -52,7 +70,11 @@ def _read_saved() -> Dict[str, str]:
 def get_effective_ai_config() -> Dict[str, str]:
     """Return the currently effective, non-secret AI configuration."""
     values = _defaults()
-    values.update(_read_saved())
+    user_id = _request_user_id()
+    if user_id:
+        values.update(_read_saved(user_id))
+    else:
+        values.update(_read_saved())
     return values
 
 
@@ -93,13 +115,21 @@ def save_ai_config(*, api_url: str, model: str, provider: str = "auto",
     from database import get_conn
 
     conn = get_conn()
+    user_id = _request_user_id()
     try:
         for name, value in values.items():
-            conn.execute(
-                "INSERT INTO platform_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
-                (SETTING_KEYS[name], value),
-            )
+            if user_id:
+                conn.execute(
+                    "INSERT INTO user_ai_settings (user_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
+                    (user_id, SETTING_KEYS[name], value),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO platform_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
+                    (SETTING_KEYS[name], value),
+                )
         conn.commit()
     finally:
         conn.close()
@@ -112,10 +142,17 @@ def reset_ai_config() -> Dict[str, str]:
 
     conn = get_conn()
     try:
-        conn.execute(
-            "DELETE FROM platform_settings WHERE key IN (?, ?, ?, ?)",
-            tuple(SETTING_KEYS.values()),
-        )
+        user_id = _request_user_id()
+        if user_id:
+            conn.execute(
+                "DELETE FROM user_ai_settings WHERE user_id=? AND key IN (?, ?, ?, ?)",
+                (user_id, *SETTING_KEYS.values()),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM platform_settings WHERE key IN (?, ?, ?, ?)",
+                tuple(SETTING_KEYS.values()),
+            )
         conn.commit()
     finally:
         conn.close()

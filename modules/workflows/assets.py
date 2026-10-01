@@ -39,7 +39,7 @@ def _resolve_asset_path(project_id: str, file_path: str,
     resolved = os.path.realpath(supplied)
     project_root = os.path.realpath(Config.project_dir(project_id))
     roots = [project_root]
-    roots.extend(os.path.realpath(root) for root in (source_roots or Config.wes_source_roots()))
+    roots.extend(os.path.realpath(root) for root in (source_roots or Config.wes_request_source_roots(project_id)))
     if not any(resolved == root or resolved.startswith(root + os.sep) for root in roots):
         raise ValueError("WES 资产路径不在项目目录或管理员配置的数据目录内")
     if not os.path.isfile(resolved):

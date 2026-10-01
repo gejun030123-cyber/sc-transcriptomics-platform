@@ -1,4 +1,5 @@
 import os
+import json
 import re
 import tempfile
 
@@ -53,9 +54,7 @@ class Config:
             return key
 
     SECRET_KEY = _load_secret.__func__()
-    # Optional shared access gate for controlled lab deployments.  Keep this
-    # empty for local development/tests; deployments exposed through a tunnel
-    # should set a strong value outside the repository (for example in .env).
+    # Legacy setting retained for older launch scripts; personal accounts are mandatory.
     PLATFORM_ACCESS_PASSWORD = os.environ.get('PLATFORM_ACCESS_PASSWORD', '')
     try:
         PLATFORM_ACCESS_SESSION_HOURS = max(
@@ -63,6 +62,8 @@ class Config:
         )
     except ValueError:
         PLATFORM_ACCESS_SESSION_HOURS = 12.0
+    AUTH_REQUIRED = True
+    TRUSTED_PROXY_HOPS = max(0, int(os.environ.get('TRUSTED_PROXY_HOPS', '0')))
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = 'Lax'
     SESSION_COOKIE_SECURE = os.environ.get(
@@ -369,6 +370,14 @@ class Config:
                       for root in roots)
         if not allowed:
             raise ValueError('服务器目录不在允许的 SC_BATCH_SOURCE_ROOTS 下')
+        from flask import has_request_context
+        if has_request_context():
+            from routes.auth import current_user
+            user = current_user()
+            if user:
+                grants = json.loads(user.sc_source_roots_json or '[]')
+                if not any(resolved == root or resolved.startswith(root + os.sep) for root in grants):
+                    raise ValueError('当前账号未获授权读取该单细胞服务器目录')
         if require_directory and not os.path.isdir(resolved):
             raise ValueError(f'服务器目录不存在或不是目录: {path}')
         return resolved
@@ -394,13 +403,30 @@ class Config:
         return tuple(roots)
 
     @classmethod
+    def wes_request_source_roots(cls, project_id):
+        """Roots allowed for this request's manifest and asset registration."""
+        from flask import has_request_context
+        if has_request_context():
+            from routes.auth import current_user
+            user = current_user()
+            if user:
+                configured = tuple(root for root in cls.wes_source_roots()
+                                   if root != os.path.realpath(cls.wes_upload_root()))
+                grants = [root for root in json.loads(user.wes_source_roots_json or '[]')
+                          if any(root == allowed or root.startswith(allowed + os.sep)
+                                 for allowed in configured)]
+                capture_root = os.path.join(cls.wes_upload_root(), 'projects', project_id)
+                return tuple(grants) + (capture_root,)
+        return cls.wes_source_roots()
+
+    @classmethod
     def wes_upload_root(cls):
         """Return the writable, platform-owned root for capture BED uploads."""
         configured = os.environ.get('WES_UPLOAD_ROOT', cls.WES_UPLOAD_ROOT).strip()
         return os.path.abspath(configured or os.path.join(cls.DATA_DIR, 'wes_uploads'))
 
     @classmethod
-    def validate_wes_source_path(cls, path, *, require_file=True):
+    def validate_wes_source_path(cls, path, *, require_file=True, trusted_reference=False):
         """Validate a read-only WES path under ``WES_SOURCE_ROOTS``."""
         if not path:
             raise ValueError('缺少 WES 服务器数据路径')
@@ -418,6 +444,14 @@ class Config:
             raise ValueError('WES 服务器数据不接受符号链接路径')
         if not any(resolved == root or resolved.startswith(root + os.sep) for root in roots):
             raise ValueError('WES 服务器路径不在允许的 WES_SOURCE_ROOTS 下')
+        from flask import has_request_context
+        if has_request_context() and not trusted_reference:
+            from routes.auth import current_user
+            user = current_user()
+            if user:
+                grants = json.loads(user.wes_source_roots_json or '[]')
+                if not any(resolved == root or resolved.startswith(root + os.sep) for root in grants):
+                    raise ValueError('当前账号未获授权读取该 WES 服务器目录')
         if require_file and not os.path.isfile(resolved):
             raise ValueError(f'WES 文件不存在或不是普通文件: {path}')
         return resolved
@@ -425,7 +459,7 @@ class Config:
     @classmethod
     def validate_wes_reference_path(cls, path, *, require_directory=False):
         """Validate one configured reference file/directory without following links."""
-        resolved = cls.validate_wes_source_path(path, require_file=False)
+        resolved = cls.validate_wes_source_path(path, require_file=False, trusted_reference=True)
         if require_directory:
             if not os.path.isdir(resolved):
                 raise ValueError(f'WES 参考资源不存在或不是目录: {path}')

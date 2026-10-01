@@ -42,15 +42,16 @@ def _development_reload_files():
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
+    if Config.TRUSTED_PROXY_HOPS:
+        from werkzeug.middleware.proxy_fix import ProxyFix
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=Config.TRUSTED_PROXY_HOPS, x_host=Config.TRUSTED_PROXY_HOPS)
 
     from routes.auth import register_platform_access_gate
     register_platform_access_gate(app)
 
-    cors_origins = os.environ.get('CORS_ORIGINS', '*')
-    if cors_origins == '*':
-        CORS(app)
-    else:
-        CORS(app, origins=cors_origins.split(','))
+    cors_origins = os.environ.get('CORS_ORIGINS', '').strip()
+    if cors_origins:
+        CORS(app, origins=[origin.strip() for origin in cors_origins.split(',') if origin.strip()], supports_credentials=False)
 
     init_db()
 

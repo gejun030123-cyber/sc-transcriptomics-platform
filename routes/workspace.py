@@ -10,6 +10,7 @@ from flask import Blueprint, render_template, redirect, url_for, flash
 
 from config import Config
 from models import Project
+from routes.auth import current_user
 from modules.schemas import MODULE_DISPLAY_MAP, STATUS_MAP
 
 
@@ -107,7 +108,7 @@ def index(pid):
     return render_template(
         "workspace.html",
         project=project,
-        all_projects=Project.get_all(),
+        all_projects=Project.get_all(owner_user_id=current_user().id if current_user() else None),
         uploads=_workspace_uploads(pid),
         recent_tasks=recent_tasks,
         assays=assays,

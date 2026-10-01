@@ -260,8 +260,7 @@ python app.py
 ```
 
 默认访问地址为 `http://localhost:5000`。`SECRET_KEY` 未设置时会在
-`instance/.secret_key` 自动生成；服务器若暴露到受控内网以外，必须在 `.env` 设置
-强 `PLATFORM_ACCESS_PASSWORD`，并通过 HTTPS / VPN 等受控入口访问。
+`instance/.secret_key` 自动生成。首次启动后在服务器上运行 `python manage_users.py create 管理员用户名 --admin --claim-existing` 创建账号并认领历史项目；如无历史项目，可省略 `--claim-existing`；若先创建了管理员，之后仍可运行 `python manage_users.py claim-existing 管理员用户名` 认领无主项目。再运行 `python manage_users.py create 用户名` 添加研究人员。任何账号如需读取服务器上的大型数据目录，先在 `.env` 设置 `SC_BATCH_SOURCE_ROOTS` / `WES_SOURCE_ROOTS`，再用 `python manage_users.py grant-source-root 用户名 sc|wes /受控目录` 授权；授权变动会要求用户重新登录。账号密码通过终端提示输入，不进入命令行历史。认领操作会在数据库旁创建 SQLite 备份；上线前仍需按实验室策略备份整个项目数据目录。跨网访问仍需 HTTPS / VPN 等受控入口；HTTPS 反向代理部署时设置 `PLATFORM_SESSION_COOKIE_SECURE=true`，并按可信代理层数设置 `TRUSTED_PROXY_HOPS`。
 
 `requirements.txt` 已包括以下 Python 包；安装成功不等于其所需的本地参考也已具备：
 
@@ -652,7 +651,7 @@ git ls-files --others --exclude-standard
 | `MIN_FREE_RAM_GB` | `4` | 资源保护阈值 |
 | `CUDA_DEVICES` | `0,1` | GPU 设备配置 |
 | `SC_BATCH_SOURCE_ROOTS` | 空（关闭） | 可供网页只读批量导入的服务器数据根目录；Linux 多个根用 `:` 分隔，例如 `/home/oelab/data/GJ:/mnt/sc_data` |
-| `PLATFORM_ACCESS_PASSWORD` | 空 | 受控部署的共享访问门槛；公网/跨网访问必须设置并结合 HTTPS/VPN |
+| `PLATFORM_ACCESS_SESSION_HOURS` | `12` | 个人账号会话有效期；共享访问密码已停用 |
 | `AI_API_KEY` | 空 | AI API key |
 | `AI_API_URL` | 默认兼容 Anthropic 的 URL | AI API endpoint；DeepSeek 可用 `https://api.deepseek.com/anthropic` |
 | `AI_MODEL` | `mimo-v2.5-pro` | AI 模型名；DeepSeek 常用 `deepseek-chat` |
