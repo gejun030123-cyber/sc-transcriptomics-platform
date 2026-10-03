@@ -112,6 +112,20 @@ def init_db():
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, key)
         );
+
+        CREATE TABLE IF NOT EXISTS password_reset_requests (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            requested_at TEXT NOT NULL,
+            token_hash TEXT UNIQUE,
+            generated_at TEXT,
+            expires_at TEXT,
+            generated_by TEXT REFERENCES users(id),
+            used_at TEXT,
+            revoked_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_requests(user_id);
+        CREATE INDEX IF NOT EXISTS idx_password_reset_requested ON password_reset_requests(requested_at);
     """)
     user_columns = {row['name'] for row in db.execute('PRAGMA table_info(users)')}
     user_upgrades = {

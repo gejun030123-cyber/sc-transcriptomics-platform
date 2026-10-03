@@ -34,6 +34,7 @@
                         <input id="password" name="password" type="password" autocomplete="current-password" required>
                         <button class="button button-primary button-full" type="submit">登录平台 <span aria-hidden="true">→</span></button>
                     </form>
+                    <p class="popover-recovery"><a href="{{ url_for('accounts.forgot_password') }}">忘记密码？</a></p>
                     <p class="popover-bottom">还没有账号？<a href="{{ url_for('accounts.register', next=next_path) }}">立即注册</a></p>
                 </div>
             </details>

@@ -4,7 +4,8 @@
 <div class="container-xl py-4">
     <div class="mb-4">
         <h1 class="h3 mb-2">用户管理</h1>
-        <p class="text-muted mb-0">用户可自行注册并立即登录。这里可以直接创建普通账号、停用账号或重置密码。</p>
+        <p class="text-muted mb-2">用户可自行注册并立即登录。这里可以创建普通账号、停用账号或处理密码重置。</p>
+        <a class="btn btn-outline-primary btn-sm" href="{{ url_for('accounts.reset_requests') }}">密码重置申请{% if pending_reset_count %} <span class="badge text-bg-danger">{{ pending_reset_count }}</span>{% endif %}</a>
     </div>
     <section class="card shadow-sm mb-4">
         <div class="card-body">
@@ -38,7 +39,7 @@
                                 <form method="post" action="{{ url_for('accounts.set_user_active', user_id=user.id, action='disable' if user.is_active else 'enable') }}">
                                     <button class="btn btn-sm btn-outline-secondary" type="submit">{{ '停用' if user.is_active else '启用' }}</button>
                                 </form>
-                                <a class="btn btn-sm btn-outline-primary" href="{{ url_for('accounts.reset_user_password', user_id=user.id) }}">重置密码</a>
+                                <a class="btn btn-sm btn-outline-primary" href="{{ url_for('accounts.reset_user_password', user_id=user.id) }}">直接设置密码（应急）</a>
                             </div>
                             {% else %}—{% endif %}
                         </td>

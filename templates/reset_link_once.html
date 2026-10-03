@@ -1,0 +1,32 @@
+{% extends 'base.html' %}
+{% block title %}一次性重置链接{% endblock %}
+{% block content %}
+<div class="container py-5" style="max-width: 750px">
+    <div class="card shadow-sm"><div class="card-body p-4">
+        <h1 class="h4 mb-3">{{ username }} 的一次性重置链接</h1>
+        <p class="text-muted">请通过可信的实验室内部渠道交给本人。链接 30 分钟内有效，只能使用一次；离开本页后无法再次查看。</p>
+        <label class="form-label" for="reset-link">重置链接</label>
+        <div class="input-group mb-2"><input class="form-control" id="reset-link" type="text" readonly value="{{ url_for('accounts.reset_password') }}#{{ token }}"><button class="btn btn-primary" type="button" id="copy-reset-link">复制链接</button></div>
+        <p id="copy-status" class="small text-muted" role="status">有效期至 {{ expires_at[:16].replace('T', ' ') }} UTC。</p>
+        <a class="btn btn-outline-secondary" href="{{ url_for('accounts.reset_requests') }}">返回申请列表</a>
+    </div></div>
+</div>
+<script>
+    const resetLinkInput = document.getElementById('reset-link');
+    resetLinkInput.value = new URL(resetLinkInput.value, window.location.origin).href;
+    document.getElementById('copy-reset-link').addEventListener('click', async () => {
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(resetLinkInput.value);
+            } else {
+                resetLinkInput.select();
+                if (!document.execCommand('copy')) throw new Error('copy failed');
+            }
+            document.getElementById('copy-status').textContent = '已复制。请通过可信的内部渠道交给本人。';
+        } catch (error) {
+            resetLinkInput.select();
+            document.getElementById('copy-status').textContent = '无法自动复制，请手动复制选中的链接。';
+        }
+    });
+</script>
+{% endblock %}

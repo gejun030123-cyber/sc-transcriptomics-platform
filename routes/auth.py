@@ -138,7 +138,8 @@ def register_platform_access_gate(app):
             return None
         if request.endpoint == 'static':
             return None
-        if request.endpoint in {'platform_login', 'accounts.register'}:
+        if request.endpoint in {'platform_login', 'accounts.register',
+                                'accounts.forgot_password', 'accounts.reset_password'}:
             return None
         uid = session.get('user_id')
         user = User.get_by_id(uid) if uid else None

@@ -1,0 +1,41 @@
+{% extends 'base.html' %}
+{% block title %}密码重置申请{% endblock %}
+{% block content %}
+<div class="container-xl py-4">
+    <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
+        <div><h1 class="h3 mb-2">密码重置申请</h1><p class="text-muted mb-0">先通过实验室内部渠道核验本人，再生成链接。链接只显示一次，由管理员交给用户。</p></div>
+        <a class="btn btn-outline-primary" href="{{ url_for('accounts.users') }}">返回用户管理</a>
+    </div>
+    <div class="card shadow-sm"><div class="card-body"><div class="table-responsive">
+        <table class="table align-middle">
+            <thead><tr><th>账号</th><th>申请时间</th><th>状态</th><th>处理人 / 有效期</th><th>操作</th></tr></thead>
+            <tbody>
+            {% for item in requests %}
+            <tr>
+                <td><strong>{{ item.username }}</strong><br><small class="text-muted">{{ item.email or '未填写邮箱' }}</small></td>
+                <td>{{ item.requested_at[:16].replace('T', ' ') }} UTC</td>
+                <td>
+                    {% if item.status == 'pending' %}<span class="badge text-bg-warning">待核验</span>
+                    {% elif item.status == 'generated' %}<span class="badge text-bg-primary">链接已生成</span>
+                    {% elif item.status == 'used' %}<span class="badge text-bg-success">已使用</span>
+                    {% elif item.status == 'expired' %}<span class="badge text-bg-secondary">已过期</span>
+                    {% else %}<span class="badge text-bg-secondary">已作废</span>{% endif %}
+                </td>
+                <td>{% if item.generated_by_name %}{{ item.generated_by_name }}<br>{% endif %}{% if item.expires_at %}<small class="text-muted">至 {{ item.expires_at[:16].replace('T', ' ') }} UTC</small>{% else %}—{% endif %}</td>
+                <td>
+                    {% if item.status == 'pending' and item.is_active and not item.is_admin %}
+                    <div class="d-flex gap-2">
+                        <form method="post" action="{{ url_for('accounts.generate_reset_link', request_id=item.id) }}"><button class="btn btn-sm btn-primary" type="submit" onclick="return confirm('已通过实验室内部渠道核验本人？')">生成重置链接</button></form>
+                        <form method="post" action="{{ url_for('accounts.dismiss_reset_request', request_id=item.id) }}"><button class="btn btn-sm btn-outline-secondary" type="submit">忽略申请</button></form>
+                    </div>
+                    {% elif item.status == 'generated' %}
+                    <form method="post" action="{{ url_for('accounts.dismiss_reset_request', request_id=item.id) }}"><button class="btn btn-sm btn-outline-danger" type="submit">作废链接</button></form>
+                    {% else %}—{% endif %}
+                </td>
+            </tr>
+            {% else %}<tr><td colspan="5" class="text-muted">暂无重置申请。</td></tr>{% endfor %}
+            </tbody>
+        </table>
+    </div></div></div>
+</div>
+{% endblock %}

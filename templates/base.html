@@ -28,6 +28,7 @@
                     <a class="nav-link {% if request.path.startswith('/settings/ai') %}active{% endif %}" href="/settings/ai">AI 设置</a>
                     {% if signed_in_user and signed_in_user.is_admin %}
                     <a class="nav-link {% if request.path == '/admin/users' %}active{% endif %}" href="{{ url_for('accounts.users') }}">用户管理</a>
+                    <a class="nav-link {% if request.path.startswith('/admin/password-reset-requests') %}active{% endif %}" href="{{ url_for('accounts.reset_requests') }}">重置申请</a>
                     {% endif %}
                 </div>
                 <div class="system-status" id="system-status">
