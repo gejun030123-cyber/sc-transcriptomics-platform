@@ -25,11 +25,11 @@
                 <td>
                     {% if item.status == 'pending' and item.is_active and not item.is_admin %}
                     <div class="d-flex gap-2">
-                        <form method="post" action="{{ url_for('accounts.generate_reset_link', request_id=item.id) }}"><button class="btn btn-sm btn-primary" type="submit" onclick="return confirm('已通过实验室内部渠道核验本人？')">生成重置链接</button></form>
-                        <form method="post" action="{{ url_for('accounts.dismiss_reset_request', request_id=item.id) }}"><button class="btn btn-sm btn-outline-secondary" type="submit">忽略申请</button></form>
+                        <form method="post" action="{{ url_for('accounts.generate_reset_link', request_id=item.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-sm btn-primary" type="submit" onclick="return confirm('已通过实验室内部渠道核验本人？')">生成重置链接</button></form>
+                        <form method="post" action="{{ url_for('accounts.dismiss_reset_request', request_id=item.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-sm btn-outline-secondary" type="submit">忽略申请</button></form>
                     </div>
                     {% elif item.status == 'generated' %}
-                    <form method="post" action="{{ url_for('accounts.dismiss_reset_request', request_id=item.id) }}"><button class="btn btn-sm btn-outline-danger" type="submit">作废链接</button></form>
+                    <form method="post" action="{{ url_for('accounts.dismiss_reset_request', request_id=item.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-sm btn-outline-danger" type="submit">作废链接</button></form>
                     {% else %}—{% endif %}
                 </td>
             </tr>

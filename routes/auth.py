@@ -1,5 +1,6 @@
 """Account sessions and project ownership at the HTTP boundary."""
 import hmac
+import secrets
 import threading
 import time
 from datetime import timedelta
@@ -73,6 +74,25 @@ def _same_origin_write():
     )
 
 
+
+def _csrf_token():
+    """Return a session-bound CSRF token for sensitive HTML form writes."""
+    token = session.get('_csrf_token')
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session['_csrf_token'] = token
+    return token
+
+
+def _valid_csrf_token():
+    expected = session.get('_csrf_token', '')
+    supplied = request.form.get('csrf_token', '')
+    return bool(
+        expected
+        and supplied
+        and hmac.compare_digest(expected, supplied)
+    )
+
 def _project_for_path():
     """Recognize project paths, including the chat API and query based APIs."""
     values = request.view_args or {}
@@ -110,7 +130,10 @@ def register_platform_access_gate(app):
 
     @app.context_processor
     def account_context():
-        return {'signed_in_user': current_user()}
+        return {
+            'signed_in_user': current_user(),
+            'csrf_token': _csrf_token(),
+        }
 
     @app.route('/login', methods=['GET', 'POST'])
     def platform_login():
@@ -170,7 +193,15 @@ def register_platform_access_gate(app):
             return redirect(url_for('platform_login', next=request.full_path))
         g.current_user = user
         if request.method not in {'GET', 'HEAD', 'OPTIONS'} and not _same_origin_write():
-            abort(403)
+            csrf_fallback_endpoints = {
+                'accounts.generate_reset_link',
+                'accounts.dismiss_reset_request',
+            }
+            if (
+                request.endpoint not in csrf_fallback_endpoints
+                or not _valid_csrf_token()
+            ):
+                abort(403)
         pid = _project_for_path()
         if pid and not project_is_owned(pid):
             abort(404)
