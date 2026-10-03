@@ -33,16 +33,10 @@ button, summary { cursor: pointer; }
 .button-quiet:hover { background: #edf5fc; }
 .button-large { min-height: 50px; padding: 13px 22px; }
 .button-full { width: 100%; }
-.login-menu { position: relative; }
-.login-menu summary { list-style: none; }
-.login-menu summary::-webkit-details-marker { display: none; }
-.login-menu[open] > summary { background: #e8f2fc; }
-.login-popover { background: #fff; border: 1px solid #d5e3f0; border-radius: 18px; box-shadow: 0 25px 60px rgba(29,67,111,.19); padding: 25px; position: absolute; right: 0; top: 53px; width: min(365px, calc(100vw - 28px)); z-index: 30; }
-.popover-heading h2 { font-size: 1.22rem; letter-spacing: -.03em; margin: 6px 0 18px; }
-.login-popover label, .register-form label { display: block; font-size: .85rem; font-weight: 650; margin: 14px 0 6px; }
-.login-popover input, .register-form input { background: #fbfdff; border: 1px solid #cbd9e8; border-radius: 9px; color: var(--ink); min-height: 44px; padding: 10px 12px; width: 100%; }
-.login-popover input:focus, .register-form input:focus { border-color: #4693d0; outline: 3px solid #d8ebfa; }
-.login-popover form .button { margin-top: 20px; }
+.login-card label, .register-form label { display: block; font-size: .85rem; font-weight: 650; margin: 14px 0 6px; }
+.login-card input, .register-form input { background: #fbfdff; border: 1px solid #cbd9e8; border-radius: 9px; color: var(--ink); min-height: 44px; padding: 10px 12px; width: 100%; }
+.login-card input:focus, .register-form input:focus { border-color: #4693d0; outline: 3px solid #d8ebfa; }
+.login-card form .button { margin-top: 20px; }
 .popover-recovery { font-size: .82rem; margin: 12px 0 0; text-align: right; }
 .popover-recovery a { color: var(--blue); font-weight: 650; text-decoration: none; }
 .popover-bottom { color: var(--muted); font-size: .86rem; margin: 18px 0 0; text-align: center; }
@@ -133,6 +127,7 @@ button, summary { cursor: pointer; }
 .register-visual { background: #fff; border: 1px solid #deebf3; border-radius: 16px; margin-top: 28px; max-width: 480px; overflow: hidden; }
 .register-visual img { display: block; width: 100%; }
 .register-card { align-self: center; background: #fff; border: 1px solid #d8e6f1; border-radius: 18px; box-shadow: 0 22px 56px rgba(29,74,121,.1); padding: 34px; }
+.login-card { justify-self: center; max-width: 470px; width: 100%; }
 .register-card h2 { font-size: 1.45rem; letter-spacing: -.03em; margin: 7px 0; }
 .register-card > p { color: var(--muted); font-size: .86rem; line-height: 1.7; margin-bottom: 20px; }
 .register-form .button { margin-top: 24px; }
@@ -151,7 +146,6 @@ button, summary { cursor: pointer; }
     .site-nav { display: none; }
     .account-actions { gap: 6px; margin-left: auto; }
     .account-actions .button { min-height: 38px; padding: 9px 12px; }
-    .login-popover { right: -77px; top: 50px; }
     .hero { gap: 32px; grid-template-columns: 1fr; min-height: auto; padding-block: 62px 66px; }
     .hero-copy { padding: 0; }
     .hero h1 { font-size: clamp(2.6rem, 9vw, 4rem); }
@@ -174,7 +168,6 @@ button, summary { cursor: pointer; }
 @media (max-width: 480px) {
     .site-brand { font-size: 1rem; }
     .brand-symbol { height: 31px; width: 31px; }
-    .login-popover { position: fixed; right: 12px; top: 73px; width: calc(100vw - 24px); }
     .hero-highlights { gap: 9px 16px; }
     .preview-body { min-height: 270px; }
     .preview-status { display: none; }

@@ -8,41 +8,53 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/auth_landing.css') }}">
 </head>
 <body class="auth-page">
+    {% set show_login = error or request.args.get('next') or request.args.get('changed') == '1' or request.args.get('open') == '1' %}
     <header class="site-header">
         <a class="site-brand" href="{{ url_for('platform_login') }}" aria-label="oelab agent 首页">
             <span class="brand-symbol" aria-hidden="true">✦</span>
             <span>oelab <strong>agent</strong></span>
         </a>
         <nav class="site-nav" aria-label="页面导航">
-            <a href="#capabilities">平台能力</a>
-            <a href="#workflow">使用流程</a>
+            <a href="{{ url_for('platform_login') if show_login else '' }}#capabilities">平台能力</a>
+            <a href="{{ url_for('platform_login') if show_login else '' }}#workflow">使用流程</a>
         </nav>
         <div class="account-actions">
-            <details class="login-menu" {% if error or request.args.get('next') or request.args.get('changed') == '1' or request.args.get('open') == '1' %}open{% endif %}>
-                <summary class="button button-quiet">登录</summary>
-                <div class="login-popover">
-                    <div class="popover-heading">
-                        <div><span class="section-eyebrow">WELCOME BACK</span><h2>进入研究工作台</h2></div>
-                    </div>
-                    {% if request.args.get('changed') == '1' %}<p class="form-message" role="status">密码已更新，请重新登录。</p>{% endif %}
-                    {% if error %}<p class="form-message form-error" role="alert">{{ error }}</p>{% endif %}
-                    <form method="post" action="{{ url_for('platform_login') }}" autocomplete="off">
-                        <input type="hidden" name="next" value="{{ next_path }}">
-                        <label for="username">用户名或邮箱</label>
-                        <input id="username" name="username" autocomplete="username" required>
-                        <label for="password">密码</label>
-                        <input id="password" name="password" type="password" autocomplete="current-password" required>
-                        <button class="button button-primary button-full" type="submit">登录平台 <span aria-hidden="true">→</span></button>
-                    </form>
-                    <p class="popover-recovery"><a href="{{ url_for('accounts.forgot_password') }}">忘记密码？</a></p>
-                    <p class="popover-bottom">还没有账号？<a href="{{ url_for('accounts.register', next=next_path) }}">立即注册</a></p>
-                </div>
-            </details>
+            {% if show_login %}
+            <span class="button button-quiet" aria-current="page">登录</span>
+            {% else %}
+            <a class="button button-quiet" href="{{ url_for('platform_login', open=1) }}">登录</a>
+            {% endif %}
             <a class="button button-primary nav-register" href="{{ url_for('accounts.register', next=next_path) }}">注册</a>
         </div>
     </header>
 
     <main>
+        {% if show_login %}
+        <section class="register-main page-shell login-main" aria-labelledby="login-title">
+            <div class="register-intro">
+                <span class="eyebrow-pill"><span class="pulse-dot" aria-hidden="true"></span> 实验室科研分析工作台</span>
+                <h1 id="login-title">欢迎回来，<br><span>继续你的研究。</span></h1>
+                <p>登录后进入自己的项目空间，继续分析并查看任务与结果。</p>
+                <div class="register-visual"><img src="{{ url_for('static', filename='img/auth-umap.svg') }}" alt="合成单细胞分群示意图"></div>
+            </div>
+            <div class="register-card login-card">
+                <span class="section-eyebrow">WELCOME BACK</span>
+                <h2>进入研究工作台</h2>
+                {% if request.args.get('changed') == '1' %}<p class="form-message" role="status">密码已更新，请重新登录。</p>{% endif %}
+                {% if error %}<p class="form-message form-error" role="alert">{{ error }}</p>{% endif %}
+                <form method="post" action="{{ url_for('platform_login') }}" autocomplete="off">
+                    <input type="hidden" name="next" value="{{ next_path }}">
+                    <label for="username">用户名或邮箱</label>
+                    <input id="username" name="username" autocomplete="username" required autofocus>
+                    <label for="password">密码</label>
+                    <input id="password" name="password" type="password" autocomplete="current-password" required>
+                    <button class="button button-primary button-full" type="submit">登录平台 <span aria-hidden="true">→</span></button>
+                </form>
+                <p class="popover-recovery"><a href="{{ url_for('accounts.forgot_password') }}">忘记密码？</a></p>
+                <p class="popover-bottom">还没有账号？<a href="{{ url_for('accounts.register', next=next_path) }}">立即注册</a></p>
+            </div>
+        </section>
+        {% else %}
         <section class="hero page-shell" aria-labelledby="hero-title">
             <div class="hero-copy">
                 <div class="eyebrow-pill"><span class="pulse-dot" aria-hidden="true"></span> 实验室科研分析工作台</div>
@@ -87,6 +99,7 @@
         </div></section>
 
         <section class="closing-section page-shell"><div class="closing-panel"><div><span class="section-eyebrow">RESEARCH WORKSPACE</span><h2>让研究问题和分析证据保持在一起。</h2><p>每位用户拥有自己的项目空间；平台面向科研使用，分析与自动注释不作为临床诊断。</p></div><a class="button button-light" href="{{ url_for('accounts.register', next=next_path) }}">创建账号 <span aria-hidden="true">→</span></a></div></section>
+        {% endif %}
     </main>
     <footer class="site-footer page-shell"><span>© oelab agent · 实验室科研分析平台</span><span>科研用途 · 项目数据按账号隔离</span></footer>
 </body>

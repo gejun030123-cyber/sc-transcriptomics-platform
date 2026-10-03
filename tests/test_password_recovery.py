@@ -90,6 +90,40 @@ def test_recovery_request_is_generic_and_admin_only(recovery_app):
                          headers={'Origin': 'https://other.example'}).status_code == 403
 
 
+
+def test_recovery_submit_behind_https_proxy_accepts_browser_same_origin(recovery_app):
+    app, _, user = recovery_app
+    client = app.test_client()
+    response = client.post(
+        '/forgot-password', base_url='http://internal.local',
+        data={'identifier': user.username},
+        headers={'Origin': 'https://research.example', 'Sec-Fetch-Site': 'same-origin'},
+    )
+    assert response.status_code == 200
+    assert '申请已提交' in response.get_data(as_text=True)
+    assert pending_id()
+    blocked = client.post(
+        '/forgot-password', base_url='http://internal.local',
+        data={'identifier': user.username},
+        headers={'Origin': 'https://other.example', 'Sec-Fetch-Site': 'cross-site'},
+    )
+    assert blocked.status_code == 403
+
+
+def test_login_uses_full_page_instead_of_popover(recovery_app):
+    app, _, _ = recovery_app
+    client = app.test_client()
+    landing = client.get('/login').get_data(as_text=True)
+    assert '平台能力' in landing
+    assert 'login-popover' not in landing
+    assert '/login?open=1' in landing
+    login_page = client.get('/login?open=1').get_data(as_text=True)
+    assert '进入研究工作台' in login_page
+    assert 'name="password"' in login_page
+    assert 'login-popover' not in login_page
+    assert '从输入数据到结果解读' not in login_page
+
+
 def test_one_use_link_resets_password_and_invalidates_sessions(recovery_app):
     app, admin, user = recovery_app
     applicant = app.test_client()
