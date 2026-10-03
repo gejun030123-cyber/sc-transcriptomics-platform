@@ -31,6 +31,35 @@ def _no_store(response):
     return response
 
 
+def _public_form_origin_ok():
+    """Origin check for public account-recovery forms.
+
+    Normal browsers must pass the regular same-origin check.
+    Some embedded browsers/WebViews send ``Origin: null`` and no Referer or
+    Sec-Fetch-Site. These recovery endpoints are public, rate-limited, do not
+    reveal account existence, and actual password reset requires a secret
+    one-time token, so that browser behavior is accepted here only.
+    """
+    origin = request.headers.get('Origin')
+    referer = request.headers.get('Referer')
+
+    # A real Origin/Referer must pass the normal same-origin check.
+    # Embedded WebViews may literally send: Origin: null
+    if origin and origin.strip().lower() != 'null':
+        return _same_origin_write()
+
+    if referer:
+        return _same_origin_write()
+
+    fetch_site = request.headers.get('Sec-Fetch-Site')
+    if fetch_site:
+        return fetch_site in {'same-origin', 'none'}
+
+    # Compatibility for embedded browsers such as WeChat WebView:
+    # Origin: null / no Referer / no Sec-Fetch-Site.
+    return True
+
+
 def _create_form_user():
     username = request.form.get('username', '').strip()
     email = request.form.get('email', '').strip()
@@ -225,7 +254,7 @@ def change_password():
 def forgot_password():
     """Accept a request without revealing whether the identifier exists."""
     if request.method == 'POST':
-        if not _same_origin_write():
+        if not _public_form_origin_ok():
             abort(403)
         if request.content_length and request.content_length > 4096:
             abort(413)
@@ -360,7 +389,7 @@ def reset_password():
     if request.method == 'GET':
         return _no_store(make_response(render_template(
             'reset_password.html', done=request.args.get('done') == '1')))
-    if not _same_origin_write():
+    if not _public_form_origin_ok():
         abort(403)
     if request.content_length and request.content_length > 4096:
         abort(413)

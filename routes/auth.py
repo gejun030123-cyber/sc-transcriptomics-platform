@@ -46,16 +46,31 @@ def project_is_owned(pid):
 
 
 def _same_origin_write():
-    # Browser Fetch Metadata remains accurate when a TLS proxy changes Flask's
-    # visible scheme or host. Keep the Origin/Referer fallback for older clients.
-    fetch_site = request.headers.get('Sec-Fetch-Site', '').lower()
-    if fetch_site:
-        return fetch_site == 'same-origin'
     origin = request.headers.get('Origin') or request.headers.get('Referer')
-    if origin:
-        parsed = urlsplit(origin)
-        return parsed.scheme == request.scheme and parsed.netloc == request.host
-    return request.headers.get('Sec-Fetch-Site') == 'same-origin'
+
+    if not origin:
+        return request.headers.get('Sec-Fetch-Site') == 'same-origin'
+
+    parsed = urlsplit(origin)
+
+    scheme = request.scheme
+    host = request.host
+
+    # The public request reaches Flask through the trusted local nginx proxy.
+    # Compare Origin against the browser-facing host/protocol, not 127.0.0.1:8000.
+    if Config.TRUSTED_PROXY_HOPS:
+        forwarded_proto = request.headers.get('X-Forwarded-Proto', '')
+        forwarded_host = request.headers.get('X-Forwarded-Host', '')
+
+        if forwarded_proto:
+            scheme = forwarded_proto.split(',')[0].strip()
+        if forwarded_host:
+            host = forwarded_host.split(',')[0].strip()
+
+    return (
+        parsed.scheme.lower() == scheme.lower()
+        and parsed.netloc.lower() == host.lower()
+    )
 
 
 def _project_for_path():
