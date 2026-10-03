@@ -3,37 +3,90 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>访问验证 · oelab agent</title>
-    <style>
-        :root { color-scheme: light; font-family: Inter, "Avenir Next", "PingFang SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-        body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: radial-gradient(circle at 10% 8%, #d9ebff, transparent 27rem), linear-gradient(135deg, #edf4fb, #f7fafc); color: #10213c; }
-        .card { width: min(420px, calc(100% - 40px)); box-sizing: border-box; padding: 34px; background: rgba(255,255,255,.9); border: 1px solid rgba(202,218,236,.9); border-radius: 19px; box-shadow: 0 22px 55px rgba(19, 56, 105, .13); }
-        .eyebrow { color: #2362ae; font-size: .68rem; font-weight: 750; letter-spacing: .13em; margin-bottom: 11px; text-transform: uppercase; }
-        h1 { letter-spacing: -.035em; margin: 0 0 8px; color: #10213c; font-size: 1.55rem; }
-        p { color: #6b7b93; font-size: .88rem; line-height: 1.65; }
-        label { display: block; margin: 24px 0 7px; font-size: .86rem; font-weight: 650; }
-        input { width: 100%; box-sizing: border-box; padding: 11px 12px; border: 1px solid #cdd9e9; border-radius: 9px; font-size: 1rem; }
-        input:focus { outline: 3px solid rgba(38, 111, 209, .12); border-color: #4e8edf; }
-        button { width: 100%; margin-top: 21px; padding: 11px; border: 0; border-radius: 9px; background: linear-gradient(135deg, #1c5bc2, #123e93); box-shadow: 0 8px 17px rgba(23,78,166,.2); color: #fff; font-size: .9rem; font-weight: 650; cursor: pointer; }
-        .error { padding: 10px 12px; border-radius: 8px; background: #e8f1fc; color: #174a8b; }
-    </style>
+    <meta name="description" content="oelab agent 是面向实验室研究人员的组学分析工作台，支持单细胞、Bulk RNA-seq、项目管理与 AI 协作。">
+    <title>oelab agent · 实验室科研分析平台</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/auth_landing.css') }}">
 </head>
-<body>
-    <main class="card">
-        <div class="eyebrow">Research intelligence</div>
-        <h1>oelab agent</h1>
-        <p>请使用个人账号进入研究工作空间。</p>
-        {% if request.args.get("changed") == "1" %}<div class="error" role="status">密码已更新，请重新登录。</div>{% endif %}
-        {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
-        <form method="post" autocomplete="off">
-            <input type="hidden" name="next" value="{{ next_path }}">
-            <label for="username">用户名或邮箱</label>
-            <input id="username" name="username" autocomplete="username" required autofocus>
-            <label for="password">密码</label>
-            <input id="password" name="password" type="password" autocomplete="current-password" required>
-            <button type="submit">进入平台</button>
-        </form>
-        <p style="text-align:center;margin-bottom:0"><a href="{{ url_for('accounts.register') }}">注册新账号</a></p>
+<body class="auth-page">
+    <header class="site-header">
+        <a class="site-brand" href="{{ url_for('platform_login') }}" aria-label="oelab agent 首页">
+            <span class="brand-symbol" aria-hidden="true">✦</span>
+            <span>oelab <strong>agent</strong></span>
+        </a>
+        <nav class="site-nav" aria-label="页面导航">
+            <a href="#capabilities">平台能力</a>
+            <a href="#workflow">使用流程</a>
+        </nav>
+        <div class="account-actions">
+            <details class="login-menu" {% if error or request.args.get('next') or request.args.get('changed') == '1' or request.args.get('open') == '1' %}open{% endif %}>
+                <summary class="button button-quiet">登录</summary>
+                <div class="login-popover">
+                    <div class="popover-heading">
+                        <div><span class="section-eyebrow">WELCOME BACK</span><h2>进入研究工作台</h2></div>
+                    </div>
+                    {% if request.args.get('changed') == '1' %}<p class="form-message" role="status">密码已更新，请重新登录。</p>{% endif %}
+                    {% if error %}<p class="form-message form-error" role="alert">{{ error }}</p>{% endif %}
+                    <form method="post" action="{{ url_for('platform_login') }}" autocomplete="off">
+                        <input type="hidden" name="next" value="{{ next_path }}">
+                        <label for="username">用户名或邮箱</label>
+                        <input id="username" name="username" autocomplete="username" required>
+                        <label for="password">密码</label>
+                        <input id="password" name="password" type="password" autocomplete="current-password" required>
+                        <button class="button button-primary button-full" type="submit">登录平台 <span aria-hidden="true">→</span></button>
+                    </form>
+                    <p class="popover-bottom">还没有账号？<a href="{{ url_for('accounts.register', next=next_path) }}">立即注册</a></p>
+                </div>
+            </details>
+            <a class="button button-primary nav-register" href="{{ url_for('accounts.register', next=next_path) }}">注册</a>
+        </div>
+    </header>
+
+    <main>
+        <section class="hero page-shell" aria-labelledby="hero-title">
+            <div class="hero-copy">
+                <div class="eyebrow-pill"><span class="pulse-dot" aria-hidden="true"></span> 实验室科研分析工作台</div>
+                <h1 id="hero-title">让组学数据分析<br><span>清晰、可追溯。</span></h1>
+                <p class="hero-lead">在同一个项目中组织单细胞与 Bulk RNA-seq 分析，查看任务和结果，并让 AI 协助梳理下一步研究思路。</p>
+                <div class="hero-actions">
+                    <a class="button button-primary button-large" href="#capabilities">了解平台能力 <span aria-hidden="true">↗</span></a>
+                    <span class="hero-note">为实验室科研流程设计</span>
+                </div>
+                <div class="hero-highlights" aria-label="平台要点">
+                    <span>模块化分析</span><span>结果可追溯</span><span>个人项目空间</span>
+                </div>
+            </div>
+            <div class="workspace-preview" aria-label="使用合成示例数据绘制的分析工作台示意图">
+                <div class="preview-window-bar"><div class="window-dots" aria-hidden="true"><i></i><i></i><i></i></div><span>研究项目 / 分析概览</span><span class="preview-state">示意数据</span></div>
+                <div class="preview-body">
+                    <div class="preview-sidebar" aria-hidden="true"><span class="side-line side-wide"></span><span class="side-line"></span><span class="side-line"></span><span class="side-line side-short"></span></div>
+                    <div class="preview-content">
+                        <div class="preview-header"><div><small>PROJECT OVERVIEW</small><strong>多组学研究空间</strong></div><span class="preview-status">● 任务已完成</span></div>
+                        <div class="preview-grid">
+                            <div class="preview-chart"><div class="preview-chart-title"><span>细胞分群</span><small>UMAP</small></div><img src="{{ url_for('static', filename='img/auth-umap.svg') }}" alt="合成细胞分群图，五个不同颜色的细胞群"></div>
+                            <div class="preview-side"><div class="mini-stat"><small>分析模块</small><strong>单细胞 · Bulk RNA</strong></div><div class="mini-stat"><small>分析阶段</small><strong>质控 → 结果解读</strong></div><div class="mini-progress"><span>任务进度</span><div><i></i></div><small>步骤与结果可回看</small></div></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="capabilities" class="capabilities-section page-shell" aria-labelledby="capabilities-title">
+            <div class="section-heading"><span class="section-eyebrow">WHAT YOU CAN DO</span><h2 id="capabilities-title">从输入数据到结果解读，放在一个工作空间。</h2><p>面向研究人员的日常分析任务，把步骤、图表和记录连接起来；WES 外显子组工作流可在配置所需工具与参考资源后启用。</p></div>
+            <div class="capability-grid">
+                <article class="capability-card"><div class="card-number">01 / SINGLE CELL</div><div class="card-image"><img src="{{ url_for('static', filename='img/auth-umap.svg') }}" alt="合成单细胞 UMAP 分群示意图" loading="lazy"></div><h3>单细胞转录组</h3><p>从质控、整合、分群到注释与差异分析，按模块检查结果并推进研究。</p></article>
+                <article class="capability-card"><div class="card-number">02 / BULK RNA-SEQ</div><div class="card-image"><img src="{{ url_for('static', filename='img/auth-volcano.svg') }}" alt="合成差异表达火山图示意图" loading="lazy"></div><h3>Bulk RNA-seq</h3><p>管理样本与比较设计，运行差异分析，查看可重新绘制的科研图表。</p></article>
+                <article class="capability-card"><div class="card-number">03 / AI COLLABORATION</div><div class="card-image card-image-chat"><div class="chat-line chat-user">这一步的质控结果怎么看？</div><div class="chat-line chat-agent"><span>AI 助手</span>先检查样本级指标，再结合项目结果判断下一步分析。</div></div><h3>AI 协作与追踪</h3><p>围绕当前项目查看状态、讨论参数建议，保留任务记录与结果来源。</p></article>
+            </div>
+            <p class="example-note">图表与对话均为示意内容，不对应真实研究样本。</p>
+        </section>
+
+        <section id="workflow" class="workflow-section" aria-labelledby="workflow-title"><div class="page-shell">
+            <div class="section-heading"><span class="section-eyebrow">HOW IT WORKS</span><h2 id="workflow-title">四步进入研究流程</h2><p>每一步都留在自己的项目空间中，便于继续分析与回看。</p></div>
+            <ol class="workflow-grid"><li><span>01</span><h3>创建项目</h3><p>为一个课题建立独立的研究空间。</p></li><li><span>02</span><h3>上传数据</h3><p>导入单细胞或 Bulk 数据并核对样本信息。</p></li><li><span>03</span><h3>运行分析</h3><p>选择模块、检查参数并追踪后台任务。</p></li><li><span>04</span><h3>查看结果</h3><p>回看图表、统计结果与分析记录。</p></li></ol>
+        </div></section>
+
+        <section class="closing-section page-shell"><div class="closing-panel"><div><span class="section-eyebrow">RESEARCH WORKSPACE</span><h2>让研究问题和分析证据保持在一起。</h2><p>每位用户拥有自己的项目空间；平台面向科研使用，分析与自动注释不作为临床诊断。</p></div><a class="button button-light" href="{{ url_for('accounts.register', next=next_path) }}">创建账号 <span aria-hidden="true">→</span></a></div></section>
     </main>
+    <footer class="site-footer page-shell"><span>© oelab agent · 实验室科研分析平台</span><span>科研用途 · 项目数据按账号隔离</span></footer>
 </body>
 </html>
